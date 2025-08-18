@@ -93,7 +93,7 @@ M0 establishes correctness with SDPA-only paths (batched prefill, masked varlen 
 - [x] FA‑2 dense batching wrapper and varlen wrapper stub implemented; decode path falls back to SDPA on unsupported devices, preserving parity.
 - [ ] Flags and wiring in `nsa_attention.py`:
   - [x] Global `NSA_USE_FA2`, `NSA_FORCE_PARITY` gates.
-  - [ ] Branch toggles `NSA_USE_FA2_WIN`/`NSA_USE_FA2_CMP` and config `runtime.use_flash`.
+  - [x] Branch toggles `NSA_USE_FA2_WIN`/`NSA_USE_FA2_CMP` integrated; config `runtime.use_flash` remains advisory.
 - [ ] Parity tests (FA‑2 vs SDPA) for sliding/compressed (small grids), MAE thresholds; xfail device/head_dim unsupported.
 - [x] Added decode FA‑2 parity tests (CPU falls back); kept opt‑in gating via `NSA_TEST_FA2`.
 - [ ] Determinism and packing tests (row vs bucket equivalence within tolerance); document any non‑determinism on GPU.

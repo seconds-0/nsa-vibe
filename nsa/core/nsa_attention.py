@@ -224,13 +224,16 @@ class NSAAttention(nn.Module):
                 K_w = kv.K_win[:, :, kv.K_win.shape[2] - win_len : kv.K_win.shape[2], :]
                 V_w = kv.V_win[:, :, kv.V_win.shape[2] - win_len : kv.V_win.shape[2], :]
                 force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
-                use_flash = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes") and not force_parity
-                if use_flash:
+                fa2_all = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes")
+                fa2_win = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
+                fa2_cmp = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
+                use_flash = (fa2_all or fa2_win or fa2_cmp) and not force_parity
+                if use_flash and (fa2_all or fa2_win):
                     O_win = sliding_window_attention_fa2_decode(Q_t, kv.K_win, kv.V_win, self.w)
                 else:
                     O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
                 S_cmp_t = kv.K_cmp.shape[2]
-                if use_flash:
+                if use_flash and (fa2_all or fa2_cmp):
                     O_cmp = compressed_attention_fa2_decode(Q_t, kv.K_cmp, kv.V_cmp, S_cmp_t)
                 else:
                     O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)

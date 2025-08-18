@@ -14,11 +14,15 @@ def is_flash_available() -> bool:
 
 def is_flash_varlen_available() -> bool:
 	try:
-		# Placeholder probe for varlen API; adjust when integrating
+		# Probe alternative varlen entrypoints across FA-2 versions
 		from flash_attn import flash_attn_varlen_qkvpacked_func  # type: ignore
 		return True
 	except Exception:
-		return False
+		try:
+			from flash_attn import flash_attn_varlen_func  # type: ignore
+			return True
+		except Exception:
+			return False
 
 
 def fa2_supported(device: torch.device, dtype: torch.dtype, head_dim: int) -> bool:
@@ -126,5 +130,11 @@ def attention_fa2_varlen(
 			dropout_p=0.0, softmax_scale=None, causal=causal,
 		)
 	except Exception:
-		raise NotImplementedError("FA-2 varlen API not available; caller should fallback")
+		try:
+			from flash_attn import flash_attn_varlen_qkvpacked_func  # type: ignore
+			# If only QKV-packed exists, pack into QKV with zeros for bias
+			# We build qkv as [total_kv, 3, h, D*] but function expects specific layout; fall back to dense if unknown.
+			raise NotImplementedError
+		except Exception:
+			raise NotImplementedError("FA-2 varlen API not available; caller should fallback")
 
