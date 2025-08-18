@@ -342,11 +342,64 @@ def sliding_window_attention_fa2(
     # Capability check
     if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
         return sliding_window_attention_masked(Q, K, V, w)
-    # Attempt FA-2 per-bucket. Prefer varlen when available; else dense. Fallback to masked SDPA on error.
+    # Attempt FA-2 across all rows using varlen first, then dense per-bucket. Fallback to masked SDPA on error.
     try:
         B, S, G, h, Dk = Q.shape
         Dv = V.shape[-1]
         use_timing = os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes")
+        # Log histogram of lengths
+        if buckets:
+            uniq, counts = torch.unique(lengths, return_counts=True)
+            log("fa2.win.hist", uniq=uniq.tolist(), counts=counts.tolist())
+        # Try a single varlen call across all rows
+        if is_flash_varlen_available():
+            rows = []
+            len_rows = []
+            for t in range(S):
+                L = int(lengths[t].item())
+                for b in range(B):
+                    for g in range(G):
+                        rows.append((b, t, g))
+                        len_rows.append(L)
+            N = len(rows)
+            if N > 0 and max_len >= 1:
+                q_pack = torch.empty((N, h, Dk), dtype=Q.dtype, device=Q.device)
+                total_k = int(sum(len_rows))
+                k_pack = torch.empty((total_k, h, Dk), dtype=K.dtype, device=K.device)
+                v_pack = torch.empty((total_k, h, Dv), dtype=V.dtype, device=V.device)
+                cuq = torch.arange(0, N + 1, dtype=torch.int32, device=Q.device)
+                lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
+                cuk = torch.empty((N + 1,), dtype=torch.int32, device=Q.device)
+                torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
+                # Fill packs
+                write_pos = 0
+                for i, (b, t, g) in enumerate(rows):
+                    L = len_rows[i]
+                    q_pack[i] = Q[b, t, g]
+                    if L > 0:
+                        start = max(0, (t + 1) - w)
+                        end = t + 1
+                        seg_k = K[b, g, start:end]  # [L,Dk]
+                        seg_v = V[b, g, start:end]  # [L,Dv]
+                        k_pack[write_pos:write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
+                        v_pack[write_pos:write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
+                        write_pos += L
+                if use_timing:
+                    t0 = time.perf_counter()
+                o_pack = attention_fa2_varlen(
+                    q_pack, k_pack, v_pack,
+                    cuq, cuk,
+                    max_seqlen_q=1, max_seqlen_k=max_len,
+                    causal=True,
+                )  # [N,h,Dv]
+                if use_timing:
+                    dt = (time.perf_counter() - t0) * 1e3
+                    log("fa2.win.varlen_all", N=int(N), total_k=int(total_k), ms=dt)
+                # Scatter back
+                out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
+                for i, (b, t, g) in enumerate(rows):
+                    out[b, t, g] = o_pack[i]
+                return out
         out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
         for idx in buckets:
             if idx.numel() == 0:
@@ -444,6 +497,55 @@ def compressed_attention_fa2(
     try:
         Dv = V_cmp.shape[-1]
         use_timing = os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes")
+        # Log histogram of lengths
+        if buckets:
+            uniq, counts = torch.unique(num_cmp, return_counts=True)
+            log("fa2.cmp.hist", uniq=uniq.tolist(), counts=counts.tolist())
+        # Try single varlen across all rows with L>0
+        if is_flash_varlen_available() and max_len >= 1:
+            rows = []
+            len_rows = []
+            for t in range(S):
+                L = int(num_cmp[t].item())
+                for b in range(B):
+                    for g in range(G):
+                        if L > 0:
+                            rows.append((b, t, g))
+                            len_rows.append(L)
+            N = len(rows)
+            if N > 0:
+                q_pack = torch.empty((N, h, Dk), dtype=Q.dtype, device=Q.device)
+                total_k = int(sum(len_rows))
+                k_pack = torch.empty((total_k, h, Dk), dtype=K_cmp.dtype, device=K_cmp.device)
+                v_pack = torch.empty((total_k, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
+                cuq = torch.arange(0, N + 1, dtype=torch.int32, device=Q.device)
+                lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
+                cuk = torch.empty((N + 1,), dtype=torch.int32, device=Q.device)
+                torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
+                write_pos = 0
+                for i, (b, t, g) in enumerate(rows):
+                    L = len_rows[i]
+                    q_pack[i] = Q[b, t, g]
+                    seg_k = K_cmp[b, g, :L]
+                    seg_v = V_cmp[b, g, :L]
+                    k_pack[write_pos:write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
+                    v_pack[write_pos:write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
+                    write_pos += L
+                if use_timing:
+                    t0 = time.perf_counter()
+                o_pack = attention_fa2_varlen(
+                    q_pack, k_pack, v_pack,
+                    cuq, cuk,
+                    max_seqlen_q=1, max_seqlen_k=max_len,
+                    causal=True,
+                )  # [N,h,Dv]
+                if use_timing:
+                    dt = (time.perf_counter() - t0) * 1e3
+                    log("fa2.cmp.varlen_all", N=int(N), total_k=int(total_k), ms=dt)
+                out = torch.zeros((B, S, G, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
+                for i, (b, t, g) in enumerate(rows):
+                    out[b, t, g] = o_pack[i]
+                return out
         out = torch.zeros((B, S, G, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
         for idx in buckets:
             if idx.numel() == 0:
