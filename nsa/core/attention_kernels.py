@@ -347,12 +347,14 @@ def sliding_window_attention_fa2(
         B, S, G, h, Dk = Q.shape
         Dv = V.shape[-1]
         use_timing = os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes")
+        force_varlen = _env_bool("NSA_FA2_FORCE_VARLEN", False)
+        force_dense = _env_bool("NSA_FA2_FORCE_DENSE", False)
         # Log histogram of lengths
         if buckets:
             uniq, counts = torch.unique(lengths, return_counts=True)
             log("fa2.win.hist", uniq=uniq.tolist(), counts=counts.tolist())
         # Try a single varlen call across all rows
-        if is_flash_varlen_available():
+        if ((is_flash_varlen_available() and not force_dense) or force_varlen):
             rows = []
             len_rows = []
             for t in range(S):
@@ -425,7 +427,7 @@ def sliding_window_attention_fa2(
             Qb = torch.stack(rows_q, dim=0)  # [N,h,Dk]
             Kb = torch.stack(rows_k, dim=0)  # [N,L,Dk]
             Vb = torch.stack(rows_v, dim=0)  # [N,L,Dv]
-            if is_flash_varlen_available():
+            if is_flash_varlen_available() and not force_dense:
                 # Pack varlen (constant L here, but use API for generality)
                 q_pack = Qb  # [N,h,Dk]
                 k_pack = Kb.reshape(N * L, Dk).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dk)
@@ -502,7 +504,9 @@ def compressed_attention_fa2(
             uniq, counts = torch.unique(num_cmp, return_counts=True)
             log("fa2.cmp.hist", uniq=uniq.tolist(), counts=counts.tolist())
         # Try single varlen across all rows with L>0
-        if is_flash_varlen_available() and max_len >= 1:
+        force_varlen = _env_bool("NSA_FA2_FORCE_VARLEN", False)
+        force_dense = _env_bool("NSA_FA2_FORCE_DENSE", False)
+        if ((is_flash_varlen_available() and not force_dense) or force_varlen) and max_len >= 1:
             rows = []
             len_rows = []
             for t in range(S):
@@ -570,7 +574,7 @@ def compressed_attention_fa2(
             Qb = torch.stack(rows_q, dim=0)  # [N,h,Dk]
             Kb = torch.stack(rows_k, dim=0)  # [N,L,Dk]
             Vb = torch.stack(rows_v, dim=0)  # [N,L,Dv]
-            if is_flash_varlen_available():
+            if is_flash_varlen_available() and not force_dense:
                 q_pack = Qb
                 k_pack = Kb.reshape(N * L, Dk).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dk)
                 v_pack = Vb.reshape(N * L, Dv).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dv)
