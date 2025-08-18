@@ -335,8 +335,47 @@ def sliding_window_attention_fa2(
     # Capability check
     if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
         return sliding_window_attention_masked(Q, K, V, w)
-    # Placeholder: until FA-2 wiring, use masked SDPA
-    return sliding_window_attention_masked(Q, K, V, w)
+    # Attempt dense FA-2 per-bucket with query len=1 rows (fallback on any error)
+    try:
+        from flash_attn import flash_attn_func  # type: ignore
+        B, S, G, h, Dk = Q.shape
+        Dv = V.shape[-1]
+        out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
+        for idx in buckets:
+            if idx.numel() == 0:
+                continue
+            L = int(lengths[idx[0]].item())
+            rows_q = []
+            rows_k = []
+            rows_v = []
+            tgt = []
+            for t in idx.tolist():
+                start = max(0, (t + 1) - w)
+                end = t + 1
+                for b in range(B):
+                    for g in range(G):
+                        q_bgh = Q[b, t, g]  # [h,Dk]
+                        k_seg = K[b, g, start:end]  # [L,Dk]
+                        v_seg = V[b, g, start:end]  # [L,Dv]
+                        # Expand K/V across heads
+                        k_b = k_seg.unsqueeze(1).expand(L, h, Dk)  # [L,h,Dk]
+                        v_b = v_seg.unsqueeze(1).expand(L, h, Dv)  # [L,h,Dv]
+                        rows_q.append(q_bgh.unsqueeze(0))           # [1,h,Dk]
+                        rows_k.append(k_b.unsqueeze(0))             # [1,L,h,Dk]
+                        rows_v.append(v_b.unsqueeze(0))             # [1,L,h,Dv]
+                        tgt.append((b, t, g))
+            if not rows_q:
+                continue
+            q_batch = torch.cat(rows_q, dim=0).unsqueeze(1)       # [N,1,h,Dk]
+            k_batch = torch.cat(rows_k, dim=0)                    # [N,L,h,Dk]
+            v_batch = torch.cat(rows_v, dim=0)                    # [N,L,h,Dv]
+            o_batch = flash_attn_func(q_batch, k_batch, v_batch, dropout_p=0.0, softmax_scale=None, causal=False)
+            # o_batch: [N,1,h,Dv]
+            for i, (b, t, g) in enumerate(tgt):
+                out[b, t, g] = o_batch[i, 0]
+        return out
+    except Exception:
+        return sliding_window_attention_masked(Q, K, V, w)
 
 
 def compressed_attention_fa2(
@@ -372,5 +411,40 @@ def compressed_attention_fa2(
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
-    # Placeholder: until FA-2 wiring, use masked SDPA
-    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+    try:
+        from flash_attn import flash_attn_func  # type: ignore
+        Dv = V_cmp.shape[-1]
+        out = torch.zeros((B, S, G, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
+        for idx in buckets:
+            if idx.numel() == 0:
+                continue
+            L = int(num_cmp[idx[0]].item())
+            rows_q = []
+            rows_k = []
+            rows_v = []
+            tgt = []
+            for t in idx.tolist():
+                if L <= 0:
+                    continue
+                for b in range(B):
+                    for g in range(G):
+                        q_bgh = Q[b, t, g]                  # [h,Dk]
+                        k_seg = K_cmp[b, g, :L]             # [L,Dk]
+                        v_seg = V_cmp[b, g, :L]             # [L,Dv]
+                        k_b = k_seg.unsqueeze(1).expand(L, h, Dk)
+                        v_b = v_seg.unsqueeze(1).expand(L, h, Dv)
+                        rows_q.append(q_bgh.unsqueeze(0))    # [1,h,Dk]
+                        rows_k.append(k_b.unsqueeze(0))      # [1,L,h,Dk]
+                        rows_v.append(v_b.unsqueeze(0))      # [1,L,h,Dv]
+                        tgt.append((b, t, g))
+            if not rows_q:
+                continue
+            q_batch = torch.cat(rows_q, dim=0).unsqueeze(1)       # [N,1,h,Dk]
+            k_batch = torch.cat(rows_k, dim=0)                    # [N,L,h,Dk]
+            v_batch = torch.cat(rows_v, dim=0)                    # [N,L,h,Dv]
+            o_batch = flash_attn_func(q_batch, k_batch, v_batch, dropout_p=0.0, softmax_scale=None, causal=False)
+            for i, (b, t, g) in enumerate(tgt):
+                out[b, t, g] = o_batch[i, 0]
+        return out
+    except Exception:
+        return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
