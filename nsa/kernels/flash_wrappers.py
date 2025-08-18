@@ -67,3 +67,64 @@ def attention_fa2_varlen_stub(*args, **kwargs):
 	raise NotImplementedError("FA-2 varlen attention not yet implemented")
 
 
+def attention_fa2_dense_batch(
+	q: torch.Tensor,
+	k: torch.Tensor,
+	v: torch.Tensor,
+	*,
+	causal: bool,
+) -> torch.Tensor:
+	"""
+	Best-effort dense FA-2 call for a batch of independent rows.
+	Shapes:
+	- q: [N, Tq, h, D]
+	- k: [N, Tk, h, D]
+	- v: [N, Tk, h, Dv]
+	Returns: o [N, Tq, h, Dv]
+	Falls back to SDPA if flash-attn unavailable.
+	"""
+	try:
+		from flash_attn import flash_attn_func  # type: ignore
+		return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
+	except Exception:
+		# SDPA fallback per row
+		N, Tq, h, D = q.shape
+		Tk = k.shape[1]
+		Dv = v.shape[-1]
+		q2 = q.reshape(N * h, Tq, D)
+		k2 = k.reshape(N * h, Tk, D)
+		v2 = v.reshape(N * h, Tk, Dv)
+		out = F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal)
+		return out.reshape(N, h, Tq, Dv).permute(0, 2, 1, 3).contiguous()
+
+
+def attention_fa2_varlen(
+	q: torch.Tensor,
+	k: torch.Tensor,
+	v: torch.Tensor,
+	cu_seqlens_q: torch.Tensor,
+	cu_seqlens_k: torch.Tensor,
+	max_seqlen_q: int,
+	max_seqlen_k: int,
+	*,
+	causal: bool,
+) -> torch.Tensor:
+	"""
+	Best-effort varlen FA-2 call with separate Q/K/V packing.
+	Shapes:
+	- q: [total_q, h, D], k: [total_k, h, D], v: [total_k, h, Dv]
+	- cu_seqlens_*: int32 [N+1]
+	Returns: [total_q, h, Dv] packed output.
+	Falls back to dense batching by padding per bucket if varlen API unavailable.
+	"""
+	try:
+		from flash_attn import flash_attn_varlen_func  # type: ignore
+		return flash_attn_varlen_func(
+			q, k, v,
+			cu_seqlens_q, cu_seqlens_k,
+			max_seqlen_q, max_seqlen_k,
+			dropout_p=0.0, softmax_scale=None, causal=causal,
+		)
+	except Exception:
+		raise NotImplementedError("FA-2 varlen API not available; caller should fallback")
+

@@ -16,3 +16,5 @@ runtime:
   use_flash: false
   use_triton_sel: false
   compile_cmp_win: false
+  fa2_min_len_win: 16
+  fa2_min_len_cmp: 16

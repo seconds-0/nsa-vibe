@@ -2,7 +2,13 @@ import os
 import torch
 import torch.nn.functional as F
 from nsa.core.debug import log
-from nsa.kernels.flash_wrappers import attention_bgh, fa2_supported, is_flash_varlen_available
+from nsa.kernels.flash_wrappers import (
+    attention_bgh,
+    fa2_supported,
+    is_flash_varlen_available,
+    attention_fa2_dense_batch,
+    attention_fa2_varlen,
+)
 from nsa.core.packing import (
     compute_sliding_lengths,
     compute_compressed_lengths,
@@ -335,9 +341,8 @@ def sliding_window_attention_fa2(
     # Capability check
     if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
         return sliding_window_attention_masked(Q, K, V, w)
-    # Attempt dense FA-2 per-bucket with query len=1 rows (fallback on any error)
+    # Attempt FA-2 per-bucket. Prefer varlen when available; else dense. Fallback to masked SDPA on error.
     try:
-        from flash_attn import flash_attn_func  # type: ignore
         B, S, G, h, Dk = Q.shape
         Dv = V.shape[-1]
         out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
@@ -345,34 +350,47 @@ def sliding_window_attention_fa2(
             if idx.numel() == 0:
                 continue
             L = int(lengths[idx[0]].item())
-            rows_q = []
-            rows_k = []
-            rows_v = []
+            # Collect rows for this bucket
+            rows_q = []  # [N,h,Dk]
+            rows_k = []  # [N,L,Dk]
+            rows_v = []  # [N,L,Dv]
             tgt = []
             for t in idx.tolist():
                 start = max(0, (t + 1) - w)
                 end = t + 1
                 for b in range(B):
                     for g in range(G):
-                        q_bgh = Q[b, t, g]  # [h,Dk]
-                        k_seg = K[b, g, start:end]  # [L,Dk]
-                        v_seg = V[b, g, start:end]  # [L,Dv]
-                        # Expand K/V across heads
-                        k_b = k_seg.unsqueeze(1).expand(L, h, Dk)  # [L,h,Dk]
-                        v_b = v_seg.unsqueeze(1).expand(L, h, Dv)  # [L,h,Dv]
-                        rows_q.append(q_bgh.unsqueeze(0))           # [1,h,Dk]
-                        rows_k.append(k_b.unsqueeze(0))             # [1,L,h,Dk]
-                        rows_v.append(v_b.unsqueeze(0))             # [1,L,h,Dv]
+                        rows_q.append(Q[b, t, g])
+                        rows_k.append(K[b, g, start:end])
+                        rows_v.append(V[b, g, start:end])
                         tgt.append((b, t, g))
             if not rows_q:
                 continue
-            q_batch = torch.cat(rows_q, dim=0).unsqueeze(1)       # [N,1,h,Dk]
-            k_batch = torch.cat(rows_k, dim=0)                    # [N,L,h,Dk]
-            v_batch = torch.cat(rows_v, dim=0)                    # [N,L,h,Dv]
-            o_batch = flash_attn_func(q_batch, k_batch, v_batch, dropout_p=0.0, softmax_scale=None, causal=False)
-            # o_batch: [N,1,h,Dv]
+            N = len(rows_q)
+            Qb = torch.stack(rows_q, dim=0)  # [N,h,Dk]
+            Kb = torch.stack(rows_k, dim=0)  # [N,L,Dk]
+            Vb = torch.stack(rows_v, dim=0)  # [N,L,Dv]
+            if is_flash_varlen_available():
+                # Pack varlen (constant L here, but use API for generality)
+                q_pack = Qb  # [N,h,Dk]
+                k_pack = Kb.reshape(N * L, Dk).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dk)
+                v_pack = Vb.reshape(N * L, Dv).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dv)
+                cuq = torch.arange(0, N + 1, device=Q.device, dtype=torch.int32)
+                cuk = torch.arange(0, (N + 1) * L, step=L, device=Q.device, dtype=torch.int32)
+                o_pack = attention_fa2_varlen(
+                    q_pack, k_pack, v_pack,
+                    cuq, cuk,
+                    max_seqlen_q=1, max_seqlen_k=L,
+                    causal=True,
+                )  # [N,h,Dv]
+                Ob = o_pack  # [N,h,Dv]
+            else:
+                q_rows = Qb.unsqueeze(1)  # [N,1,h,Dk]
+                k_rows = Kb.unsqueeze(2).expand(N, L, h, Dk)
+                v_rows = Vb.unsqueeze(2).expand(N, L, h, Dv)
+                Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)  # [N,h,Dv]
             for i, (b, t, g) in enumerate(tgt):
-                out[b, t, g] = o_batch[i, 0]
+                out[b, t, g] = Ob[i]
         return out
     except Exception:
         return sliding_window_attention_masked(Q, K, V, w)
@@ -412,39 +430,95 @@ def compressed_attention_fa2(
     if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     try:
-        from flash_attn import flash_attn_func  # type: ignore
         Dv = V_cmp.shape[-1]
         out = torch.zeros((B, S, G, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
         for idx in buckets:
             if idx.numel() == 0:
                 continue
             L = int(num_cmp[idx[0]].item())
-            rows_q = []
-            rows_k = []
-            rows_v = []
+            rows_q = []  # [N,h,Dk]
+            rows_k = []  # [N,L,Dk]
+            rows_v = []  # [N,L, Dv]
             tgt = []
             for t in idx.tolist():
                 if L <= 0:
                     continue
                 for b in range(B):
                     for g in range(G):
-                        q_bgh = Q[b, t, g]                  # [h,Dk]
-                        k_seg = K_cmp[b, g, :L]             # [L,Dk]
-                        v_seg = V_cmp[b, g, :L]             # [L,Dv]
-                        k_b = k_seg.unsqueeze(1).expand(L, h, Dk)
-                        v_b = v_seg.unsqueeze(1).expand(L, h, Dv)
-                        rows_q.append(q_bgh.unsqueeze(0))    # [1,h,Dk]
-                        rows_k.append(k_b.unsqueeze(0))      # [1,L,h,Dk]
-                        rows_v.append(v_b.unsqueeze(0))      # [1,L,h,Dv]
+                        rows_q.append(Q[b, t, g])
+                        rows_k.append(K_cmp[b, g, :L])
+                        rows_v.append(V_cmp[b, g, :L])
                         tgt.append((b, t, g))
             if not rows_q:
                 continue
-            q_batch = torch.cat(rows_q, dim=0).unsqueeze(1)       # [N,1,h,Dk]
-            k_batch = torch.cat(rows_k, dim=0)                    # [N,L,h,Dk]
-            v_batch = torch.cat(rows_v, dim=0)                    # [N,L,h,Dv]
-            o_batch = flash_attn_func(q_batch, k_batch, v_batch, dropout_p=0.0, softmax_scale=None, causal=False)
+            N = len(rows_q)
+            Qb = torch.stack(rows_q, dim=0)  # [N,h,Dk]
+            Kb = torch.stack(rows_k, dim=0)  # [N,L,Dk]
+            Vb = torch.stack(rows_v, dim=0)  # [N,L,Dv]
+            if is_flash_varlen_available():
+                q_pack = Qb
+                k_pack = Kb.reshape(N * L, Dk).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dk)
+                v_pack = Vb.reshape(N * L, Dv).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dv)
+                cuq = torch.arange(0, N + 1, device=Q.device, dtype=torch.int32)
+                cuk = torch.arange(0, (N + 1) * L, step=L, device=Q.device, dtype=torch.int32)
+                o_pack = attention_fa2_varlen(
+                    q_pack, k_pack, v_pack,
+                    cuq, cuk,
+                    max_seqlen_q=1, max_seqlen_k=L,
+                    causal=True,
+                )  # [N,h,Dv]
+                Ob = o_pack
+            else:
+                q_rows = Qb.unsqueeze(1)
+                k_rows = Kb.unsqueeze(2).expand(N, L, h, Dk)
+                v_rows = Vb.unsqueeze(2).expand(N, L, h, Dv)
+                Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)
             for i, (b, t, g) in enumerate(tgt):
-                out[b, t, g] = o_batch[i, 0]
+                out[b, t, g] = Ob[i]
         return out
     except Exception:
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+
+
+def sliding_window_attention_fa2_decode(q_t: torch.Tensor, K_win: torch.Tensor, V_win: torch.Tensor, w: int) -> torch.Tensor:
+    B, G, h, Dk = q_t.shape
+    end = K_win.shape[2]
+    win_len = min(w, end)
+    if win_len == 0:
+        return torch.zeros((B, G, h, V_win.shape[-1]), dtype=V_win.dtype, device=V_win.device)
+    # CPU or unsupported: direct SDPA for parity
+    if not fa2_supported(q_t.device, q_t.dtype, Dk):
+        start = end - win_len
+        return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
+    start = end - win_len
+    k = K_win[:, :, start:end]
+    v = V_win[:, :, start:end]
+    N = B * G
+    q_rows = q_t.reshape(N, h, Dk).unsqueeze(1)  # [N,1,h,Dk]
+    k_rows = k.reshape(N, win_len, Dk).unsqueeze(2).expand(N, win_len, h, Dk)
+    v_rows = v.reshape(N, win_len, v.shape[-1]).unsqueeze(2).expand(N, win_len, h, v.shape[-1])
+    try:
+        o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True)  # [N,1,h,Dv]
+        return o.squeeze(1).reshape(B, G, h, -1)
+    except Exception:
+        return attention_bgh(q_t, k, v, causal=True)
+
+
+def compressed_attention_fa2_decode(q_t: torch.Tensor, K_cmp: torch.Tensor, V_cmp: torch.Tensor, L: int) -> torch.Tensor:
+    if L <= 0:
+        B, G, h, _ = q_t.shape
+        return torch.zeros((B, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
+    B, G, h, Dk = q_t.shape
+    if not fa2_supported(q_t.device, q_t.dtype, Dk):
+        return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
+    k = K_cmp[:, :, :L]
+    v = V_cmp[:, :, :L]
+    N = B * G
+    q_rows = q_t.reshape(N, h, Dk).unsqueeze(1)
+    k_rows = k.reshape(N, L, Dk).unsqueeze(2).expand(N, L, h, Dk)
+    v_rows = v.reshape(N, L, v.shape[-1]).unsqueeze(2).expand(N, L, h, v.shape[-1])
+    try:
+        o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True)
+        return o.squeeze(1).reshape(B, G, h, -1)
+    except Exception:
+        return attention_bgh(q_t, k, v, causal=True)

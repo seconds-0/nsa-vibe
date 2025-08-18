@@ -26,6 +26,8 @@ from nsa.core.attention_kernels import (
     grouped_selection_attention_packed,
     grouped_selection_attention_masked,
     compressed_attention_fa2,
+    sliding_window_attention_fa2_decode,
+    compressed_attention_fa2_decode,
 )
 from nsa.core.selection_scorer import select_topn_ranges_batched
 from nsa.core.debug import log
@@ -221,9 +223,17 @@ class NSAAttention(nn.Module):
                 win_len = min(self.w, kv.K_win.shape[2])
                 K_w = kv.K_win[:, :, kv.K_win.shape[2] - win_len : kv.K_win.shape[2], :]
                 V_w = kv.V_win[:, :, kv.V_win.shape[2] - win_len : kv.V_win.shape[2], :]
-                O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
+                force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
+                use_flash = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes") and not force_parity
+                if use_flash:
+                    O_win = sliding_window_attention_fa2_decode(Q_t, kv.K_win, kv.V_win, self.w)
+                else:
+                    O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
                 S_cmp_t = kv.K_cmp.shape[2]
-                O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)
+                if use_flash:
+                    O_cmp = compressed_attention_fa2_decode(Q_t, kv.K_cmp, kv.V_cmp, S_cmp_t)
+                else:
+                    O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)
                 q_gp = Q_t.mean(dim=2)
                 gates = self.gate(q_gp, tau=self.gate_temp)
                 O = gates[..., 0:1] * O_cmp + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win
