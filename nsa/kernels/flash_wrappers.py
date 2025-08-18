@@ -87,6 +87,10 @@ def attention_fa2_dense_batch(
 	Returns: o [N, Tq, h, Dv]
 	Falls back to SDPA if flash-attn unavailable.
 	"""
+	# Ensure contiguous tensors for FA-2
+	q = q.contiguous()
+	k = k.contiguous()
+	v = v.contiguous()
 	try:
 		from flash_attn import flash_attn_func  # type: ignore
 		return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
@@ -121,6 +125,10 @@ def attention_fa2_varlen(
 	Returns: [total_q, h, Dv] packed output.
 	Falls back to dense batching by padding per bucket if varlen API unavailable.
 	"""
+	# Ensure contiguous tensors for FA-2
+	q = q.contiguous()
+	k = k.contiguous()
+	v = v.contiguous()
 	try:
 		from flash_attn import flash_attn_varlen_func  # type: ignore
 		return flash_attn_varlen_func(
@@ -130,11 +138,17 @@ def attention_fa2_varlen(
 			dropout_p=0.0, softmax_scale=None, causal=causal,
 		)
 	except Exception:
+		# Try KV-packed API variant
 		try:
-			from flash_attn import flash_attn_varlen_qkvpacked_func  # type: ignore
-			# If only QKV-packed exists, pack into QKV with zeros for bias
-			# We build qkv as [total_kv, 3, h, D*] but function expects specific layout; fall back to dense if unknown.
-			raise NotImplementedError
+			from flash_attn import flash_attn_varlen_kvpacked_func  # type: ignore
+			# Build KV packed as [total_k, 2, h, D]
+			kv_packed = torch.stack([k, v], dim=1).contiguous()
+			return flash_attn_varlen_kvpacked_func(
+				q, kv_packed,
+				cu_seqlens_q, cu_seqlens_k,
+				max_seqlen_q, max_seqlen_k,
+				dropout_p=0.0, softmax_scale=None, causal=causal,
+			)
 		except Exception:
 			raise NotImplementedError("FA-2 varlen API not available; caller should fallback")
 
