@@ -5,6 +5,8 @@ import torch
 from nsa.core.attention_kernels import (
     sliding_window_attention_masked,
     batched_causal_attention_compressed_masked,
+    sliding_window_attention_fa2,
+    compressed_attention_fa2,
 )
 from nsa.kernels.flash_wrappers import is_flash_available
 from nsa.kernels.flash_wrappers import attention_bgh
@@ -33,7 +35,7 @@ def test_sliding_parity_placeholder():
         end = t + 1
         start = max(0, end - w)
         out_ref[:, t] = attention_bgh(Q[:, t], K[:, :, start:end], V[:, :, start:end], causal=True)
-    out = sliding_window_attention_masked(Q, K, V, w)
+    out = sliding_window_attention_fa2(Q, K, V, w)
     assert (out - out_ref).abs().max().item() < 1e-6
 
 
@@ -52,7 +54,7 @@ def test_compressed_parity_placeholder():
         L = 0 if (t + 1) < l else min(((t + 1 - l) // d) + 1, S_cmp)
         if L > 0:
             out_ref[:, t] = attention_bgh(Q[:, t], K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
-    out = batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+    out = compressed_attention_fa2(Q, K_cmp, V_cmp, l, d)
     assert (out - out_ref).abs().max().item() < 1e-6
 
 

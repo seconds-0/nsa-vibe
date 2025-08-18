@@ -317,6 +317,11 @@ def sliding_window_attention_fa2(
     # Compute effective per-row window lengths and buckets
     lengths = compute_sliding_lengths(S, w, device)
     max_len = int(lengths.max().item()) if lengths.numel() > 0 else 0
+    # Allow override via env
+    try:
+        min_len_for_fa2 = int(os.getenv("NSA_FA2_MIN_LEN_WIN", str(min_len_for_fa2)))
+    except Exception:
+        pass
     buckets = build_length_buckets(lengths)
     if buckets:
         log("fa2.win.buckets", n=len(buckets), max_len=max_len)
@@ -353,6 +358,10 @@ def compressed_attention_fa2(
         return torch.zeros((B, S, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
     num_cmp = compute_compressed_lengths(S, l, d, S_cmp, device)
     max_len = int(num_cmp.max().item()) if num_cmp.numel() > 0 else 0
+    try:
+        min_len_for_fa2 = int(os.getenv("NSA_FA2_MIN_LEN_CMP", str(min_len_for_fa2)))
+    except Exception:
+        pass
     buckets = build_length_buckets(num_cmp)
     if buckets:
         log("fa2.cmp.buckets", n=len(buckets), max_len=max_len)
