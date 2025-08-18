@@ -1,0 +1,18 @@
+model:
+  dim: 2560
+  n_heads: 64
+  n_kv_groups: 4
+  d_k: 192
+  d_v: 128
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: "avg"
+runtime:
+  precision: "bf16"
+  use_flash: false
+  use_triton_sel: false
+  compile_cmp_win: false

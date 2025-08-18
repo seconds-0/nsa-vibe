@@ -1,0 +1,163 @@
+from typing import Tuple
+
+import torch
+import torch.nn.functional as F
+
+from .block_index import BlockMeta
+
+
+def compute_pcmp(Q: torch.Tensor, K_cmp: torch.Tensor, scale: float) -> torch.Tensor:
+    # Q: [G,h,Dk]; K_cmp: [B,G,S_cmp,Dk] with implicit B=1 for this path
+    if Q.dim() == 3:
+        G, h, Dk = Q.shape
+        S_cmp = K_cmp.shape[2]
+        q = Q.reshape(G * h, 1, Dk)
+        k = K_cmp.reshape(1 * G, S_cmp, Dk).repeat_interleave(h, dim=0)
+        logits = torch.bmm(q, k.transpose(1, 2)).squeeze(1) * scale
+        return F.softmax(logits, dim=-1).reshape(1, G, h, S_cmp)
+    else:
+        B, G, h, Dk = Q.shape
+        S_cmp = K_cmp.shape[2]
+        q = Q.reshape(B * G * h, 1, Dk)
+        k = K_cmp.reshape(B * G, S_cmp, Dk).repeat_interleave(h, dim=0)
+        logits = torch.bmm(q, k.transpose(1, 2)).squeeze(1) * scale
+        p = F.softmax(logits, dim=-1)
+        return p.reshape(B, G, h, S_cmp)
+
+
+def compute_pcmp_all(Q_all: torch.Tensor, K_cmp: torch.Tensor, scale: float) -> torch.Tensor:
+    """
+    Q_all: [B,S,G,h,Dk], K_cmp: [B,G,S_cmp,Dk] -> p_cmp_all: [B,S,G,h,S_cmp]
+    """
+    # Transpose K to align for einsum
+    Kt = K_cmp.permute(0, 1, 3, 2)  # [B,G,Dk,S_cmp]
+    # Use distinct subscript for compressed axis to avoid collision with token axis
+    logits = torch.einsum("bsghd,bgdc->bsghc", Q_all, Kt)  # [B,S,G,h,S_cmp]
+    logits = logits * scale
+    return F.softmax(logits, dim=-1)
+
+
+def map_pcmp_to_pslc(p_cmp: torch.Tensor, meta: BlockMeta) -> torch.Tensor:
+    # p_cmp: [B,G,h,S_cmp]
+    B, G, h, S_cmp = p_cmp.shape
+    indptr = meta.M_csl_indptr
+    indices = meta.M_csl_indices
+    values = meta.M_csl_values
+    S_sel = meta.sel_starts.numel()
+    device = p_cmp.device
+    p_slc = torch.zeros((B, G, h, S_sel), device=device, dtype=p_cmp.dtype)
+    # CSR row-wise multiply-add
+    for r in range(S_cmp):
+        start, end = int(indptr[r].item()), int(indptr[r + 1].item())
+        if start == end:
+            continue
+        cols = indices[start:end]
+        w = values[start:end].to(p_cmp.dtype)  # [nnz_r]
+        contrib = p_cmp[..., r].unsqueeze(-1) * w  # [B,G,h,nnz_r]
+        p_slc.index_add_(dim=-1, index=cols.to(device), source=contrib)
+    return p_slc
+
+
+def map_pcmp_to_pslc_batched(p_cmp_all: torch.Tensor, meta: BlockMeta) -> torch.Tensor:
+    """
+    p_cmp_all: [B,S,G,h,S_cmp] -> p_slc_all: [B,S,G,h,S_sel]
+    Vectorized over B,S,G,h while looping CSR rows over S_cmp.
+    """
+    B, S, G, h, S_cmp = p_cmp_all.shape
+    device = p_cmp_all.device
+    S_sel = meta.sel_starts.numel()
+    if S_cmp == 0:
+        return torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
+    # COO sparse matmul: for each nnz (r,c,w), add p_cmp[..., r]*w to p_slc[..., c]
+    rows, cols = meta.M_csl_coo_indices.to(device)
+    w = meta.M_csl_coo_values.to(device=device, dtype=p_cmp_all.dtype)
+    # Filter mapping rows to those < current S_cmp to avoid out-of-bounds in early decode
+    valid_mask = rows < S_cmp
+    if valid_mask.dim() == 0:
+        valid_mask = valid_mask.unsqueeze(0)
+    rows = rows[valid_mask]
+    cols = cols[valid_mask]
+    w = w[valid_mask]
+    if rows.numel() == 0:
+        return torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
+    p_src = p_cmp_all[..., rows] * w  # [B,S,G,h,nnz]
+    p_slc = torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
+    p_slc.index_add_(-1, cols, p_src)
+    return p_slc
+
+
+def group_reduce_pslc(p_slc: torch.Tensor) -> torch.Tensor:
+    # Sum across heads in group (Eq. 10)
+    return p_slc.sum(dim=2)
+
+
+def select_topn_ranges(
+    p_grp: torch.Tensor,
+    meta: BlockMeta,
+    n_top: int,
+    t_token: int,
+    force_init: bool = True,
+    force_local: int = 2,
+) -> torch.Tensor:
+    # p_grp: [B,G,S_sel]
+    B, G, S_sel = p_grp.shape
+    device = p_grp.device
+    # Determine candidate blocks ≤ t
+    sel_starts = meta.sel_starts.to(device)
+    # mask future blocks
+    valid = sel_starts + meta.l_sel - 1 <= t_token
+    masked = p_grp.masked_fill(~valid.view(1, 1, -1), float("-inf"))
+    # force-includes set
+    forced_list = []
+    if force_init:
+        forced_list.append(torch.zeros((B, G), dtype=torch.int64, device=device))
+    if force_local > 0:
+        last_block = torch.clamp((torch.tensor(t_token, device=device) // meta.l_sel), min=0)
+        for i in range(force_local):
+            forced_list.append(torch.clamp(last_block - i, min=0).expand(B, G))
+    forced_idx = torch.stack(forced_list, dim=-1) if forced_list else torch.empty((B, G, 0), device=device, dtype=torch.int64)
+    # Exclude forced from top-k candidates by setting their scores to -inf
+    if forced_idx.numel() > 0:
+        forced_mask = torch.zeros_like(masked, dtype=torch.bool)
+        forced_mask.scatter_(-1, forced_idx, True)
+        masked = masked.masked_fill(forced_mask, float("-inf"))
+    # pick remaining to fill up to n_top
+    k_rest = torch.clamp(torch.tensor(n_top - forced_idx.shape[-1], device=device), min=0).item()
+    if k_rest > 0:
+        _, top_idx = torch.topk(masked, k=min(k_rest, S_sel), dim=-1, largest=True, sorted=True)
+        sel_idx = torch.cat([forced_idx, top_idx], dim=-1)
+    else:
+        sel_idx = forced_idx
+    # sort selected indices ascending
+    sel_idx = torch.sort(sel_idx, dim=-1).values
+    # merge adjacent into contiguous ranges
+    ranges = []
+    for b in range(B):
+        bg = []
+        for g in range(G):
+            blocks = sel_starts[sel_idx[b, g]]  # [k]
+            blocks = torch.unique(blocks, sorted=True)
+            if blocks.numel() == 0:
+                bg.append(torch.zeros((n_top, 2), dtype=torch.int32, device=device))
+                continue
+            cur_s = int(blocks[0].item())
+            cur_e = cur_s + meta.l_sel
+            merged: list[Tuple[int, int]] = []
+            for x in blocks[1:].tolist():
+                if x == cur_e:  # adjacent
+                    cur_e += meta.l_sel
+                else:
+                    merged.append((cur_s, cur_e))
+                    cur_s, cur_e = x, x + meta.l_sel
+            merged.append((cur_s, cur_e))
+            # pad/truncate to n_top
+            out = torch.zeros((n_top, 2), dtype=torch.int32, device=device)
+            for i, (s, e) in enumerate(merged[:n_top]):
+                e = min(e, t_token + 1)
+                out[i, 0] = s
+                out[i, 1] = e
+            bg.append(out)
+        ranges.append(torch.stack(bg, dim=0))
+    return torch.stack(ranges, dim=0)  # [B,G,n_top,2]
+
+
