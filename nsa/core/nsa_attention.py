@@ -21,9 +21,11 @@ from nsa.kernels.flash_wrappers import attention_bgh
 from nsa.core.attention_kernels import (
     batched_causal_attention_compressed,
     sliding_window_attention,
+    sliding_window_attention_fa2,
     grouped_selection_attention,
     grouped_selection_attention_packed,
     grouped_selection_attention_masked,
+    compressed_attention_fa2,
 )
 from nsa.core.selection_scorer import select_topn_ranges_batched
 from nsa.core.debug import log
@@ -291,9 +293,11 @@ class NSAAttention(nn.Module):
 
         # Branch attentions in parallel (parity-first for cmp/win, with optional masked SDPA gates)
         force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
+        use_flash = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes") and not force_parity
         use_cmp_mask = os.getenv("NSA_USE_CMP_MASK", "1").lower() in ("1", "true", "yes") and not force_parity
-        if use_cmp_mask:
-            # Use masked SDPA implementation that matches truncation numerics
+        if use_flash:
+            O_cmp = compressed_attention_fa2(Q, kv.K_cmp, kv.V_cmp, self.l, self.d)
+        elif use_cmp_mask:
             from nsa.core.attention_kernels import batched_causal_attention_compressed_masked
             O_cmp = batched_causal_attention_compressed_masked(Q, kv.K_cmp, kv.V_cmp, self.l, self.d)
         else:
@@ -320,8 +324,9 @@ class NSAAttention(nn.Module):
         log("prefill.sel", O_sel=O_sel)
 
         use_win_mask = os.getenv("NSA_USE_WIN_MASK", "1").lower() in ("1", "true", "yes") and not force_parity
-        if use_win_mask:
-            # Use masked SDPA implementation that matches truncation numerics
+        if use_flash:
+            O_win = sliding_window_attention_fa2(Q, K_win, V_win, self.w)
+        elif use_win_mask:
             from nsa.core.attention_kernels import sliding_window_attention_masked
             O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
         else:

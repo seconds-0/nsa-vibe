@@ -1,7 +1,8 @@
+import os
 import torch
 import torch.nn.functional as F
 from nsa.core.debug import log
-from nsa.kernels.flash_wrappers import attention_bgh
+from nsa.kernels.flash_wrappers import attention_bgh, fa2_supported, is_flash_varlen_available
 
 
 def batched_causal_attention_compressed(
@@ -115,6 +116,7 @@ def sliding_window_attention_masked(
     # Row-packed masked SDPA that mirrors current per-token + is_causal semantics:
     # within the [start..t] window, only the first element (start) is attended.
     B, S, G, h, Dk = Q.shape
+    # Small-length auto-switch can be applied at the caller; leave here pure masked-SDPA
     if w <= 0 or K.shape[2] == 0:
         return torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=V.device)
     device = Q.device
@@ -285,3 +287,64 @@ def grouped_selection_attention_masked(
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     return Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
 
+
+# ===== FA-2 integration scaffolding (M1) =====
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name, "1" if default else "0").lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def sliding_window_attention_fa2(
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K: torch.Tensor,  # [B,G,S,Dk]
+    V: torch.Tensor,  # [B,G,S,Dv]
+    w: int,
+    min_len_for_fa2: int = 16,
+) -> torch.Tensor:
+    """
+    Planned FA-2 path for sliding with safe fallbacks.
+    Currently falls back to masked SDPA to preserve numerics until FA-2 is wired.
+    """
+    B, S, G, h, Dk = Q.shape
+    device = Q.device
+    # Compute effective per-row window lengths
+    tpos = torch.arange(S, device=device)
+    lengths = (tpos + 1).clamp_max(w)
+    max_len = int(lengths.max().item()) if lengths.numel() > 0 else 0
+    # Small-length auto-switch to masked SDPA
+    if max_len < min_len_for_fa2:
+        return sliding_window_attention_masked(Q, K, V, w)
+    # Capability check
+    if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
+        return sliding_window_attention_masked(Q, K, V, w)
+    # Placeholder: until FA-2 wiring, use masked SDPA
+    return sliding_window_attention_masked(Q, K, V, w)
+
+
+def compressed_attention_fa2(
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K_cmp: torch.Tensor,  # [B,G,S_cmp,Dk]
+    V_cmp: torch.Tensor,  # [B,G,S_cmp,Dv]
+    l: int,
+    d: int,
+    min_len_for_fa2: int = 16,
+) -> torch.Tensor:
+    """
+    Planned FA-2 path for compressed with safe fallbacks.
+    Currently falls back to masked SDPA to preserve numerics until FA-2 is wired.
+    """
+    B, S, G, h, Dk = Q.shape
+    device = Q.device
+    S_cmp = K_cmp.shape[2]
+    if S_cmp == 0:
+        return torch.zeros((B, S, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
+    tpos = torch.arange(S, device=device)
+    num_cmp = torch.where(tpos + 1 < l, 0, ((tpos + 1 - l) // d) + 1).clamp(min=0, max=S_cmp)
+    max_len = int(num_cmp.max().item()) if num_cmp.numel() > 0 else 0
+    if max_len < min_len_for_fa2:
+        return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+    if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
+        return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+    # Placeholder: until FA-2 wiring, use masked SDPA
+    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)

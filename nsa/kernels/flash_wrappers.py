@@ -21,6 +21,20 @@ def is_flash_varlen_available() -> bool:
 		return False
 
 
+def fa2_supported(device: torch.device, dtype: torch.dtype, head_dim: int) -> bool:
+	"""
+	Conservative support check for FA-2 paths.
+	- Require CUDA device
+	- Require head_dim multiple of 8 (typical constraint)
+	- Guard on availability import probe
+	"""
+	if device.type != "cuda":
+		return False
+	if head_dim % 8 != 0:
+		return False
+	return is_flash_available()
+
+
 def attention_bgh(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, causal: bool = True) -> torch.Tensor:
 	"""
 	Q: [B,G,h,Dk], K/V: [B,G,S,D*] -> out [B,G,h,Dv]
