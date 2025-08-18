@@ -3,6 +3,12 @@ import torch
 import torch.nn.functional as F
 from nsa.core.debug import log
 from nsa.kernels.flash_wrappers import attention_bgh, fa2_supported, is_flash_varlen_available
+from nsa.core.packing import (
+    compute_sliding_lengths,
+    compute_compressed_lengths,
+    build_length_buckets,
+    build_cu_seqlens_for_buckets,
+)
 
 
 def batched_causal_attention_compressed(
