@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import torch.nn.functional as F
 from nsa.core.debug import log
@@ -345,6 +346,7 @@ def sliding_window_attention_fa2(
     try:
         B, S, G, h, Dk = Q.shape
         Dv = V.shape[-1]
+        use_timing = os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes")
         out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
         for idx in buckets:
             if idx.numel() == 0:
@@ -377,18 +379,28 @@ def sliding_window_attention_fa2(
                 v_pack = Vb.reshape(N * L, Dv).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dv)
                 cuq = torch.arange(0, N + 1, device=Q.device, dtype=torch.int32)
                 cuk = torch.arange(0, (N + 1) * L, step=L, device=Q.device, dtype=torch.int32)
+                if use_timing:
+                    t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
                     q_pack, k_pack, v_pack,
                     cuq, cuk,
                     max_seqlen_q=1, max_seqlen_k=L,
                     causal=True,
                 )  # [N,h,Dv]
+                if use_timing:
+                    dt = (time.perf_counter() - t0) * 1e3
+                    log("fa2.win.bucket", path="varlen", L=L, N=int(N), ms=dt)
                 Ob = o_pack  # [N,h,Dv]
             else:
                 q_rows = Qb.unsqueeze(1)  # [N,1,h,Dk]
                 k_rows = Kb.unsqueeze(2).expand(N, L, h, Dk)
                 v_rows = Vb.unsqueeze(2).expand(N, L, h, Dv)
+                if use_timing:
+                    t0 = time.perf_counter()
                 Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)  # [N,h,Dv]
+                if use_timing:
+                    dt = (time.perf_counter() - t0) * 1e3
+                    log("fa2.win.bucket", path="dense", L=L, N=int(N), ms=dt)
             for i, (b, t, g) in enumerate(tgt):
                 out[b, t, g] = Ob[i]
         return out
@@ -431,6 +443,7 @@ def compressed_attention_fa2(
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     try:
         Dv = V_cmp.shape[-1]
+        use_timing = os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes")
         out = torch.zeros((B, S, G, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
         for idx in buckets:
             if idx.numel() == 0:
@@ -461,18 +474,28 @@ def compressed_attention_fa2(
                 v_pack = Vb.reshape(N * L, Dv).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dv)
                 cuq = torch.arange(0, N + 1, device=Q.device, dtype=torch.int32)
                 cuk = torch.arange(0, (N + 1) * L, step=L, device=Q.device, dtype=torch.int32)
+                if use_timing:
+                    t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
                     q_pack, k_pack, v_pack,
                     cuq, cuk,
                     max_seqlen_q=1, max_seqlen_k=L,
                     causal=True,
                 )  # [N,h,Dv]
+                if use_timing:
+                    dt = (time.perf_counter() - t0) * 1e3
+                    log("fa2.cmp.bucket", path="varlen", L=L, N=int(N), ms=dt)
                 Ob = o_pack
             else:
                 q_rows = Qb.unsqueeze(1)
                 k_rows = Kb.unsqueeze(2).expand(N, L, h, Dk)
                 v_rows = Vb.unsqueeze(2).expand(N, L, h, Dv)
+                if use_timing:
+                    t0 = time.perf_counter()
                 Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)
+                if use_timing:
+                    dt = (time.perf_counter() - t0) * 1e3
+                    log("fa2.cmp.bucket", path="dense", L=L, N=int(N), ms=dt)
             for i, (b, t, g) in enumerate(tgt):
                 out[b, t, g] = Ob[i]
         return out

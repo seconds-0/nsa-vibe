@@ -40,6 +40,25 @@ def test_sliding_parity_dense_bucket():
 
 
 @pytest.mark.skipif(not RUN_FA2, reason="FA-2 parity tests are opt-in; set NSA_TEST_FA2=1")
+def test_sliding_packing_equivalence():
+    # Row vs bucket equivalence under same kernel path
+    torch.manual_seed(3)
+    B, S, G, h, Dk, Dv, w = 1, 9, 1, 2, 8, 8, 4
+    Q = torch.randn(B, S, G, h, Dk)
+    K = torch.randn(B, G, S, Dk)
+    V = torch.randn(B, G, S, Dv)
+    # Row path: per-token reference
+    out_row = torch.zeros(B, S, G, h, Dv)
+    for t in range(S):
+        end = t + 1
+        start = max(0, end - w)
+        out_row[:, t] = attention_bgh(Q[:, t], K[:, :, start:end], V[:, :, start:end], causal=True)
+    # Bucket path using FA‑2 wrapper (falls back on CPU)
+    out_bucket = sliding_window_attention_fa2(Q, K, V, w)
+    assert (out_bucket - out_row).abs().max().item() < 1e-6
+
+
+@pytest.mark.skipif(not RUN_FA2, reason="FA-2 parity tests are opt-in; set NSA_TEST_FA2=1")
 def test_compressed_parity_dense_bucket():
     torch.manual_seed(1)
     B, S, G, h, Dk, Dv, l, d = 1, 8, 1, 2, 8, 8, 4, 2
