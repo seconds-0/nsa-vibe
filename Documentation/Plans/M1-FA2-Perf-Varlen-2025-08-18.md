@@ -83,17 +83,22 @@ M0 establishes correctness with SDPA-only paths (batched prefill, masked varlen 
 - CPU-only environments must pass tests using SDPA-only paths.
 
 ### Implementation Checklist
-- [ ] Capability gates in `flash_wrappers.py` (varlen, dense); device/dtype checks; errorless fallbacks.
-- [ ] Packing helpers: build buckets, allocate packed tensors, cu_seqlens, and offsets.
-- [ ] Sliding FA‑2 forward (prefill + decode) with varlen or dense fallback.
-- [ ] Compressed FA‑2 forward (prefill + decode) with varlen or dense fallback.
-- [ ] Flags and wiring in `nsa_attention.py` (runtime.use_flash, NSA_USE_FA2_*; preserve NSA_FORCE_PARITY short-circuit).
-- [ ] Parity tests (FA‑2 vs SDPA) for sliding/compressed (small grids), MAE thresholds.
-- [ ] Determinism/packing tests; document tolerance and non-determinism caveats if any.
-- [ ] Perf smokes (bench only); do not assert times in CI.
-- [ ] Docs: update PRD “M1” notes and `.cursor/rules/20-m0-execution.mdc` with FA‑2 toggles.
- - [ ] Small-length auto-switch: SDPA for very short windows/num_cmp; FA‑2 otherwise.
- - [ ] Optional: two-level bucketing + tiny-bucket merge; workspace reuse across iterations.
+- [x] Capability gates in `flash_wrappers.py` (varlen probe, dense probe); device/dtype checks via `fa2_supported`; errorless fallbacks.
+- [x] Packing helpers: build buckets and `cu_seqlens` (`nsa/core/packing.py`).
+- [x] Sliding FA‑2 forward — prefill path using dense FA‑2 per-bucket with try/except fallback to masked SDPA.
+  - [ ] Sliding FA‑2 — decode path (per-step packing + FA‑2 call; fallback to SDPA for tiny L). 
+- [x] Compressed FA‑2 forward — prefill path using dense FA‑2 per-bucket with try/except fallback to masked SDPA.
+  - [ ] Compressed FA‑2 — decode path (per-step `num_cmp(t)` packing + FA‑2 call; fallback to SDPA for tiny L).
+- [ ] Varlen FA‑2 wrappers: implement `flash_attn_varlen_*` calls (QKV‑packed or separate Q/K/V) with `cu_seqlens_{q,kv}`.
+- [ ] Flags and wiring in `nsa_attention.py`:
+  - [x] Global `NSA_USE_FA2`, `NSA_FORCE_PARITY` gates.
+  - [ ] Branch toggles `NSA_USE_FA2_WIN`/`NSA_USE_FA2_CMP` and config `runtime.use_flash`.
+- [ ] Parity tests (FA‑2 vs SDPA) for sliding/compressed (small grids), MAE thresholds; xfail device/head_dim unsupported.
+- [ ] Determinism and packing tests (row vs bucket equivalence within tolerance); document any non‑determinism on GPU.
+- [x] Perf smokes: `bench/bench_fa2.py` added; gated to skip on unsupported devices.
+- [x] Docs: PRD M1 notes and `.cursor/rules/20-m0-execution.mdc` updated with FA‑2 toggles and guidance.
+- [ ] Small-length auto‑switch thresholds exposed via config/env; enforce SDPA when below threshold.
+- [ ] Optional: two‑level bucketing + tiny‑bucket merge; workspace reuse across iterations.
 
 ### Verification Steps
 - Run default suite (CPU) → green.
@@ -113,7 +118,7 @@ M0 establishes correctness with SDPA-only paths (batched prefill, masked varlen 
 - Allow small numeric drift within tight FP32 tolerance.
 
 ### Status
-Not Started
+In Progress
 
 ### Notes
 - Keep `NSA_FORCE_PARITY=1` in CI until FA‑2 paths mature; `NSA_TEST_FA2=1` gates parity suite.
