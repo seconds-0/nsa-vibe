@@ -93,7 +93,7 @@ class NSAAttention(nn.Module):
         gate_hidden: Optional[int] = None,
         gate_temp: float = 1.0,
         rope_impl: str = "llama",
-        use_flash: bool = False,
+        use_flash: bool = True,
         use_triton_sel: bool = False,
     ) -> None:
         super().__init__()
@@ -123,6 +123,8 @@ class NSAAttention(nn.Module):
         self.W_V_cmp = nn.Linear(dim, n_kv_groups * d_v, bias=False)
         self.out = nn.Linear(n_heads * d_v, dim, bias=False)
         self.gate = GateMLP(d_k, gate_hidden)
+        # Default FA-2 usage (can be overridden by env flags)
+        self.use_flash_default = use_flash
 
     def _shape_q(self, Q: torch.Tensor, B: int, S: int) -> torch.Tensor:
         Q = Q.view(B, S, self.n_heads, self.d_k)
@@ -306,7 +308,10 @@ class NSAAttention(nn.Module):
 
         # Branch attentions in parallel (parity-first for cmp/win, with optional masked SDPA gates)
         force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
-        fa2_all = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes")
+        env_all = os.environ.get("NSA_USE_FA2")
+        fa2_all = (
+            (env_all.lower() in ("1", "true", "yes")) if env_all is not None else self.use_flash_default
+        )
         fa2_win = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
         fa2_cmp = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
         use_cmp_mask = os.getenv("NSA_USE_CMP_MASK", "1").lower() in ("1", "true", "yes") and not force_parity

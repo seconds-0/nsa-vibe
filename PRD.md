@@ -564,6 +564,7 @@ On CPU, FA‑2 paths are disabled; SDPA and masked/packed SDPA remain the refere
 - Record per-bucket timings for varlen/dense to guide threshold tuning (`NSA_FA2_MIN_LEN_WIN/CMP`).
 
 ## Determinism (GPU)
+- Default behavior (GPU): enable FA‑2 by default (`NSA_USE_FA2=1` via config), retain `NSA_FORCE_PARITY=1` to force SDPA reference when needed.
 - FA‑2 kernels may not be bitwise deterministic across runs. We enforce numeric proximity in tests (e.g., MAE ≤ 1e‑5 for repeat runs) and keep SDPA FP32 as oracle in CI.
 
 # On CPU or without Triton/FA‑2, selection falls back to SDPA gather; cmp/win use SDPA.
