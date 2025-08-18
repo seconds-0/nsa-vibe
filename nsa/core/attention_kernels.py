@@ -314,10 +314,16 @@ def sliding_window_attention_fa2(
     """
     B, S, G, h, Dk = Q.shape
     device = Q.device
-    # Compute effective per-row window lengths
-    tpos = torch.arange(S, device=device)
-    lengths = (tpos + 1).clamp_max(w)
+    # Compute effective per-row window lengths and buckets
+    lengths = compute_sliding_lengths(S, w, device)
     max_len = int(lengths.max().item()) if lengths.numel() > 0 else 0
+    buckets = build_length_buckets(lengths)
+    if buckets:
+        log("fa2.win.buckets", n=len(buckets), max_len=max_len)
+        # Build cu_seqlens per bucket (for future FA-2 varlen call)
+        for idx in buckets:
+            blens = lengths[idx]
+            _ = build_cu_seqlens_for_buckets(blens)
     # Small-length auto-switch to masked SDPA
     if max_len < min_len_for_fa2:
         return sliding_window_attention_masked(Q, K, V, w)
@@ -345,9 +351,14 @@ def compressed_attention_fa2(
     S_cmp = K_cmp.shape[2]
     if S_cmp == 0:
         return torch.zeros((B, S, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
-    tpos = torch.arange(S, device=device)
-    num_cmp = torch.where(tpos + 1 < l, 0, ((tpos + 1 - l) // d) + 1).clamp(min=0, max=S_cmp)
+    num_cmp = compute_compressed_lengths(S, l, d, S_cmp, device)
     max_len = int(num_cmp.max().item()) if num_cmp.numel() > 0 else 0
+    buckets = build_length_buckets(num_cmp)
+    if buckets:
+        log("fa2.cmp.buckets", n=len(buckets), max_len=max_len)
+        for idx in buckets:
+            blens = num_cmp[idx]
+            _ = build_cu_seqlens_for_buckets(blens)
     if max_len < min_len_for_fa2:
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
