@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+            python-version: '3.10'
+
+      - name: Install uv
+        run: |
+          pip install uv
+
+      - name: Create venv and install deps
+        run: |
+          uv venv -p 3.10 .venv
+          uv pip sync requirements.txt
+
+      - name: Lint (ruff)
+        run: |
+          ./.venv/bin/python -m ruff --version || true
+          ./.venv/bin/python -m ruff . || true
+
+      - name: Type check (mypy)
+        run: |
+          ./.venv/bin/python -m mypy --version || true
+          ./.venv/bin/python -m mypy nsa || true
+
+      - name: Run tests (CPU)
+        env:
+          NSA_PREFILL_BATCHED: '1'
+        run: |
+          ./.venv/bin/python -m pytest -q
+
+
