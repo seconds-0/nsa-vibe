@@ -557,6 +557,15 @@ uv run python bench/bench_decode.py  --config configs/base.yaml
 uv run python cli/demo_infer.py --config configs/base.yaml
 
 # CPU fallback
+On CPU, FA‑2 paths are disabled; SDPA and masked/packed SDPA remain the reference implementations. Parity tests run in SDPA-only mode by default. GPU opt‑in tests validate FA‑2 numerics within tight tolerances.
+
+## Observability (FA‑2)
+- Log bucket histograms (`fa2.win.hist`, `fa2.cmp.hist`) and kernel path (`varlen` vs `dense`) with `NSA_DEBUG_TIMING=1`.
+- Record per-bucket timings for varlen/dense to guide threshold tuning (`NSA_FA2_MIN_LEN_WIN/CMP`).
+
+## Determinism (GPU)
+- FA‑2 kernels may not be bitwise deterministic across runs. We enforce numeric proximity in tests (e.g., MAE ≤ 1e‑5 for repeat runs) and keep SDPA FP32 as oracle in CI.
+
 # On CPU or without Triton/FA‑2, selection falls back to SDPA gather; cmp/win use SDPA.
 
 20) Open Questions (tracked; default answers chosen)
