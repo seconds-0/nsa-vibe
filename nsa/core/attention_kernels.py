@@ -17,6 +17,47 @@ from nsa.core.packing import (
     build_cu_seqlens_for_buckets,
 )
 
+# Simple grow-on-demand workspaces for varlen packing to avoid frequent allocations
+_VARLEN_WS: dict[tuple, dict[str, torch.Tensor]] = {}
+
+
+def _get_varlen_workspace(
+    device: torch.device,
+    dtype_q: torch.dtype,
+    dtype_k: torch.dtype,
+    dtype_v: torch.dtype,
+    h: int,
+    d_k: int,
+    d_v: int,
+    cap_N: int,
+    cap_total_k: int,
+) -> dict[str, torch.Tensor]:
+    key = (str(device), dtype_q, dtype_k, dtype_v, h, d_k, d_v)
+    ws = _VARLEN_WS.get(key)
+    need_new = ws is None
+    if not need_new:
+        q, k, v = ws["q"], ws["k"], ws["v"]
+        cuq, cuk = ws["cuq"], ws["cuk"]
+        need_new = (
+            q.shape[0] < cap_N
+            or k.shape[0] < cap_total_k
+            or v.shape[0] < cap_total_k
+            or cuq.numel() < (cap_N + 1)
+            or cuk.numel() < (cap_N + 1)
+        )
+    if need_new:
+        new_N = max(cap_N, 1)
+        new_K = max(cap_total_k, 1)
+        ws = {
+            "q": torch.empty((new_N, h, d_k), dtype=dtype_q, device=device),
+            "k": torch.empty((new_K, h, d_k), dtype=dtype_k, device=device),
+            "v": torch.empty((new_K, h, d_v), dtype=dtype_v, device=device),
+            "cuq": torch.empty((new_N + 1,), dtype=torch.int32, device=device),
+            "cuk": torch.empty((new_N + 1,), dtype=torch.int32, device=device),
+        }
+        _VARLEN_WS[key] = ws
+    return ws
+
 
 def batched_causal_attention_compressed(
     Q: torch.Tensor,  # [B,S,G,h,Dk]
@@ -365,13 +406,14 @@ def sliding_window_attention_fa2(
                         len_rows.append(L)
             N = len(rows)
             if N > 0 and max_len >= 1:
-                q_pack = torch.empty((N, h, Dk), dtype=Q.dtype, device=Q.device)
                 total_k = int(sum(len_rows))
-                k_pack = torch.empty((total_k, h, Dk), dtype=K.dtype, device=K.device)
-                v_pack = torch.empty((total_k, h, Dv), dtype=V.dtype, device=V.device)
-                cuq = torch.arange(0, N + 1, dtype=torch.int32, device=Q.device)
+                ws = _get_varlen_workspace(Q.device, Q.dtype, K.dtype, V.dtype, h, Dk, Dv, N, total_k)
+                q_pack = ws["q"][:N]
+                k_pack = ws["k"][:total_k]
+                v_pack = ws["v"][:total_k]
+                cuq = ws["cuq"][: N + 1]
                 lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
-                cuk = torch.empty((N + 1,), dtype=torch.int32, device=Q.device)
+                cuk = ws["cuk"][: N + 1]
                 torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
                 # Fill packs
                 write_pos = 0
@@ -518,13 +560,14 @@ def compressed_attention_fa2(
                             len_rows.append(L)
             N = len(rows)
             if N > 0:
-                q_pack = torch.empty((N, h, Dk), dtype=Q.dtype, device=Q.device)
                 total_k = int(sum(len_rows))
-                k_pack = torch.empty((total_k, h, Dk), dtype=K_cmp.dtype, device=K_cmp.device)
-                v_pack = torch.empty((total_k, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
-                cuq = torch.arange(0, N + 1, dtype=torch.int32, device=Q.device)
+                ws = _get_varlen_workspace(Q.device, Q.dtype, K_cmp.dtype, V_cmp.dtype, h, Dk, Dv, N, total_k)
+                q_pack = ws["q"][:N]
+                k_pack = ws["k"][:total_k]
+                v_pack = ws["v"][:total_k]
+                cuq = ws["cuq"][: N + 1]
                 lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
-                cuk = torch.empty((N + 1,), dtype=torch.int32, device=Q.device)
+                cuk = ws["cuk"][: N + 1]
                 torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
                 write_pos = 0
                 for i, (b, t, g) in enumerate(rows):
