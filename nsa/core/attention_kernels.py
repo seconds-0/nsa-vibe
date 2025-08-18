@@ -490,6 +490,14 @@ def sliding_window_attention_fa2_decode(q_t: torch.Tensor, K_win: torch.Tensor, 
     if not fa2_supported(q_t.device, q_t.dtype, Dk):
         start = end - win_len
         return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
+    # Small-length auto-switch for decode
+    try:
+        min_len = int(os.getenv("NSA_FA2_MIN_LEN_WIN", "16"))
+    except Exception:
+        min_len = 16
+    if win_len < min_len:
+        start = end - win_len
+        return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
     start = end - win_len
     k = K_win[:, :, start:end]
     v = V_win[:, :, start:end]
@@ -510,6 +518,12 @@ def compressed_attention_fa2_decode(q_t: torch.Tensor, K_cmp: torch.Tensor, V_cm
         return torch.zeros((B, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
     B, G, h, Dk = q_t.shape
     if not fa2_supported(q_t.device, q_t.dtype, Dk):
+        return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
+    try:
+        min_len = int(os.getenv("NSA_FA2_MIN_LEN_CMP", "16"))
+    except Exception:
+        min_len = 16
+    if L < min_len:
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     k = K_cmp[:, :, :L]
     v = V_cmp[:, :, :L]

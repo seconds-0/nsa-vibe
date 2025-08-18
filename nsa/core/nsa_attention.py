@@ -306,9 +306,11 @@ class NSAAttention(nn.Module):
 
         # Branch attentions in parallel (parity-first for cmp/win, with optional masked SDPA gates)
         force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
-        use_flash = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes") and not force_parity
+        fa2_all = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes")
+        fa2_win = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
+        fa2_cmp = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
         use_cmp_mask = os.getenv("NSA_USE_CMP_MASK", "1").lower() in ("1", "true", "yes") and not force_parity
-        if use_flash:
+        if (fa2_all or fa2_cmp) and not force_parity:
             O_cmp = compressed_attention_fa2(Q, kv.K_cmp, kv.V_cmp, self.l, self.d)
         elif use_cmp_mask:
             from nsa.core.attention_kernels import batched_causal_attention_compressed_masked
@@ -337,7 +339,7 @@ class NSAAttention(nn.Module):
         log("prefill.sel", O_sel=O_sel)
 
         use_win_mask = os.getenv("NSA_USE_WIN_MASK", "1").lower() in ("1", "true", "yes") and not force_parity
-        if use_flash:
+        if (fa2_all or fa2_win) and not force_parity:
             O_win = sliding_window_attention_fa2(Q, K_win, V_win, self.w)
         elif use_win_mask:
             from nsa.core.attention_kernels import sliding_window_attention_masked

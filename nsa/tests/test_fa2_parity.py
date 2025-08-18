@@ -8,7 +8,7 @@ from nsa.core.attention_kernels import (
     sliding_window_attention_fa2,
     compressed_attention_fa2,
 )
-from nsa.kernels.flash_wrappers import is_flash_available
+from nsa.kernels.flash_wrappers import is_flash_available, fa2_supported
 from nsa.kernels.flash_wrappers import attention_bgh
 
 
@@ -86,5 +86,13 @@ def test_decode_paths_dense_bucket():
         out_ref = attention_bgh(Q[:, t - 1], K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True) if L > 0 else torch.zeros(B, G, h, Dv)
         out = compressed_attention_fa2_decode(Q[:, t - 1], K_cmp, V_cmp, L)
         assert (out - out_ref).abs().max().item() < 1e-6
+
+
+@pytest.mark.skipif(not RUN_FA2, reason="FA-2 parity tests are opt-in; set NSA_TEST_FA2=1")
+def test_head_dim_constraint_xfail():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cpu":
+        pytest.skip("CPU: no FA-2 support")
+    assert not fa2_supported(device, torch.float16, head_dim=7)
 
 
