@@ -67,6 +67,10 @@ Decode token‑reads match formula and scale towards Table 4 expectations (rate�
 
 Prefill/backward timing trend approaches Figure 6 curves (shape, not exact ms).
 
+M0 implementation note:
+- Masked varlen SDPA (sliding/compressed) and selection packing are enabled by default for performance, with `NSA_FORCE_PARITY=1` to force SDPA/gather reference paths.
+- CPU fallback uses SDPA-only reference paths; FA‑2/Triton are not used in tests.
+
 NFR4 – Stability: No future leakage; gates do not saturate early.
 
 NFR5 – Local run: Single‑GPU A100/4090; BF16/FP32 fallback; CPU path for tiny debug.
@@ -241,6 +245,11 @@ Acceptance: Causality tests, Eq.9 mapping property tests (CSR weighted overlap),
 M1 — FA‑2 for Compressed & Sliding
 
 Swap SDPA→FA‑2 for cmp/win (paper: these branches compatible).
+
+M1 notes:
+- Integrate FA‑2 varlen/dense for cmp/win with packing buckets; keep SDPA reference and `NSA_FORCE_PARITY` fallback.
+- Parity tolerance vs SDPA oracle: FP32 ≤ 5e‑5 (BF16/FP16 ≤ 2e‑4 if tested); identical softmax scale; no dropout/bias.
+- Head_dim/device constraints: assert/xfail and fall back to SDPA when unsupported; CPU uses SDPA.
 
 M2 — Learnable ϕ & Trainable Gates
 
