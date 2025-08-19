@@ -114,28 +114,27 @@ class TestFA2Parity:
                 q = torch.randn(B, S, H, D, device='cuda', dtype=torch.float32)
                 k = torch.randn(B, S, H, D, device='cuda', dtype=torch.float32)
                 v = torch.randn(B, S, H, D, device='cuda', dtype=torch.float32)
-                
-                # SDPA reference
-                # SDPA with correct layout [B, H, S, D]
-        q_sdpa = q.transpose(1, 2)
-        k_sdpa = k.transpose(1, 2)
-        v_sdpa = v.transpose(1, 2)
-        out_sdpa = F.scaled_dot_product_attention(q_sdpa, k_sdpa, v_sdpa, is_causal=True)
-        out_sdpa = out_sdpa.transpose(1, 2)  # Back to [B, S, H, D]
-                
+
+                # SDPA reference with correct layout [B, H, S, D]
+                q_sdpa = q.transpose(1, 2)
+                k_sdpa = k.transpose(1, 2)
+                v_sdpa = v.transpose(1, 2)
+                out_sdpa = F.scaled_dot_product_attention(q_sdpa, k_sdpa, v_sdpa, is_causal=True)
+                out_sdpa = out_sdpa.transpose(1, 2)  # Back to [B, S, H, D]
+
                 # FA-2
                 q_dt = q.to(dtype)
                 k_dt = k.to(dtype)
                 v_dt = v.to(dtype)
                 out_fa2 = flash_attn_func(q_dt, k_dt, v_dt, dropout_p=0.0, causal=True)
                 out_fa2 = out_fa2.float()
-                
+
                 mae = (out_sdpa - out_fa2).abs().mean().item()
-                
+
                 # Note: We expect higher MAE due to precision differences
                 # This is acceptable for production use
                 assert mae < 1.0, f"MAE {mae:.4f} too high for config B={B}, S={S}, dtype={dtype}"
-                
+
             except torch.cuda.OutOfMemoryError:
                 pytest.skip(f"Skipping S={S} due to memory constraints")
     

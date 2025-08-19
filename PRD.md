@@ -641,6 +641,12 @@ See `Documentation/Guides/Training-HowTo.md` for quick start, GPU usage, and env
 
 # On CPU or without Triton/FA‑2, selection falls back to SDPA gather; cmp/win use SDPA.
 
+## Toggles (Selection Kernel)
+- `NSA_USE_TRITON_SEL=1`: enable Triton selection kernel (M4+) when available; falls back to packed/gather otherwise.
+- `NSA_USE_SEL_PACK=1`: enable packed selection SDPA path (default on unless `NSA_FORCE_PARITY=1`).
+- `NSA_USE_SEL_MASK=1`: enable masked selection SDPA path (debug/experiments).
+- `NSA_SEL_TRITON_MIN_L`: minimal total selected length per row to use Triton (default 64).
+
 20) Open Questions (tracked; default answers chosen)
 
 Gating activation: Paper uses sigmoids per branch; we use softmax for scale stability. Decision: keep softmax; add temperature.

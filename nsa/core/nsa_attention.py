@@ -126,6 +126,8 @@ class NSAAttention(nn.Module):
         self.gate = GateMLP(d_k, gate_hidden)
         # Default FA-2 usage (can be overridden by env flags)
         self.use_flash_default = use_flash
+        # Selection Triton toggle (M4)
+        self.use_triton_sel = use_triton_sel
 
     def _shape_q(self, Q: torch.Tensor, B: int, S: int) -> torch.Tensor:
         Q = Q.view(B, S, self.n_heads, self.d_k)
@@ -237,8 +239,7 @@ class NSAAttention(nn.Module):
             )
 
             scale = 1.0 / (self.d_k ** 0.5)
-            # Batched compute for decode is not required; use existing per-token logic above
-            # Compute p_cmp against existing compressed keys for completeness (unused directly here)
+            # Compute p_cmp only for this step (S is 1 in decode)
             K_cmp_full = kv.K_cmp
             p_cmp_all = compute_pcmp_all(Q, K_cmp_full, scale)
             # Per-token outputs (S should be 1 in decode)
@@ -266,10 +267,17 @@ class NSAAttention(nn.Module):
                 Q_t = Q[:, t]
                 K_sel_t = kv.K_sel
                 V_sel_t = kv.V_sel
-                # Selection attention: prefer packed path (env-gated), fallback to exact gather
+                # Selection attention: prefer Triton if enabled; else packed; fallback to gather
                 force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
                 use_sel_pack = os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes") and not force_parity
-                if use_sel_pack:
+                use_triton_sel = (
+                    os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes") or self.use_triton_sel
+                ) and not force_parity
+                if use_triton_sel:
+                    from nsa.kernels.triton_sel_kernel import selection_attention_triton
+                    O_sel_bt = selection_attention_triton(Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1))
+                    O_sel = O_sel_bt[:, 0]
+                elif use_sel_pack:
                     O_sel_bt = grouped_selection_attention_packed(Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1))
                     O_sel = O_sel_bt[:, 0]
                 elif os.getenv("NSA_USE_SEL_MASK", "0").lower() in ("1", "true", "yes") and not force_parity:
@@ -398,9 +406,15 @@ class NSAAttention(nn.Module):
                     O_cmp[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
         log("prefill.cmp", O_cmp=O_cmp)
 
-        # Selected ranges attention (already exact-gather internally)
+        # Selected ranges attention (prefer Triton if enabled; else packed/gather)
         use_sel_pack = os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes") and not force_parity
-        if use_sel_pack:
+        use_triton_sel = (
+            os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes") or self.use_triton_sel
+        ) and not force_parity
+        if use_triton_sel:
+            from nsa.kernels.triton_sel_kernel import selection_attention_triton
+            O_sel = selection_attention_triton(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+        elif use_sel_pack:
             O_sel = grouped_selection_attention_packed(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         elif os.getenv("NSA_USE_SEL_MASK", "0").lower() in ("1", "true", "yes"):
             O_sel = grouped_selection_attention_masked(Q, kv.K_sel, kv.V_sel, sel_ranges_all)

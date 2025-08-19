@@ -1,3 +1,14 @@
 // Placeholder for Triton forward kernel (M4)
 // This file will contain the selection attention forward implementation.
 // Until implemented, Python wrapper falls back to packed SDPA path.
+
+// Sketch of kernel signature (to be implemented):
+// kernel sel_attn_fwd(
+//   Q_ptr, K_ptr, V_ptr,
+//   Ranges_ptr,  // packed spans per row
+//   Offsets_ptr, // row offsets
+//   O_ptr,
+//   B, S, G, h, Dk, Dv,
+//   max_L,
+//   ... autotune parameters ...
+// )
