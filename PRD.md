@@ -578,6 +578,7 @@ On CPU, FA‑2 paths are disabled; SDPA and masked/packed SDPA remain the refere
 - Causality: no read indices beyond `t` across rows under var‑length packing; assert and test.
 - Mixed precision: prefer bf16 on supported GPUs; use GradScaler for fp16; keep accumulations in FP32 as needed.
 - Observability (training): log gate distributions, per‑branch contributions, FA‑2 path usage counts, gradient norms, and clipping events.
+- Optimizer defaults: AdamW with cosine decay and warmup; gradient clipping with `train.max_grad_norm`.
 
 # On CPU or without Triton/FA‑2, selection falls back to SDPA gather; cmp/win use SDPA.
 
