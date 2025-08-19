@@ -71,4 +71,4 @@ Selection attention currently uses a parity-first gather/SDPA path (with an opti
 - [ ] Observability counters (selected tokens/bytes)
 
 ### Status
-Not Started
+In Progress

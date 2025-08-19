@@ -1,3 +1,119 @@
+import argparse
+import os
+import time
+from typing import List, Tuple
+
+import torch
+
+
+def build_rows(N: int, H: int, D: int, Dv: int, L: int, dist: str, device: torch.device):
+    Q = torch.randn(N, H, D, device=device, dtype=torch.float16)
+    # Build K/V per row spans
+    if dist == "few":
+        spans = [[(0, L)] for _ in range(N)]
+    elif dist == "many":
+        n = 8
+        seg = max(1, L // n)
+        spans = [[(i * seg, min((i + 1) * seg, L)) for i in range(n)] for _ in range(N)]
+    else:
+        # mixed
+        spans = []
+        for _ in range(N):
+            rem = L
+            s = 0
+            row = []
+            while rem > 0:
+                seg = min(rem, max(1, L // 8))
+                row.append((s, s + seg))
+                s += seg
+                rem -= seg
+            spans.append(row)
+    # Build per-row K/V by concatenating spans from a common large pool
+    Kpool = torch.randn(L, D, device=device, dtype=torch.float16)
+    Vpool = torch.randn(L, Dv, device=device, dtype=torch.float16)
+    K_rows: List[torch.Tensor] = []
+    V_rows: List[torch.Tensor] = []
+    for row in spans:
+        idx = torch.cat([torch.arange(s, e, device=device) for (s, e) in row], dim=0)
+        K_rows.append(Kpool.index_select(0, idx))
+        V_rows.append(Vpool.index_select(0, idx))
+    return Q, K_rows, V_rows
+
+
+def run_once(Q, K_rows, V_rows, method: str):
+    N, H, D = Q.shape
+    Dv = V_rows[0].shape[1]
+    if method == "sdpa":
+        # Pack to [N,H,1,D] and [N,H,L,D*]
+        times = []
+        for i in range(N):
+            k = K_rows[i]
+            v = V_rows[i]
+            Kf = k.unsqueeze(0).unsqueeze(0).expand(1, H, k.shape[0], D)
+            Vf = v.unsqueeze(0).unsqueeze(0).expand(1, H, v.shape[0], Dv)
+            t0 = time.time()
+            _ = torch.nn.functional.scaled_dot_product_attention(Q[i].unsqueeze(1), Kf, Vf, is_causal=True)
+            torch.cuda.synchronize()
+            times.append(time.time() - t0)
+        return sum(times) / len(times)
+    else:
+        # Triton wrapper path: build ranges for each row
+        B, S, G = 1, 1, 1
+        Q_bsg = Q.view(N, S, G, H, D)
+        # ranges: [B,S,G,n,2]
+        max_n = max(len(K_rows[i]) for i in range(N))
+        ranges = torch.zeros((N, 1, 1, max_n, 2), device=Q.device, dtype=torch.int32)
+        for i, row in enumerate(K_rows):
+            for j, (s, e) in enumerate([(0, k.shape[0]) for k in [row]]):
+                # For the synthetic pool we just select [0..L) since K_rows[i] is already the gathered span concatenation
+                ranges[i, 0, 0, 0, 0] = 0
+                ranges[i, 0, 0, 0, 1] = row.shape[0]
+                break
+        # Build K_all,V_all as concatenation per row for wrapper's varlen path through our wrapper indirectly via selection_attention_triton
+        # Easiest: call dense path per row via wrapper
+        from nsa.kernels.triton_sel_kernel import selection_attention_triton
+        # Expand to B,S,G format
+        K_bgs = torch.stack([k for k in K_rows], dim=0).unsqueeze(1).unsqueeze(1)
+        V_bgs = torch.stack([v for v in V_rows], dim=0).unsqueeze(1).unsqueeze(1)
+        t0 = time.time()
+        _ = selection_attention_triton(Q_bsg, K_bgs, V_bgs, ranges)
+        torch.cuda.synchronize()
+        return time.time() - t0
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--N", type=int, default=256)
+    parser.add_argument("--H", type=int, default=8)
+    parser.add_argument("--D", type=int, default=128)
+    parser.add_argument("--Dv", type=int, default=128)
+    parser.add_argument("--L_list", type=str, default="64,128,256")
+    parser.add_argument("--dist", type=str, default="many", choices=["few", "many", "mixed"])
+    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--warmup", type=int, default=5)
+    args = parser.parse_args()
+
+    assert torch.cuda.is_available(), "CUDA required"
+    device = torch.device("cuda")
+
+    L_list = [int(x) for x in args.L_list.split(",")]
+    print("method,H,D,Dv,L,N,dist,time_ms")
+    for L in L_list:
+        Q, K_rows, V_rows = build_rows(args.N, args.H, args.D, args.Dv, L, args.dist, device)
+        # Warmups
+        for _ in range(args.warmup):
+            _ = run_once(Q, K_rows, V_rows, "sdpa")
+            _ = run_once(Q, K_rows, V_rows, "triton")
+        # Timed
+        sdpa_t = sum(run_once(Q, K_rows, V_rows, "sdpa") for _ in range(args.iters)) / args.iters
+        tri_t = sum(run_once(Q, K_rows, V_rows, "triton") for _ in range(args.iters)) / args.iters
+        print(f"sdpa,{args.H},{args.D},{args.Dv},{L},{args.N},{args.dist},{sdpa_t*1000:.3f}")
+        print(f"triton,{args.H},{args.D},{args.Dv},{L},{args.N},{args.dist},{tri_t*1000:.3f}")
+
+
+if __name__ == "__main__":
+    main()
+
 #!/usr/bin/env python3
 """
 Triton Selection Attention Benchmark (M4)
