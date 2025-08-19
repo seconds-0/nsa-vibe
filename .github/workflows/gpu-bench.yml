@@ -1,0 +1,258 @@
+name: GPU Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_type:
+        description: 'GPU type for benchmarking'
+        required: true
+        default: 'T4'
+        type: choice
+        options:
+          - T4
+          - L4
+          - A10
+          - A100
+          - H100
+      safety_margin:
+        description: 'Minimum speedup to enable FA-2 (e.g., 1.2 for 20%)'
+        required: false
+        default: '1.2'
+      create_pr:
+        description: 'Create PR with updated thresholds'
+        required: true
+        type: boolean
+        default: true
+  
+  issue_comment:
+    types: [created]
+
+jobs:
+  trigger-check:
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      (github.event_name == 'issue_comment' && 
+       contains(github.event.comment.body, '/benchmark') && 
+       github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      gpu_type: ${{ steps.check.outputs.gpu_type }}
+    steps:
+      - name: Check trigger
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "gpu_type=${{ github.event.inputs.gpu_type }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+            # Parse comment for GPU type
+            COMMENT="${{ github.event.comment.body }}"
+            if [[ "$COMMENT" =~ /benchmark[[:space:]]+(T4|L4|A10|A100|H100) ]]; then
+              echo "should_run=true" >> $GITHUB_OUTPUT
+              echo "gpu_type=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            else
+              echo "should_run=true" >> $GITHUB_OUTPUT
+              echo "gpu_type=T4" >> $GITHUB_OUTPUT  # Default
+            fi
+          fi
+      
+      - name: React to comment
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            })
+
+  benchmark:
+    needs: trigger-check
+    if: needs.trigger-check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Install Modal
+        run: |
+          pip install modal
+      
+      - name: Run GPU Benchmark
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          GPU_TYPE="${{ needs.trigger-check.outputs.gpu_type || 'T4' }}"
+          echo "Running benchmark on $GPU_TYPE..."
+          
+          # Run Modal benchmark
+          modal run bench/modal_gpu_bench.py \
+            --gpu-type "$GPU_TYPE" \
+            --output benchmark_results.json
+      
+      - name: Parse Results and Update Config
+        id: optimize
+        run: |
+          # Install dependencies for threshold optimizer
+          pip install pyyaml
+          
+          # Run optimizer
+          SAFETY_MARGIN="${{ github.event.inputs.safety_margin || '1.2' }}"
+          python bench/threshold_optimizer.py \
+            benchmark_results.json \
+            --config configs/base.yaml \
+            --safety-margin "$SAFETY_MARGIN" \
+            --report benchmark_report.md
+          
+          # Extract thresholds for output
+          WIN_THRESHOLD=$(grep "fa2_min_len_win:" benchmark_report.md | grep -oE '[0-9]+' | head -1)
+          CMP_THRESHOLD=$(grep "fa2_min_len_cmp:" benchmark_report.md | grep -oE '[0-9]+' | head -1)
+          
+          echo "win_threshold=$WIN_THRESHOLD" >> $GITHUB_OUTPUT
+          echo "cmp_threshold=$CMP_THRESHOLD" >> $GITHUB_OUTPUT
+      
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ needs.trigger-check.outputs.gpu_type }}-${{ github.run_id }}
+          path: |
+            benchmark_results.json
+            benchmark_report.md
+            configs/base.yaml
+      
+      - name: Create Pull Request
+        if: |
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.create_pr == 'true') ||
+          github.event_name == 'issue_comment'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: |
+            Update FA-2 thresholds based on ${{ needs.trigger-check.outputs.gpu_type }} benchmarks
+            
+            - fa2_min_len_win: ${{ steps.optimize.outputs.win_threshold }}
+            - fa2_min_len_cmp: ${{ steps.optimize.outputs.cmp_threshold }}
+            
+            Automated benchmark results from GPU: ${{ needs.trigger-check.outputs.gpu_type }}
+          branch: auto/update-fa2-thresholds-${{ github.run_id }}
+          delete-branch: true
+          title: '[Auto] Update FA-2 thresholds from ${{ needs.trigger-check.outputs.gpu_type }} benchmarks'
+          body: |
+            ## 🚀 Automated FA-2 Threshold Update
+            
+            This PR updates the FlashAttention-2 thresholds based on automated GPU benchmarks.
+            
+            ### Benchmark Configuration
+            - **GPU Type**: ${{ needs.trigger-check.outputs.gpu_type }}
+            - **Safety Margin**: ${{ github.event.inputs.safety_margin || '1.2' }}x
+            - **Run ID**: ${{ github.run_id }}
+            
+            ### New Thresholds
+            - `runtime.fa2_min_len_win`: **${{ steps.optimize.outputs.win_threshold }}**
+            - `runtime.fa2_min_len_cmp`: **${{ steps.optimize.outputs.cmp_threshold }}**
+            
+            ### Artifacts
+            - [Benchmark Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - Full report available in artifacts
+            
+            <details>
+            <summary>📊 Benchmark Report</summary>
+            
+            ```markdown
+            $(cat benchmark_report.md)
+            ```
+            
+            </details>
+            
+            ---
+            *This PR was automatically generated by the GPU benchmark workflow.*
+          labels: |
+            automation
+            benchmarks
+            fa2-tuning
+      
+      - name: Comment on PR
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const gpu = '${{ needs.trigger-check.outputs.gpu_type }}';
+            const win = '${{ steps.optimize.outputs.win_threshold }}';
+            const cmp = '${{ steps.optimize.outputs.cmp_threshold }}';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            const comment = `## ✅ GPU Benchmark Complete
+            
+            **Device**: ${gpu}
+            **New Thresholds**:
+            - \`fa2_min_len_win\`: ${win}
+            - \`fa2_min_len_cmp\`: ${cmp}
+            
+            [View full results](${runUrl})
+            
+            A PR has been created with the updated thresholds.`;
+            
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            })
+
+  benchmark-matrix:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.gpu_type == 'ALL'
+    strategy:
+      matrix:
+        gpu: [T4, L4, A10, A100]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Install Modal
+        run: |
+          pip install modal pyyaml
+      
+      - name: Run Benchmark on ${{ matrix.gpu }}
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          modal run bench/modal_gpu_bench.py \
+            --gpu-type "${{ matrix.gpu }}" \
+            --output "benchmark_${{ matrix.gpu }}.json"
+      
+      - name: Generate Report
+        run: |
+          python bench/threshold_optimizer.py \
+            "benchmark_${{ matrix.gpu }}.json" \
+            --report "report_${{ matrix.gpu }}.md" \
+            --dry-run
+      
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.gpu }}-${{ github.run_id }}
+          path: |
+            benchmark_${{ matrix.gpu }}.json
+            report_${{ matrix.gpu }}.md

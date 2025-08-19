@@ -572,6 +572,13 @@ On CPU, FA‑2 paths are disabled; SDPA and masked/packed SDPA remain the refere
 - Compressed: `runtime.fa2_min_len_cmp` controls the minimal `num_cmp` to switch to FA‑2; tuned via GPU benches.
 - Both thresholds can be overridden by env: `NSA_FA2_MIN_LEN_WIN`, `NSA_FA2_MIN_LEN_CMP`.
 
+## Training (M2)
+- Loss masking for var‑length batches: ignore pad tokens in loss; maintain causal alignment with next‑token label shift.
+- Eq. 10 group‑consistency: selected ranges identical across heads within each GQA group during training.
+- Causality: no read indices beyond `t` across rows under var‑length packing; assert and test.
+- Mixed precision: prefer bf16 on supported GPUs; use GradScaler for fp16; keep accumulations in FP32 as needed.
+- Observability (training): log gate distributions, per‑branch contributions, FA‑2 path usage counts, gradient norms, and clipping events.
+
 # On CPU or without Triton/FA‑2, selection falls back to SDPA gather; cmp/win use SDPA.
 
 20) Open Questions (tracked; default answers chosen)

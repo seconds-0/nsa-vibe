@@ -38,6 +38,7 @@ We have an NSA attention module with M0 correctness and M1 FA‑2 performance fo
   - Packed Q rows and KV streams with per‑row lengths.
   - `cu_seqlens_q`, `cu_seqlens_k` for FA‑2 varlen; fallback dense padding per bucket if varlen unavailable.
 - Length bucketing to minimize padding and maximize bucket efficiency.
+- Loss masking: construct per‑row causal masks and label masks to ignore pad; handle next‑token label shift with varlen.
 
 3) FA‑2 forward/backward
 - Ensure wrappers and kernels engage FA‑2 on GPU for both fwd/bwd paths; verify support via capability checks.
@@ -46,6 +47,7 @@ We have an NSA attention module with M0 correctness and M1 FA‑2 performance fo
 4) Mixed precision & stability
 - Enable AMP autocast (bf16/fp16) in training loop; keep accumulations in FP32 where needed.
 - Maintain gating MLP last‑layer zero‑init; optional temperature; monitor gate distributions.
+- Use GradScaler for fp16 where appropriate; prefer bf16 on H100/L40S.
 
 5) Observability
 - Add optional logging hooks for:
@@ -53,6 +55,7 @@ We have an NSA attention module with M0 correctness and M1 FA‑2 performance fo
   - Branch contribution ratios (mean |O_cmp|, |O_sel|, |O_win|) and token read counts.
   - Time per branch if `NSA_DEBUG_TIMING=1` during training micro‑runs.
 - (Optional) TensorBoard scalar writer in `scripts/train_toy.py`.
+- Track FA‑2 path usage counts, bucket histograms, gradient norms, and clipping events.
 
 6) Acceptance & tests
 - Gradcheck on small shapes for cmp/win (FA‑2 on GPU; SDPA on CPU) — skip if unsupported.
@@ -64,6 +67,8 @@ We have an NSA attention module with M0 correctness and M1 FA‑2 performance fo
   - Varlen pack correctness (cu_seqlens computed matches lengths; scatter/gather idempotence on small cases).
   - Backward gradcheck for cmp/win on tiny shapes (skip if FA‑2 unsupported).
   - Backward parity (FA‑2 vs SDPA) tolerance tests on GPU for a handful of shapes.
+  - Eq. 10 group‑consistency during training: selected ranges identical across heads in a GQA group for varlen batches.
+  - Varlen causality: no token read beyond t across rows; unit asserts on gathered indices.
 - Integration:
   - Tiny training loop (1 GPU) on toy corpus; assert loss decreases ≥ X% over Y steps.
   - CPU training smoke (very small shapes) to keep CI green without GPU.
@@ -85,10 +90,12 @@ We have an NSA attention module with M0 correctness and M1 FA‑2 performance fo
 ### Implementation Checklist
 - [ ] Minimal NSA block module and config glue; unit tests for block forward shape.
 - [ ] Varlen collate helpers for training batches; length bucketing and `cu_seqlens` creation.
+  - [ ] Loss masking for varlen: label shift, pad ignore, causal alignment tests.
 - [ ] Ensure FA‑2 varlen wrappers support backward; add contiguity assertions; robust fallbacks.
 - [ ] Gradcheck (cmp/win) tiny shapes; skip on unsupported GPUs.
 - [ ] Backward parity tests (FA‑2 vs SDPA grads) on tiny grids (GPU opt‑in).
 - [ ] Training toy script; AMP enabled; gate stats logging (optional TB).
+  - [ ] Optimizer defaults (AdamW + cosine/warmup), gradient clipping, gradient norm logging.
 - [ ] Training smoke tests: CPU tiny and GPU opt‑in; assert loss reduction.
 - [ ] Docs: PRD training notes; rules updated with train commands and flags.
 - [ ] CI: keep default CPU tests green; provide instructions for GPU‑opt‑in suite.
