@@ -54,3 +54,54 @@ def build_cu_seqlens_for_buckets(bucket_lengths: torch.Tensor) -> torch.Tensor:
 	return cs
 
 
+
+def pack_batch_by_lengths(x: torch.Tensor, lengths: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+	"""
+	Pack a batch of padded rows into a contiguous buffer with cu_seqlens.
+
+	Args:
+		x: [B,S_max,D]
+		lengths: [B] valid lengths per row
+	Returns:
+		(packed: [sum(lengths), D], cu_seqlens: [B+1])
+	"""
+	device = x.device
+	B, S_max, D = x.shape
+	assert lengths.shape[0] == B
+	cu = build_cu_seqlens_for_buckets(lengths.to(torch.int32))
+	N = int(cu[-1].item())
+	packed = torch.empty((N, D), dtype=x.dtype, device=device)
+	write = 0
+	for b in range(B):
+		L = int(lengths[b].item())
+		if L > 0:
+			packed[write:write+L] = x[b, :L]
+			write += L
+	return packed, cu
+
+
+def unpack_packed_to_padded(packed: torch.Tensor, cu_seqlens: torch.Tensor, S_max: int) -> tuple[torch.Tensor, torch.Tensor]:
+	"""
+	Unpack a packed buffer back to padded batch and mask.
+
+	Args:
+		packed: [N,D]
+		cu_seqlens: [B+1]
+		S_max: target padded length
+	Returns:
+		(padded [B,S_max,D], mask [B,S_max])
+	"""
+	device = packed.device
+	B = cu_seqlens.shape[0] - 1
+	D = packed.shape[-1]
+	padded = torch.zeros((B, S_max, D), dtype=packed.dtype, device=device)
+	mask = torch.zeros((B, S_max), dtype=torch.bool, device=device)
+	for b in range(B):
+		start = int(cu_seqlens[b].item())
+		end = int(cu_seqlens[b+1].item())
+		L = end - start
+		if L > 0:
+			padded[b, :L] = packed[start:end]
+			mask[b, :L] = True
+	return padded, mask
+
