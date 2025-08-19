@@ -1,10 +1,12 @@
 # Requirements for automated GPU benchmarking tools
 
 # Core dependencies
-modal>=0.56.0     # Serverless GPU execution
 pyyaml>=6.0       # Config file parsing and updating
+paramiko>=3.0.0   # SSH connection for Prime Intellect pods
+requests>=2.0.0   # API calls to Prime Intellect
 
 # Optional providers (uncomment as needed)
+# prime-cli>=0.1.0  # Prime Intellect CLI (optional, for manual testing)
 # runpod>=1.0.0   # RunPod API (future)
 # lambda-cloud>=0.1.0  # Lambda Cloud API (future)
 
