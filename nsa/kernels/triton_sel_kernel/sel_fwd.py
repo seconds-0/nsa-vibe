@@ -13,6 +13,14 @@ except Exception:  # pragma: no cover - CPU CI
 
 
 if triton is not None:
+    @triton.autotune(
+        configs=[
+            triton.Config({}, num_warps=4, num_stages=2),
+            triton.Config({}, num_warps=8, num_stages=2),
+            triton.Config({}, num_warps=4, num_stages=3),
+        ],
+        key=["D", "Dv"],
+    )
     @triton.jit
     def _sel_attn_fwd_kernel(
         Q_ptr,  # [N, H, D]
@@ -88,6 +96,14 @@ if triton is not None:
                 acc += tl.sum(v_tile * p[:, None], axis=0)
             tl.store(o_base + (dv0 + offs_Dv) * stride_odv, acc, mask=DVmask)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({}, num_warps=4, num_stages=2),
+            triton.Config({}, num_warps=8, num_stages=2),
+            triton.Config({}, num_warps=4, num_stages=3),
+        ],
+        key=["D", "Dv"],
+    )
     @triton.jit
     def _sel_attn_fwd_varlen_kernel(
         Q_ptr,   # [N, H, D]
