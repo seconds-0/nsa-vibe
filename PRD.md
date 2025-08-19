@@ -567,6 +567,11 @@ On CPU, FA‑2 paths are disabled; SDPA and masked/packed SDPA remain the refere
 - Default behavior (GPU): enable FA‑2 by default (`NSA_USE_FA2=1` via config), retain `NSA_FORCE_PARITY=1` to force SDPA reference when needed.
 - FA‑2 kernels may not be bitwise deterministic across runs. We enforce numeric proximity in tests (e.g., MAE ≤ 1e‑5 for repeat runs) and keep SDPA FP32 as oracle in CI.
 
+## Thresholds (FA‑2)
+- Sliding: `runtime.fa2_min_len_win` controls the minimal window length to switch to FA‑2; tuned via GPU benches.
+- Compressed: `runtime.fa2_min_len_cmp` controls the minimal `num_cmp` to switch to FA‑2; tuned via GPU benches.
+- Both thresholds can be overridden by env: `NSA_FA2_MIN_LEN_WIN`, `NSA_FA2_MIN_LEN_CMP`.
+
 # On CPU or without Triton/FA‑2, selection falls back to SDPA gather; cmp/win use SDPA.
 
 20) Open Questions (tracked; default answers chosen)
