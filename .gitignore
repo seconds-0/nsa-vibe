@@ -65,4 +65,4 @@ htmlcov/
 # MyPy
 .mypy_cache/
 .dmypy.json
-dmypy.json
+dmypy.json.prime_pod_id

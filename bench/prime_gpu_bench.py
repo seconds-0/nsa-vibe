@@ -97,10 +97,19 @@ class PrimeIntellectBenchmark:
         if not options:
             raise RuntimeError(f"No {gpu_type} GPUs available")
         
+        # Validate options have required fields
+        valid_options = []
+        for opt in options:
+            if 'cloudId' in opt and 'prices' in opt and 'hourly' in opt['prices'] and 'provider' in opt:
+                valid_options.append(opt)
+        
+        if not valid_options:
+            raise RuntimeError(f"No valid {gpu_type} GPU options found in response")
+        
         # Sort by hourly price and return cheapest
-        return min(options, key=lambda x: x['prices']['hourly'])
+        return min(valid_options, key=lambda x: x['prices']['hourly'])
     
-    def create_benchmark_pod(self, gpu_type: str = "T4", max_price: Optional[float] = None) -> str:
+    def create_benchmark_pod(self, gpu_type: str = "T4_16GB", max_price: Optional[float] = None) -> str:
         """
         Create pod for benchmarking.
         
@@ -148,19 +157,45 @@ class PrimeIntellectBenchmark:
         }
         
         print(f"Creating pod...")
-        resp = requests.post(
-            f"{self.base_url}/pods/",
-            json=pod_config,
-            headers=self.headers
-        )
         
-        if resp.status_code != 200:
-            raise RuntimeError(f"Failed to create pod: {resp.text}")
+        # Simple retry logic for pod creation
+        last_error = None
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/pods/",
+                    json=pod_config,
+                    headers=self.headers,
+                    timeout=30
+                )
+                
+                if resp.status_code == 200:
+                    pod_data = resp.json()
+                    
+                    # Validate response has required fields
+                    if 'id' not in pod_data:
+                        raise RuntimeError(f"Invalid pod response, missing 'id': {pod_data}")
+                    
+                    self.pod_id = pod_data['id']
+                    print(f"Created pod: {self.pod_id}")
+                    return self.pod_id
+                elif resp.status_code == 429:
+                    # Rate limiting, wait longer
+                    print(f"Rate limited, waiting 30s before retry {attempt + 1}/3...")
+                    time.sleep(30)
+                    last_error = f"Rate limited: {resp.text}"
+                else:
+                    last_error = f"API error {resp.status_code}: {resp.text}"
+                    if attempt < 2:
+                        print(f"Failed attempt {attempt + 1}/3: {last_error}")
+                        time.sleep(5)
+            except requests.exceptions.RequestException as e:
+                last_error = f"Network error: {e}"
+                if attempt < 2:
+                    print(f"Network error on attempt {attempt + 1}/3, retrying...")
+                    time.sleep(5)
         
-        pod_data = resp.json()
-        self.pod_id = pod_data['id']
-        print(f"Created pod: {self.pod_id}")
-        return self.pod_id
+        raise RuntimeError(f"Failed to create pod after 3 attempts. Last error: {last_error}")
     
     def wait_for_pod(self, pod_id: str, timeout: int = 300) -> Dict:
         """
@@ -220,17 +255,37 @@ class PrimeIntellectBenchmark:
             'timeout': 30
         }
         
+        # Try authentication methods in order of preference
+        auth_configured = False
+        
         if private_key_path and Path(private_key_path).exists():
             connect_kwargs['key_filename'] = private_key_path
-        else:
-            # Try to use default SSH key or password from environment
-            if 'PRIME_SSH_KEY' in os.environ:
-                connect_kwargs['key_filename'] = os.environ['PRIME_SSH_KEY']
-            elif 'PRIME_SSH_PASSWORD' in os.environ:
-                connect_kwargs['password'] = os.environ['PRIME_SSH_PASSWORD']
+            auth_configured = True
+        elif 'PRIME_SSH_KEY' in os.environ:
+            connect_kwargs['key_filename'] = os.environ['PRIME_SSH_KEY']
+            auth_configured = True
+        elif 'PRIME_SSH_PASSWORD' in os.environ:
+            connect_kwargs['password'] = os.environ['PRIME_SSH_PASSWORD']
+            auth_configured = True
+        
+        # If no explicit auth provided, try system SSH keys
+        if not auth_configured:
+            print("No SSH credentials provided, trying system SSH keys...")
+            connect_kwargs['look_for_keys'] = True
+            connect_kwargs['allow_agent'] = True
         
         print(f"Connecting via SSH to {ssh_info['host']}...")
-        ssh.connect(**connect_kwargs)
+        try:
+            ssh.connect(**connect_kwargs)
+        except Exception as e:
+            raise RuntimeError(
+                f"SSH connection failed: {e}\n"
+                "Please provide SSH credentials via:\n"
+                "  - PRIME_SSH_KEY environment variable (path to key file)\n"
+                "  - PRIME_SSH_PASSWORD environment variable\n"
+                "  - Or ensure your SSH agent has the correct key"
+            )
+        
         self.ssh_client = ssh
         return ssh
     
@@ -436,7 +491,7 @@ class PrimeIntellectBenchmark:
             
             self.pod_id = None
     
-    def run_full_benchmark(self, gpu_type: str = "T4", safety_margin: float = 1.2) -> Dict:
+    def run_full_benchmark(self, gpu_type: str = "T4_16GB", safety_margin: float = 1.2) -> Dict:
         """
         Run complete benchmark workflow.
         
@@ -451,12 +506,19 @@ class PrimeIntellectBenchmark:
             # Create pod
             pod_id = self.create_benchmark_pod(gpu_type)
             
+            # Save pod ID for manual recovery if script crashes
+            with open('.prime_pod_id', 'w') as f:
+                f.write(f"{pod_id}\n")
+                f.write(f"# Created at {datetime.utcnow().isoformat()}\n")
+                f.write(f"# GPU: {gpu_type}\n")
+                f.write(f"# To manually cleanup: prime pods terminate {pod_id}\n")
+            
             # Wait for pod to be ready
             pod_info = self.wait_for_pod(pod_id)
             ssh_info = pod_info.get('sshConnection')
             
-            if not ssh_info:
-                raise RuntimeError("No SSH connection info in pod response")
+            if not ssh_info or 'host' not in ssh_info:
+                raise RuntimeError(f"No valid SSH connection info in pod response: {pod_info}")
             
             # Connect via SSH
             self.setup_ssh(ssh_info)
@@ -496,6 +558,10 @@ class PrimeIntellectBenchmark:
         finally:
             # Always cleanup
             self.cleanup()
+            
+            # Remove pod ID file if cleanup succeeded
+            if not self.pod_id and Path('.prime_pod_id').exists():
+                os.remove('.prime_pod_id')
 
 
 def main():
@@ -506,22 +572,22 @@ def main():
         epilog="""
 Examples:
   # Run on T4 (cheapest)
-  %(prog)s --gpu-type T4
+  %(prog)s --gpu-type T4_16GB
   
   # Run on A100 with custom safety margin
   %(prog)s --gpu-type A100_40GB --safety-margin 1.5
   
   # Save results to file
-  %(prog)s --gpu-type L4 --output results.json
+  %(prog)s --gpu-type L4_24GB --output results.json
   
 GPU Types:
-  T4, L4, RTX_4090, A10, A100_40GB, A100_80GB, H100_80GB
+  T4_16GB, L4_24GB, RTX4090_24GB, A10_24GB, A100_40GB, A100_80GB, H100_80GB
 """
     )
     
     parser.add_argument(
         "--gpu-type",
-        default="T4",
+        default="T4_16GB",
         help="GPU type to use for benchmarking"
     )
     
