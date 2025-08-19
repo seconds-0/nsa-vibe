@@ -13,6 +13,14 @@ except Exception:  # pragma: no cover - CPU CI
 
 
 if triton is not None:
+    @triton.autotune(
+        configs=[
+            triton.Config({}, num_warps=4, num_stages=2),
+            triton.Config({}, num_warps=8, num_stages=2),
+            triton.Config({}, num_warps=4, num_stages=3),
+        ],
+        key=["D", "Dv"],
+    )
     @triton.jit
     def _sel_attn_fwd_kernel(
         Q_ptr,  # [N, H, D]
@@ -47,9 +55,12 @@ if triton is not None:
             for d0 in range(0, D, BLOCK_D):
                 Dmask = d0 + offs_D < D
                 q_vec = tl.load(q_base + (d0 + offs_D) * stride_qd, mask=Dmask, other=0.0)
+                rows = (l0 + offs_L).to(tl.int32)[:, None]
+                cols = (d0 + offs_D).to(tl.int32)[None, :]
+                k_ptrs = K_ptr + n * stride_kn + rows * stride_kL + cols * stride_kd
                 k_tile = tl.load(
-                    K_ptr + n * stride_kn + (l0 + offs_L) * stride_kL + (d0 + offs_D)[None, :] * stride_kd,
-                    mask=Lmask[:, None] & Dmask[None, :],
+                    k_ptrs,
+                    mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
                     other=0.0,
                 )
                 logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
@@ -72,22 +83,36 @@ if triton is not None:
                 for d0 in range(0, D, BLOCK_D):
                     Dmask = d0 + offs_D < D
                     q_vec = tl.load(q_base + (d0 + offs_D) * stride_qd, mask=Dmask, other=0.0)
+                    rows = (l0 + offs_L).to(tl.int32)[:, None]
+                    cols = (d0 + offs_D).to(tl.int32)[None, :]
+                    k_ptrs = K_ptr + n * stride_kn + rows * stride_kL + cols * stride_kd
                     k_tile = tl.load(
-                        K_ptr + n * stride_kn + (l0 + offs_L) * stride_kL + (d0 + offs_D)[None, :] * stride_kd,
-                        mask=Lmask[:, None] & Dmask[None, :],
+                        k_ptrs,
+                        mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
                         other=0.0,
                     )
                     logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
                 logits_tile *= inv_sqrt_d
                 p = tl.where(Lmask, tl.exp(logits_tile - m) / lse, 0.0)
+                rows = (l0 + offs_L).to(tl.int32)[:, None]
+                cols_v = (dv0 + offs_Dv).to(tl.int32)[None, :]
+                v_ptrs = V_ptr + n * stride_vn + rows * stride_vL + cols_v * stride_vd
                 v_tile = tl.load(
-                    V_ptr + n * stride_vn + (l0 + offs_L) * stride_vL + (dv0 + offs_Dv)[None, :] * stride_vd,
-                    mask=Lmask[:, None] & DVmask[None, :],
+                    v_ptrs,
+                    mask=tl.broadcast_to(Lmask[:, None], v_ptrs.shape) & tl.broadcast_to(DVmask[None, :], v_ptrs.shape),
                     other=0.0,
                 )
                 acc += tl.sum(v_tile * p[:, None], axis=0)
             tl.store(o_base + (dv0 + offs_Dv) * stride_odv, acc, mask=DVmask)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({}, num_warps=4, num_stages=2),
+            triton.Config({}, num_warps=8, num_stages=2),
+            triton.Config({}, num_warps=4, num_stages=3),
+        ],
+        key=["D", "Dv"],
+    )
     @triton.jit
     def _sel_attn_fwd_varlen_kernel(
         Q_ptr,   # [N, H, D]
@@ -115,8 +140,9 @@ if triton is not None:
         cuN = tl.load(CU_ptr + N)
         rs = tl.load(CU_ptr + n)
         re = tl.load(CU_ptr + n + 1)
-        row_start = tl.max(0, tl.min(rs, cuN))
-        row_end = tl.max(row_start, tl.min(re, cuN))
+        zero_i32 = tl.full((1,), 0, dtype=tl.int32)
+        row_start = tl.maximum(zero_i32, tl.minimum(rs, cuN))
+        row_end = tl.maximum(row_start, tl.minimum(re, cuN))
         L = row_end - row_start
         # Pass 1: compute m, lse across row L
         m = tl.full((1,), float('-inf'), dtype=tl.float32)
@@ -130,9 +156,12 @@ if triton is not None:
                 Dmask = d0 + offs_D < D
                 q_vec = tl.load(q_base + (d0 + offs_D) * stride_qd, mask=Dmask, other=0.0)
                 # row index = row_start + l0 + offs_L
+                rows = (row_start + l0 + offs_L).to(tl.int32)[:, None]
+                cols = (d0 + offs_D).to(tl.int32)[None, :]
+                k_ptrs = K_ptr + rows * stride_kL + cols * stride_kd
                 k_tile = tl.load(
-                    K_ptr + (row_start + l0 + offs_L) * stride_kL + (d0 + offs_D)[None, :] * stride_kd,
-                    mask=Lmask[:, None] & Dmask[None, :],
+                    k_ptrs,
+                    mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
                     other=0.0,
                 )
                 logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
@@ -153,17 +182,23 @@ if triton is not None:
                 for d0 in range(0, D, BLOCK_D):
                     Dmask = d0 + offs_D < D
                     q_vec = tl.load(q_base + (d0 + offs_D) * stride_qd, mask=Dmask, other=0.0)
+                    rows = (row_start + l0 + offs_L).to(tl.int32)[:, None]
+                    cols = (d0 + offs_D).to(tl.int32)[None, :]
+                    k_ptrs = K_ptr + rows * stride_kL + cols * stride_kd
                     k_tile = tl.load(
-                        K_ptr + (row_start + l0 + offs_L) * stride_kL + (d0 + offs_D)[None, :] * stride_kd,
-                        mask=Lmask[:, None] & Dmask[None, :],
+                        k_ptrs,
+                        mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
                         other=0.0,
                     )
                     logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
                 logits_tile *= inv_sqrt_d
                 p = tl.where(Lmask, tl.exp(logits_tile - m) / lse, 0.0)
+                rows = (row_start + l0 + offs_L).to(tl.int32)[:, None]
+                cols_v = (dv0 + offs_Dv).to(tl.int32)[None, :]
+                v_ptrs = V_ptr + rows * stride_vL + cols_v * stride_vd
                 v_tile = tl.load(
-                    V_ptr + (row_start + l0 + offs_L) * stride_vL + (dv0 + offs_Dv)[None, :] * stride_vd,
-                    mask=Lmask[:, None] & DVmask[None, :],
+                    v_ptrs,
+                    mask=tl.broadcast_to(Lmask[:, None], v_ptrs.shape) & tl.broadcast_to(DVmask[None, :], v_ptrs.shape),
                     other=0.0,
                 )
                 acc += tl.sum(v_tile * p[:, None], axis=0)
@@ -179,7 +214,8 @@ def _get_block_sizes(D: int, L: int, Dv: int) -> tuple[int, int, int]:
         except Exception:
             return default
     BLOCK_D = _env_int("NSA_SEL_TRITON_BLOCK_D", 64 if D >= 64 else 32)
-    BLOCK_L = _env_int("NSA_SEL_TRITON_BLOCK_L", 128 if L >= 128 else 64)
+    # Conservative default for reliability across devices; autotune will refine
+    BLOCK_L = _env_int("NSA_SEL_TRITON_BLOCK_L", 64)
     BLOCK_DV = _env_int("NSA_SEL_TRITON_BLOCK_DV", 64 if Dv >= 64 else 32)
     return BLOCK_D, BLOCK_L, BLOCK_DV
 
@@ -193,6 +229,8 @@ def sel_attn_fwd_dense(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> tor
     N, H, D = Q.shape
     L = K.shape[1]
     Dv = V.shape[2]
+    # Ensure contiguity for correct strides
+    Q = Q.contiguous(); K = K.contiguous(); V = V.contiguous()
     O = torch.empty((N, H, Dv), device=Q.device, dtype=V.dtype)
     # Strides
     stride_qn, stride_qh, stride_qd = Q.stride(0), Q.stride(1), Q.stride(2)
@@ -225,13 +263,15 @@ def sel_attn_fwd_varlen(Q: torch.Tensor, K_all: torch.Tensor, V_all: torch.Tenso
     assert triton is not None and torch.cuda.is_available(), "Triton/GPU required"
     N, H, D = Q.shape
     Dv = V_all.shape[1]
+    # Ensure contiguity for correct strides
+    Q = Q.contiguous(); K_all = K_all.contiguous(); V_all = V_all.contiguous()
     O = torch.empty((N, H, Dv), device=Q.device, dtype=V_all.dtype)
     stride_qn, stride_qh, stride_qd = Q.stride(0), Q.stride(1), Q.stride(2)
     stride_kL, stride_kd = K_all.stride(0), K_all.stride(1)
     stride_vL, stride_vd = V_all.stride(0), V_all.stride(1)
     stride_on, stride_oh, stride_odv = O.stride(0), O.stride(1), O.stride(2)
     grid = (N * H,)
-    # Estimate a typical L for tuning from average row length
+    # Estimate a typical L for tuning from average row length (still conservative default for BLOCK_L)
     total_L = int(cu_seqlens[-1].item())
     avg_L = max(1, total_L // max(1, N))
     BLOCK_D, BLOCK_L, BLOCK_DV = _get_block_sizes(D, avg_L, Dv)
