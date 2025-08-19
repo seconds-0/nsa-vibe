@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Tuple
 
 import torch
@@ -110,8 +111,12 @@ if triton is not None:
         q_base = Q_ptr + n * stride_qn + h * stride_qh
         o_base = O_ptr + n * stride_on + h * stride_oh
         # Load row start/end
-        row_start = tl.load(CU_ptr + n)
-        row_end = tl.load(CU_ptr + n + 1)
+        # Load cu_seqlens with defensive clamping to [0, cu[N]]
+        cuN = tl.load(CU_ptr + N)
+        rs = tl.load(CU_ptr + n)
+        re = tl.load(CU_ptr + n + 1)
+        row_start = tl.max(0, tl.min(rs, cuN))
+        row_end = tl.max(row_start, tl.min(re, cuN))
         L = row_end - row_start
         # Pass 1: compute m, lse across row L
         m = tl.full((1,), float('-inf'), dtype=tl.float32)
@@ -165,6 +170,20 @@ if triton is not None:
             tl.store(o_base + (dv0 + offs_Dv) * stride_odv, acc, mask=DVmask)
 
 
+def _get_block_sizes(D: int, L: int, Dv: int) -> tuple[int, int, int]:
+    """Read optional env overrides for block sizes with safe defaults."""
+    def _env_int(name: str, default: int) -> int:
+        try:
+            v = int(os.getenv(name, str(default)))
+            return max(16, v)
+        except Exception:
+            return default
+    BLOCK_D = _env_int("NSA_SEL_TRITON_BLOCK_D", 64 if D >= 64 else 32)
+    BLOCK_L = _env_int("NSA_SEL_TRITON_BLOCK_L", 128 if L >= 128 else 64)
+    BLOCK_DV = _env_int("NSA_SEL_TRITON_BLOCK_DV", 64 if Dv >= 64 else 32)
+    return BLOCK_D, BLOCK_L, BLOCK_DV
+
+
 def sel_attn_fwd_dense(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
     """
     Triton forward for selection attention on a dense packed batch:
@@ -182,9 +201,7 @@ def sel_attn_fwd_dense(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> tor
     stride_on, stride_oh, stride_odv = O.stride(0), O.stride(1), O.stride(2)
     # Launch grid over N*H programs
     grid = (N * H,)
-    BLOCK_D = 64 if D >= 64 else 32
-    BLOCK_L = 128 if L >= 128 else 64
-    BLOCK_DV = 64 if Dv >= 64 else 32
+    BLOCK_D, BLOCK_L, BLOCK_DV = _get_block_sizes(D, L, Dv)
     inv_sqrt_d = 1.0 / math.sqrt(D)
     _sel_attn_fwd_kernel[grid](
         Q, K, V, O,
@@ -214,10 +231,10 @@ def sel_attn_fwd_varlen(Q: torch.Tensor, K_all: torch.Tensor, V_all: torch.Tenso
     stride_vL, stride_vd = V_all.stride(0), V_all.stride(1)
     stride_on, stride_oh, stride_odv = O.stride(0), O.stride(1), O.stride(2)
     grid = (N * H,)
-    BLOCK_D = 64 if D >= 64 else 32
-    # Choose BLOCK_L by typical L; safe default 128
-    BLOCK_L = 128
-    BLOCK_DV = 64 if Dv >= 64 else 32
+    # Estimate a typical L for tuning from average row length
+    total_L = int(cu_seqlens[-1].item())
+    avg_L = max(1, total_L // max(1, N))
+    BLOCK_D, BLOCK_L, BLOCK_DV = _get_block_sizes(D, avg_L, Dv)
     inv_sqrt_d = 1.0 / math.sqrt(D)
     _sel_attn_fwd_varlen_kernel[grid](
         Q, K_all, V_all, cu_seqlens,

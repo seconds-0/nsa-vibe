@@ -98,7 +98,22 @@ def selection_attention_triton(
                 V_pack[write : write + Lw] = V[b, g, idx]
                 write += Lw
                 cu[j + 1] = write
-            O_pack = sel_attn_fwd_varlen(Q_pack, K_pack, V_pack, cu)
+            # Dense fast-path when each row is a single contiguous span
+            use_dense = True
+            for _, _, _, spans in items:
+                if len(spans) != 1:
+                    use_dense = False
+                    break
+            if use_dense:
+                K_dense = torch.empty((N, L_i, D), device=Q.device, dtype=K.dtype)
+                V_dense = torch.empty((N, L_i, Dv), device=Q.device, dtype=V.dtype)
+                for j, (b, t, g, spans) in enumerate(items):
+                    s0, e0 = spans[0]
+                    K_dense[j] = K[b, g, s0:e0]
+                    V_dense[j] = V[b, g, s0:e0]
+                O_pack = sel_attn_fwd_dense(Q_pack, K_dense, V_dense)
+            else:
+                O_pack = sel_attn_fwd_varlen(Q_pack, K_pack, V_pack, cu)
             # Scatter back
             for j, (b, t, g, _) in enumerate(items):
                 O[b, t, g] = O_pack[j]

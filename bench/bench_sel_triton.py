@@ -51,9 +51,10 @@ def build_test_data(N: int, H: int, D: int, Dv: int, L: int, dist: str, device: 
                 rem -= seg
             spans.append(row)
     
-    # Build K/V from a shared pool
-    Kpool = torch.randn(L * 2, D, device=device, dtype=torch.bfloat16)  # Extra tokens for realistic selection
-    Vpool = torch.randn(L * 2, Dv, device=device, dtype=torch.bfloat16)
+    # Build K/V from a shared pool; rows select spans from this pool
+    pool_len = L * 2
+    Kpool = torch.randn(pool_len, D, device=device, dtype=torch.bfloat16)
+    Vpool = torch.randn(pool_len, Dv, device=device, dtype=torch.bfloat16)
     
     K_rows: List[torch.Tensor] = []
     V_rows: List[torch.Tensor] = []
@@ -62,10 +63,10 @@ def build_test_data(N: int, H: int, D: int, Dv: int, L: int, dist: str, device: 
         K_rows.append(Kpool.index_select(0, idx))
         V_rows.append(Vpool.index_select(0, idx))
     
-    return Q, K_rows, V_rows, spans
+    return Q, K_rows, V_rows, spans, Kpool, Vpool
 
 
-def benchmark_method(Q, K_rows, V_rows, method: str, iters: int) -> float:
+def benchmark_method(Q, K_rows, V_rows, method: str, iters: int, *, Kpool=None, Vpool=None, spans=None) -> float:
     """Benchmark single method and return average time in ms."""
     N, H, D = Q.shape
     Dv = V_rows[0].shape[1]
@@ -79,7 +80,7 @@ def benchmark_method(Q, K_rows, V_rows, method: str, iters: int) -> float:
             # Expand for multi-head: [1, H, L, D]
             Kf = k.unsqueeze(0).unsqueeze(0).expand(1, H, k.shape[0], D)
             Vf = v.unsqueeze(0).unsqueeze(0).expand(1, H, v.shape[0], Dv)
-            Qf = Q[i:i+1].unsqueeze(1)  # [1, 1, H, D] -> [1, H, 1, D]
+            Qf = Q[i:i+1].unsqueeze(2)  # [1, H, D] -> [1, H, 1, D]
             
             torch.cuda.synchronize()
             t0 = time.time()
@@ -97,15 +98,25 @@ def benchmark_method(Q, K_rows, V_rows, method: str, iters: int) -> float:
         # Build NSA-compatible tensors: [B,S,G,h,D] and ranges [B,S,G,n,2]
         B, S, G = N, 1, 1
         Q_nsa = Q.view(N, 1, 1, H, D)  # [N,1,1,H,D]
-        K_nsa = torch.stack([k for k in K_rows], dim=0).unsqueeze(1).unsqueeze(1)  # [N,1,1,L,D]
-        V_nsa = torch.stack([v for v in V_rows], dim=0).unsqueeze(1).unsqueeze(1)  # [N,1,1,L,Dv]
-        
-        # Build ranges: single range per row covering full selected length
-        max_n = 1  # Single range per row for simplicity
-        ranges = torch.zeros((N, 1, 1, max_n, 2), device=Q.device, dtype=torch.int64)
-        for i, k_row in enumerate(K_rows):
-            ranges[i, 0, 0, 0, 0] = 0
-            ranges[i, 0, 0, 0, 1] = k_row.shape[0]
+        if Kpool is not None and Vpool is not None and spans is not None:
+            # Use shared pool per row and build multi-range selection
+            K_nsa = Kpool.unsqueeze(0).unsqueeze(0).expand(N, 1, -1, -1)  # [N,1,S_pool,D]
+            V_nsa = Vpool.unsqueeze(0).unsqueeze(0).expand(N, 1, -1, -1)  # [N,1,S_pool,Dv]
+            max_n = max(len(row) for row in spans)
+            ranges = torch.zeros((N, 1, 1, max_n, 2), device=Q.device, dtype=torch.int64)
+            for i, row_spans in enumerate(spans):
+                for j, (s, e) in enumerate(row_spans):
+                    ranges[i, 0, 0, j, 0] = s
+                    ranges[i, 0, 0, j, 1] = e
+        else:
+            # Fallback: per-row contiguous selection
+            K_nsa = torch.stack([k for k in K_rows], dim=0).unsqueeze(1)  # [N,1,L,D]
+            V_nsa = torch.stack([v for v in V_rows], dim=0).unsqueeze(1)  # [N,1,L,Dv]
+            max_n = 1
+            ranges = torch.zeros((N, 1, 1, max_n, 2), device=Q.device, dtype=torch.int64)
+            for i, k_row in enumerate(K_rows):
+                ranges[i, 0, 0, 0, 0] = 0
+                ranges[i, 0, 0, 0, 1] = k_row.shape[0]
         
         torch.cuda.synchronize()
         t0 = time.time()
@@ -131,6 +142,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations")
     parser.add_argument("--csv", action="store_true", help="Output CSV format")
     parser.add_argument("--output", type=str, help="Save results to file")
+    parser.add_argument("--enable_triton", action="store_true", help="Set NSA_USE_TRITON_SEL=1 if not already set")
     
     args = parser.parse_args()
     
@@ -146,8 +158,9 @@ def main():
         print("Triton not available")
         return
     
-    # Enable Triton for selection
-    os.environ["NSA_USE_TRITON_SEL"] = "1"
+    # Enable Triton for selection if requested and not already set
+    if args.enable_triton and "NSA_USE_TRITON_SEL" not in os.environ:
+        os.environ["NSA_USE_TRITON_SEL"] = "1"
     
     device = torch.device("cuda")
     L_list = [int(x.strip()) for x in args.L_list.split(",")]
@@ -170,16 +183,16 @@ def main():
     for L in L_list:
         try:
             # Build test data
-            Q, K_rows, V_rows, _ = build_test_data(args.N, args.H, args.D, args.Dv, L, args.dist, device)
+            Q, K_rows, V_rows, spans, Kpool, Vpool = build_test_data(args.N, args.H, args.D, args.Dv, L, args.dist, device)
             
             # Warmup both methods
             for _ in range(args.warmup):
                 _ = benchmark_method(Q, K_rows, V_rows, "sdpa", 1)
-                _ = benchmark_method(Q, K_rows, V_rows, "triton", 1)
+                _ = benchmark_method(Q, K_rows, V_rows, "triton", 1, Kpool=Kpool, Vpool=Vpool, spans=spans)
             
             # Benchmark
             sdpa_time = benchmark_method(Q, K_rows, V_rows, "sdpa", args.iters)
-            triton_time = benchmark_method(Q, K_rows, V_rows, "triton", args.iters)
+            triton_time = benchmark_method(Q, K_rows, V_rows, "triton", args.iters, Kpool=Kpool, Vpool=Vpool, spans=spans)
             speedup = sdpa_time / triton_time if triton_time > 0 else 0.0
             
             status = "FASTER" if speedup > 1.0 else "SLOWER"
