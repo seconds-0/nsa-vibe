@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -7,11 +7,16 @@ from .rope import apply_rope
 
 
 def avg_pool_phi_rope_kv(
-    K_raw: torch.Tensor, V_raw: torch.Tensor, l: int, d: int
+    K_raw: torch.Tensor,
+    V_raw: torch.Tensor,
+    l: int,
+    d: int,
+    pos: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    # Apply RoPE to K before ϕ (M0 placeholder)
+    # Apply RoPE to K before ϕ; use absolute positions if provided
     S = K_raw.shape[2]
-    pos = torch.arange(S, device=K_raw.device)
+    if pos is None:
+        pos = torch.arange(S, device=K_raw.device)
     K_rope = apply_rope(K_raw, pos)
     V_rope = V_raw
     # Expect shapes [B,G,S,D*]

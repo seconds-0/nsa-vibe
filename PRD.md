@@ -385,6 +385,19 @@ Selection distance histogram (local vs far).
 
 Per‑step counters per branch: tokens read (and, where possible, bytes read) for cmp/sel/win.
 
+12.1) Observability Flags (Runtime)
+
+- NSA_DEBUG_LOG=1: enable structured logs during prefill/decode.
+  - Decode keys: `decode.reads` (S_raw, per-branch + total reads), `decode.select` (n_ranges, mean/max lengths, mean/max distance), `decode.gates` (mean/std per branch).
+  - Prefill keys: `prefill.scores` (S, S_cmp, S_sel), `prefill.select` (ranges), `prefill.out` and per-branch snapshots.
+- NSA_DEBUG_TIMING=1: log FA‑2 path usage and timings.
+  - Keys: `fa2.win.hist`, `fa2.cmp.hist` (length histograms), `fa2.win.varlen_all` / `fa2.cmp.varlen_all`, `fa2.*.bucket` with ms timings.
+- NSA_DEBUG_COMPARE=1: in prefill, recompute seq-per-token references and print MAE vs batched fast paths (cmp/win/out).
+- NSA_FORCE_PARITY=1: force reference paths (SDPA gather or per-token) for maximum numerical parity in CI.
+- NSA_USE_SEL_PACK=1: use packed selection attention (varlen bucketed) instead of per-(B,G) gather; default on when not forcing parity.
+- NSA_USE_FA2, NSA_USE_FA2_WIN, NSA_USE_FA2_CMP: enable FA‑2 globally or per-branch when supported.
+- NSA_FA2_MIN_LEN_WIN / NSA_FA2_MIN_LEN_CMP: minimum window/num_cmp lengths to switch to FA‑2 (bench-tuned thresholds), otherwise fall back to SDPA.
+
 13) Algorithms & Patterns (implementation details)
 13.1 Compression ϕ
 

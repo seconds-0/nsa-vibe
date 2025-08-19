@@ -71,12 +71,13 @@ class PrimeIntellectBenchmark:
         Find cheapest available GPU of specified type.
         
         Args:
-            gpu_type: GPU model (T4, L4, A100_40GB, etc.)
+            gpu_type: GPU model (RTX4090_24GB, A100_40GB, etc.)
             regions: Optional list of regions to search
         
         Returns:
             Dictionary with cheapest option details
         """
+        # Use Prime Intellect API with query parameters (from their docs)
         params = {
             'gpu_type': gpu_type,
             'gpu_count': 1
@@ -84,32 +85,71 @@ class PrimeIntellectBenchmark:
         if regions:
             params['regions'] = regions
         
+        print(f"Querying Prime Intellect API: {params}")
+        
         resp = requests.get(
             f"{self.base_url}/availability/",
             params=params,
-            headers=self.headers
+            headers=self.headers,
+            timeout=30
         )
         
+        print(f"API Response: Status {resp.status_code}")
+        
         if resp.status_code != 200:
-            raise RuntimeError(f"Failed to check availability: {resp.text}")
+            raise RuntimeError(f"API Error {resp.status_code}: {resp.text}")
         
-        options = resp.json()
+        data = resp.json()
+        print(f"Response data: {json.dumps(data, indent=2) if data else 'Empty response'}")
+        
+        if not data:
+            raise RuntimeError(f"No data returned for {gpu_type}")
+        
+        # Prime Intellect nests results under GPU type key
+        if gpu_type not in data:
+            available_keys = list(data.keys())
+            raise RuntimeError(f"No {gpu_type} found in response. Available: {available_keys}")
+        
+        options = data[gpu_type]
         if not options:
-            raise RuntimeError(f"No {gpu_type} GPUs available")
+            raise RuntimeError(f"No {gpu_type} options available")
         
-        # Validate options have required fields
+        print(f"Found {len(options)} options for {gpu_type}")
+        
+        # Validate options and extract pricing
         valid_options = []
         for opt in options:
-            if 'cloudId' in opt and 'prices' in opt and 'hourly' in opt['prices'] and 'provider' in opt:
-                valid_options.append(opt)
+            if ('cloudId' not in opt or 'prices' not in opt or 'provider' not in opt):
+                print(f"Skipping option missing required fields: {opt.get('provider', 'Unknown')}")
+                continue
+            
+            # Extract hourly price from either onDemand or communityPrice
+            prices = opt['prices']
+            hourly_price = None
+            
+            if prices.get('onDemand'):
+                hourly_price = prices['onDemand']
+            elif prices.get('communityPrice'):
+                hourly_price = prices['communityPrice']
+            
+            if hourly_price is None:
+                print(f"Skipping option with no valid pricing: {opt.get('provider', 'Unknown')}")
+                continue
+            
+            # Add computed hourly price for easy sorting
+            opt['hourly_price'] = hourly_price
+            valid_options.append(opt)
+            print(f"Valid option: {opt['provider']} ${hourly_price:.4f}/hr ({opt['security']})")
         
         if not valid_options:
-            raise RuntimeError(f"No valid {gpu_type} GPU options found in response")
+            raise RuntimeError(f"Found {len(options)} options but none have valid pricing")
         
         # Sort by hourly price and return cheapest
-        return min(valid_options, key=lambda x: x['prices']['hourly'])
+        cheapest = min(valid_options, key=lambda x: x['hourly_price'])
+        print(f"Selected cheapest: {cheapest['provider']} ${cheapest['hourly_price']:.4f}/hr")
+        return cheapest
     
-    def create_benchmark_pod(self, gpu_type: str = "T4_16GB", max_price: Optional[float] = None) -> str:
+    def create_benchmark_pod(self, gpu_type: str = "RTX4090_24GB", max_price: Optional[float] = None) -> str:
         """
         Create pod for benchmarking.
         
@@ -123,18 +163,18 @@ class PrimeIntellectBenchmark:
         print(f"Finding cheapest {gpu_type}...")
         option = self.find_cheapest_gpu(gpu_type)
         
-        hourly_price = option['prices']['hourly']
+        hourly_price = option['hourly_price']  # Pre-computed in find_cheapest_gpu
         provider = option['provider']
-        print(f"Found {gpu_type} on {provider} for ${hourly_price:.2f}/hr")
+        print(f"Found {gpu_type} on {provider} for ${hourly_price:.4f}/hr")
         
         # Set max price with 20% buffer if not specified
         if max_price is None:
             max_price = hourly_price * 1.2
         
-        # Create pod configuration
+        # Create pod configuration (no envVars - not supported)
         pod_config = {
             "pod": {
-                "name": f"nsa-bench-{gpu_type.lower()}-{int(time.time())}",
+                "name": f"nsa-bench-{gpu_type.lower().replace('_', '-')}-{int(time.time())}",
                 "cloudId": option['cloudId'],
                 "gpuType": gpu_type,
                 "socket": option.get('socket', 'PCIe'),
@@ -144,12 +184,7 @@ class PrimeIntellectBenchmark:
                 "memory": 32,
                 "image": "ubuntu_22_cuda_12",
                 "maxPrice": max_price,
-                "autoRestart": False,
-                "envVars": [
-                    {"key": "PYTHONPATH", "value": "."},
-                    {"key": "NSA_USE_FA2", "value": "1"},
-                    {"key": "DEBIAN_FRONTEND", "value": "noninteractive"}
-                ]
+                "autoRestart": False
             },
             "provider": {
                 "type": provider
@@ -169,7 +204,7 @@ class PrimeIntellectBenchmark:
                     timeout=30
                 )
                 
-                if resp.status_code == 200:
+                if resp.status_code in [200, 201]:  # 201 = Created
                     pod_data = resp.json()
                     
                     # Validate response has required fields
@@ -177,7 +212,7 @@ class PrimeIntellectBenchmark:
                         raise RuntimeError(f"Invalid pod response, missing 'id': {pod_data}")
                     
                     self.pod_id = pod_data['id']
-                    print(f"Created pod: {self.pod_id}")
+                    print(f"Created pod: {self.pod_id} (status: {pod_data.get('status', 'unknown')})")
                     return self.pod_id
                 elif resp.status_code == 429:
                     # Rate limiting, wait longer
@@ -223,16 +258,41 @@ class PrimeIntellectBenchmark:
             pod = resp.json()
             status = pod.get('status', 'unknown')
             
-            if status == 'running':
-                print(f"Pod ready after {int(time.time() - start)}s")
+            if status.lower() in ['running', 'active']:
+                print(f"Pod ready after {int(time.time() - start)}s (status: {status})")
                 return pod
-            elif status in ['error', 'failed', 'terminated']:
+            elif status.lower() in ['error', 'failed', 'terminated', 'failed_to_provision']:
                 raise RuntimeError(f"Pod failed with status: {status}")
             
             print(f"Pod status: {status}, waiting...")
             time.sleep(10)
         
         raise TimeoutError(f"Pod {pod_id} not ready after {timeout}s")
+    
+    def parse_ssh_connection_string(self, ssh_string: str) -> Dict[str, str]:
+        """
+        Parse Prime Intellect SSH connection string.
+        
+        Args:
+            ssh_string: SSH connection string like "root@80.15.7.37 -p 45603"
+        
+        Returns:
+            Dictionary with host, port, user keys
+        """
+        import re
+        
+        # Parse "root@80.15.7.37 -p 45603" format
+        match = re.match(r'(\w+)@([\d.]+)\s+-p\s+(\d+)', ssh_string)
+        if not match:
+            raise RuntimeError(f"Cannot parse SSH connection string: {ssh_string}")
+        
+        user, host, port = match.groups()
+        
+        return {
+            'user': user,
+            'host': host, 
+            'port': int(port)
+        }
     
     def setup_ssh(self, ssh_info: Dict, private_key_path: Optional[str] = None) -> paramiko.SSHClient:
         """
@@ -247,6 +307,10 @@ class PrimeIntellectBenchmark:
         """
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        # Configure for cloud instances
+        ssh.load_system_host_keys()
+        ssh.load_host_keys(os.path.expanduser('~/.ssh/known_hosts'))
         
         connect_kwargs = {
             'hostname': ssh_info['host'],
@@ -267,19 +331,55 @@ class PrimeIntellectBenchmark:
         elif 'PRIME_SSH_PASSWORD' in os.environ:
             connect_kwargs['password'] = os.environ['PRIME_SSH_PASSWORD']
             auth_configured = True
+        elif Path('~/.ssh/primeintellect_ed25519').expanduser().exists():
+            # Use the generated Prime Intellect key
+            connect_kwargs['key_filename'] = str(Path('~/.ssh/primeintellect_ed25519').expanduser())
+            auth_configured = True
         
-        # If no explicit auth provided, try system SSH keys
+        # If no explicit auth provided, try system SSH keys and passwordless auth
         if not auth_configured:
-            print("No SSH credentials provided, trying system SSH keys...")
+            print("No SSH credentials provided, trying system SSH keys and passwordless auth...")
             connect_kwargs['look_for_keys'] = True
             connect_kwargs['allow_agent'] = True
+            # Try empty password for RunPod containers
+            connect_kwargs['password'] = ''
         
         print(f"Connecting via SSH to {ssh_info['host']}...")
-        try:
-            ssh.connect(**connect_kwargs)
-        except Exception as e:
+        
+        # Try multiple authentication methods for cloud instances
+        auth_methods = []
+        
+        if auth_configured:
+            # Use configured auth
+            auth_methods.append(connect_kwargs)
+        else:
+            # Try multiple methods for cloud instances
+            auth_methods.extend([
+                # Method 1: System keys + empty password
+                {**connect_kwargs, 'look_for_keys': True, 'allow_agent': True, 'password': ''},
+                # Method 2: Just system keys
+                {**connect_kwargs, 'look_for_keys': True, 'allow_agent': True},
+                # Method 3: No auth (some containers allow this)
+                {**connect_kwargs, 'look_for_keys': False, 'allow_agent': False},
+            ])
+        
+        last_error = None
+        for i, method in enumerate(auth_methods):
+            try:
+                print(f"Trying SSH auth method {i+1}/{len(auth_methods)}...")
+                ssh.connect(**method)
+                print("SSH connection successful!")
+                break
+            except Exception as e:
+                last_error = e
+                print(f"Auth method {i+1} failed: {e}")
+                if i < len(auth_methods) - 1:
+                    ssh.close()  # Close failed connection
+                    ssh = paramiko.SSHClient()  # Create new client for next attempt
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
             raise RuntimeError(
-                f"SSH connection failed: {e}\n"
+                f"All SSH authentication methods failed. Last error: {last_error}\n"
                 "Please provide SSH credentials via:\n"
                 "  - PRIME_SSH_KEY environment variable (path to key file)\n"
                 "  - PRIME_SSH_PASSWORD environment variable\n"
@@ -320,6 +420,11 @@ class PrimeIntellectBenchmark:
             # Install uv for faster Python package management
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             "echo 'export PATH=/root/.cargo/bin:$PATH' >> ~/.bashrc",
+            
+            # Set environment variables in bashrc (since envVars not supported in pod config)
+            "echo 'export PYTHONPATH=.' >> ~/.bashrc",
+            "echo 'export NSA_USE_FA2=1' >> ~/.bashrc", 
+            "echo 'export DEBIAN_FRONTEND=noninteractive' >> ~/.bashrc",
             "source ~/.bashrc",
             
             # Clone repository
@@ -491,7 +596,7 @@ class PrimeIntellectBenchmark:
             
             self.pod_id = None
     
-    def run_full_benchmark(self, gpu_type: str = "T4_16GB", safety_margin: float = 1.2) -> Dict:
+    def run_full_benchmark(self, gpu_type: str = "RTX4090_24GB", safety_margin: float = 1.2) -> Dict:
         """
         Run complete benchmark workflow.
         
@@ -515,10 +620,13 @@ class PrimeIntellectBenchmark:
             
             # Wait for pod to be ready
             pod_info = self.wait_for_pod(pod_id)
-            ssh_info = pod_info.get('sshConnection')
+            ssh_connection_string = pod_info.get('sshConnection')
             
-            if not ssh_info or 'host' not in ssh_info:
-                raise RuntimeError(f"No valid SSH connection info in pod response: {pod_info}")
+            if not ssh_connection_string:
+                raise RuntimeError(f"No SSH connection info in pod response: {pod_info}")
+            
+            # Parse Prime Intellect SSH connection string: "root@80.15.7.37 -p 45603"
+            ssh_info = self.parse_ssh_connection_string(ssh_connection_string)
             
             # Connect via SSH
             self.setup_ssh(ssh_info)
@@ -587,7 +695,7 @@ GPU Types:
     
     parser.add_argument(
         "--gpu-type",
-        default="T4_16GB",
+        default="RTX4090_24GB",
         help="GPU type to use for benchmarking"
     )
     

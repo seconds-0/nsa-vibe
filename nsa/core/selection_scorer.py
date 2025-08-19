@@ -124,7 +124,11 @@ def select_topn_ranges(
     # pick remaining to fill up to n_top
     k_rest = torch.clamp(torch.tensor(n_top - forced_idx.shape[-1], device=device), min=0).item()
     if k_rest > 0:
-        _, top_idx = torch.topk(masked, k=min(k_rest, S_sel), dim=-1, largest=True, sorted=True)
+        # Deterministic tie-breaker to lower index on ties via tiny negative index bias
+        eps = torch.finfo(masked.dtype).eps
+        base_idx = torch.arange(S_sel, device=device).view(1, 1, S_sel).to(masked.dtype)
+        composite = masked - (base_idx * eps)
+        _, top_idx = torch.topk(composite, k=min(k_rest, S_sel), dim=-1, largest=True, sorted=True)
         sel_idx = torch.cat([forced_idx, top_idx], dim=-1)
     else:
         sel_idx = forced_idx
@@ -212,9 +216,10 @@ def select_topn_ranges_batched(
     # Deterministic top‑k using composite key with tiny index bias
     k_rest = max(0, n_top - forced.shape[-1])
     if k_rest > 0:
+        # Deterministic tie-breaker to prefer lower indices on ties
         base_idx = torch.arange(S_sel, device=device).view(1, 1, 1, S_sel).expand(B, S, G, S_sel)
         eps = torch.finfo(masked.dtype).eps
-        composite = masked + (base_idx.to(masked.dtype) * eps)
+        composite = masked - (base_idx.to(masked.dtype) * eps)
         _, top_idx = torch.topk(composite, k=min(k_rest, S_sel), dim=-1, largest=True)
         selected = torch.cat([forced, top_idx], dim=-1)
     else:
