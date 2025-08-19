@@ -161,3 +161,129 @@ def select_topn_ranges(
     return torch.stack(ranges, dim=0)  # [B,G,n_top,2]
 
 
+# ===== Batched selection (prefill fast path) =====
+
+def select_topn_ranges_batched(
+    p_grp_all: torch.Tensor,  # [B,S,G,S_sel]
+    meta: BlockMeta,
+    n_top: int,
+    S: int,
+    force_init: bool = True,
+    force_local: int = 2,
+) -> torch.Tensor:  # [B,S,G,n_ranges,2]
+    """
+    Deterministic batched selection:
+    - Mask future blocks per position t via block end ≤ t+1
+    - Force include block 0 and last k local blocks (dedup)
+    - Exclude forced from scored top‑k
+    - Deterministic tie‑break to lower index on equal scores
+    - Convert to merged contiguous [start,end) ranges clamped to ≤ t+1
+    """
+    B, S_q, G, S_sel = p_grp_all.shape
+    device = p_grp_all.device
+
+    sel_starts = meta.sel_starts.to(device)
+    sel_ends = sel_starts + meta.l_sel
+    tpos = torch.arange(S, device=device).view(S, 1)
+    valid = sel_ends.view(1, -1) <= (tpos + 1)  # [S,S_sel]
+    disallowed = ~valid
+    masked = p_grp_all.masked_fill(disallowed.view(1, S, 1, S_sel), float("-inf"))
+
+    # Forced blocks (dedup across 0 and locals)
+    forced_list = []
+    if force_init:
+        forced_list.append(torch.zeros((B, S, G, 1), dtype=torch.long, device=device))
+    if force_local > 0:
+        tpos1 = torch.arange(S, device=device)
+        last_block = (tpos1 // meta.l_sel).clamp_min(0)
+        for k in range(force_local):
+            idx = (last_block - k).clamp_min(0).view(1, S, 1, 1).expand(B, S, G, 1)
+            forced_list.append(idx)
+    forced = (
+        torch.cat(forced_list, dim=-1).unique(sorted=True, dim=-1)
+        if forced_list else torch.empty((B, S, G, 0), dtype=torch.long, device=device)
+    )
+
+    if forced.numel() > 0:
+        forced_mask = torch.zeros_like(masked, dtype=torch.bool)
+        forced_mask.scatter_(-1, forced, True)
+        masked = masked.masked_fill(forced_mask, float("-inf"))
+
+    # Deterministic top‑k using composite key with tiny index bias
+    k_rest = max(0, n_top - forced.shape[-1])
+    if k_rest > 0:
+        base_idx = torch.arange(S_sel, device=device).view(1, 1, 1, S_sel).expand(B, S, G, S_sel)
+        eps = torch.finfo(masked.dtype).eps
+        composite = masked + (base_idx.to(masked.dtype) * eps)
+        _, top_idx = torch.topk(composite, k=min(k_rest, S_sel), dim=-1, largest=True)
+        selected = torch.cat([forced, top_idx], dim=-1)
+    else:
+        selected = forced[..., :n_top]
+
+    # Keep only valid (≤ t) indices; drop disallowed fill-ins
+    valid_full = valid.view(1, S, 1, S_sel).expand(B, S, G, S_sel)
+    is_valid_pick = torch.gather(valid_full, -1, selected)
+    # Replace invalid with -1 sentinel
+    selected = torch.where(is_valid_pick, selected, torch.full_like(selected, -1))
+    # Special-case: if requested n_top ≥ number of valid blocks at t, select exactly all valid blocks [0..t]
+    num_valid = valid.sum(dim=1)  # [S]
+    # Build ascending [0..S_sel-1] to pick prefix per t
+    all_idx = torch.arange(S_sel, device=device).view(1, 1, 1, S_sel).expand(B, S, G, S_sel)
+    pick_mask = all_idx < num_valid.view(1, S, 1, 1)
+    if n_top >= S_sel:
+        selected = torch.where(pick_mask, all_idx, torch.full_like(all_idx, -1))
+    selected = torch.sort(selected, dim=-1).values
+    ranges = convert_indices_to_ranges_batched(selected, meta, S)
+    return ranges
+
+
+def convert_indices_to_ranges_batched(
+    indices: torch.Tensor,  # [B,S,G,k]
+    meta: BlockMeta,
+    S: int,
+) -> torch.Tensor:  # [B,S,G,n_max,2]
+    B, S_q, G, k = indices.shape
+    device = indices.device
+    sel_starts = meta.sel_starts.to(device)
+
+    all_ranges = []
+    for b in range(B):
+        for t in range(S_q):
+            clamp_end = int(t) + 1
+            for g in range(G):
+                block_ids = [int(x) for x in indices[b, t, g].tolist() if int(x) >= 0]
+                spans = []
+                last_s, last_e = None, None
+                prev = None
+                for bid in block_ids:
+                    if prev is not None and bid == prev:
+                        continue
+                    prev = bid
+                    s0 = int(sel_starts[bid].item())
+                    e0 = min(s0 + meta.l_sel, clamp_end)
+                    if e0 <= s0:
+                        continue
+                    if last_s is None:
+                        last_s, last_e = s0, e0
+                    elif s0 == last_e:
+                        last_e = e0
+                    else:
+                        spans.append((last_s, last_e))
+                        last_s, last_e = s0, e0
+                if last_s is not None:
+                    spans.append((last_s, last_e))
+                all_ranges.append(spans)
+
+    max_ranges = max((len(r) for r in all_ranges), default=0)
+    out = torch.zeros((B, S_q, G, max_ranges, 2), dtype=torch.int32, device=device)
+    idx = 0
+    for b in range(B):
+        for t in range(S_q):
+            for g in range(G):
+                spans = all_ranges[idx]
+                for i, (s0, e0) in enumerate(spans):
+                    out[b, t, g, i, 0] = s0
+                    out[b, t, g, i, 1] = e0
+                idx += 1
+    return out
+

@@ -67,6 +67,10 @@ Decode token‑reads match formula and scale towards Table 4 expectations (rate�
 
 Prefill/backward timing trend approaches Figure 6 curves (shape, not exact ms).
 
+M0 implementation note:
+- Masked varlen SDPA (sliding/compressed) and selection packing are enabled by default for performance, with `NSA_FORCE_PARITY=1` to force SDPA/gather reference paths.
+- CPU fallback uses SDPA-only reference paths; FA‑2/Triton are not used in tests.
+
 NFR4 – Stability: No future leakage; gates do not saturate early.
 
 NFR5 – Local run: Single‑GPU A100/4090; BF16/FP32 fallback; CPU path for tiny debug.
@@ -241,6 +245,11 @@ Acceptance: Causality tests, Eq.9 mapping property tests (CSR weighted overlap),
 M1 — FA‑2 for Compressed & Sliding
 
 Swap SDPA→FA‑2 for cmp/win (paper: these branches compatible).
+
+M1 notes:
+- Integrate FA‑2 varlen/dense for cmp/win with packing buckets; keep SDPA reference and `NSA_FORCE_PARITY` fallback.
+- Parity tolerance vs SDPA oracle: FP32 ≤ 5e‑5 (BF16/FP16 ≤ 2e‑4 if tested); identical softmax scale; no dropout/bias.
+- Head_dim/device constraints: assert/xfail and fall back to SDPA when unsupported; CPU uses SDPA.
 
 M2 — Learnable ϕ & Trainable Gates
 
@@ -548,6 +557,32 @@ uv run python bench/bench_decode.py  --config configs/base.yaml
 uv run python cli/demo_infer.py --config configs/base.yaml
 
 # CPU fallback
+On CPU, FA‑2 paths are disabled; SDPA and masked/packed SDPA remain the reference implementations. Parity tests run in SDPA-only mode by default. GPU opt‑in tests validate FA‑2 numerics within tight tolerances.
+
+## Observability (FA‑2)
+- Log bucket histograms (`fa2.win.hist`, `fa2.cmp.hist`) and kernel path (`varlen` vs `dense`) with `NSA_DEBUG_TIMING=1`.
+- Record per-bucket timings for varlen/dense to guide threshold tuning (`NSA_FA2_MIN_LEN_WIN/CMP`).
+
+## Determinism (GPU)
+- Default behavior (GPU): enable FA‑2 by default (`NSA_USE_FA2=1` via config), retain `NSA_FORCE_PARITY=1` to force SDPA reference when needed.
+- FA‑2 kernels may not be bitwise deterministic across runs. We enforce numeric proximity in tests (e.g., MAE ≤ 1e‑5 for repeat runs) and keep SDPA FP32 as oracle in CI.
+
+## Thresholds (FA‑2)
+- Sliding: `runtime.fa2_min_len_win` controls the minimal window length to switch to FA‑2; tuned via GPU benches.
+- Compressed: `runtime.fa2_min_len_cmp` controls the minimal `num_cmp` to switch to FA‑2; tuned via GPU benches.
+- Both thresholds can be overridden by env: `NSA_FA2_MIN_LEN_WIN`, `NSA_FA2_MIN_LEN_CMP`.
+
+## Training (M2)
+- Loss masking for var‑length batches: ignore pad tokens in loss; maintain causal alignment with next‑token label shift.
+- Eq. 10 group‑consistency: selected ranges identical across heads within each GQA group during training.
+- Causality: no read indices beyond `t` across rows under var‑length packing; assert and test.
+- Mixed precision: prefer bf16 on supported GPUs; use GradScaler for fp16; keep accumulations in FP32 as needed.
+- Observability (training): log gate distributions, per‑branch contributions, FA‑2 path usage counts, gradient norms, and clipping events.
+- Optimizer defaults: AdamW with cosine decay and warmup; gradient clipping with `train.max_grad_norm`.
+
+### Training How‑To
+See `Documentation/Guides/Training-HowTo.md` for quick start, GPU usage, and environment flags.
+
 # On CPU or without Triton/FA‑2, selection falls back to SDPA gather; cmp/win use SDPA.
 
 20) Open Questions (tracked; default answers chosen)

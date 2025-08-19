@@ -13,6 +13,12 @@ nsa:
   phi: "avg"
 runtime:
   precision: "bf16"
-  use_flash: false
+  use_flash: true
   use_triton_sel: false
   compile_cmp_win: false
+  fa2_min_len_win: 16
+  fa2_min_len_cmp: 16
+train:
+  lr: 3.0e-4
+  warmup_steps: 50
+  max_grad_norm: 1.0
