@@ -6,6 +6,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is an implementation of Native Sparse Attention (NSA), a drop-in attention module for decoder-only Transformers with trainable, hardware-aligned sparse attention. The implementation follows the paper's architecture combining three branches (Compressed, Selected, Sliding) with learned gates.
 
+## Prime Intellect GPU Pod Access
+
+### SSH Connection Setup
+1. **SSH Key Location**: Prime Intellect ED25519 key is at `~/.ssh/primeintellect_ed25519`
+2. **Connection Command**: `ssh -i ~/.ssh/primeintellect_ed25519 root@<IP> -p <PORT>`
+3. **Pod Template**: Use "UBUNTU 22, CUDA 12" base image for cleanest environment
+4. **Note**: The private key MUST be in your local SSH directory with 600 permissions for authentication to work
+
+### Pod Setup Script
+```bash
+# After connecting to pod
+cd /root
+apt-get update && apt-get install -y git python3-pip python3-venv ninja-build
+git clone https://github.com/seconds-0/nsa-vibe.git
+cd nsa-vibe
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip wheel
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install triton packaging ninja
+pip install flash-attn --no-build-isolation
+pip install numpy hydra-core pydantic pytest hypothesis ruff mypy
+```
+
 ## Build and Test Commands
 
 ### Environment Setup
