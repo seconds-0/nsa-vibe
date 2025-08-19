@@ -30,6 +30,16 @@ Selection attention currently uses a parity-first gather/SDPA path (with an opti
 - Numerics and safety:
   - Maintain deterministic block selection (done pre-kernel); kernel only consumes ranges.
   - Clamp all reads ≤ t; unit asserts for bounds.
+  - Use FA-style log-sum-exp numerics; FP32 accumulation for stability; dtypes fp16/bf16 supported with FP32 accum.
+
+### Edge Cases & Constraints
+- Empty selection or padded zero-length ranges must return exact zeros and skip work.
+- Overlapping/adjacent ranges are pre-merged upstream; assert monotonic non-overlapping at entry (debug-only).
+- Variable range count: accept fixed n with padding; ignore zero-length ranges. Future: packed list with cu_seqlens.
+- Tiny shapes: support Dk∈{8,16}, S_kv small; add early-exit when total selected length L=0.
+- Head-dim/device/dtype constraints: document supported head dims (e.g., multiples of 8/16), compute capability, and dtypes; strict guard + SDPA gather fallback.
+- Determinism: stable reduction ordering per (B,G,h); no atomics across heads.
+- Thresholds: `sel_triton_min_L` optional threshold to skip Triton for tiny L; measure via microbench.
 
 ### Automated Test Plan
 - Forward parity: compare Triton fwd vs `grouped_selection_attention` across random shapes; MAE ≤ 1e‑6 (FP32).
@@ -37,6 +47,9 @@ Selection attention currently uses a parity-first gather/SDPA path (with an opti
 - Decode parity: S_q=1 path matches reference across random ranges.
 - Group consistency: verify identical selected ranges across heads (pre-kernel), and outputs equal across heads when Q identical.
 - Perf microbenches: per-range distribution sweeps; bucketed vs naive gather comparisons.
+- Edge tests: empty selection → zeros; padded ranges; tiny shapes (Dk=8), multi-group (G>1), multi-head per group.
+- Dtype tests: bf16/fp16 with FP32 accum vs FP32 oracle.
+- Determinism: repeated runs equal outputs (fixed seed).
 
 ### Components Involved
 - `nsa/kernels/triton_sel_kernel/sel_fwd.triton`, `sel_bwd.triton`.
@@ -54,6 +67,8 @@ Selection attention currently uses a parity-first gather/SDPA path (with an opti
 - [ ] Unit tests (fwd/bwd parity, gradcheck)
 - [ ] Perf microbench harness
 - [ ] CI gating and docs
+- [ ] Guards & fallbacks (dtype, head_dim, capability, min-L)
+- [ ] Observability counters (selected tokens/bytes)
 
 ### Status
 Not Started

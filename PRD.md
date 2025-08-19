@@ -431,6 +431,15 @@ Backward recomputes logits chunk‑wise and writes sparse dK,dV for selected ran
 
 CPU fallback: Gather the selected raw token ranges and run PyTorch SDPA as the reference implementation (used in CPU CI and as correctness oracle for Triton numerics).
 
+13.5.1 Selection Kernel Constraints & Fallback Policy (M4)
+
+- Supported dtypes: FP32 (oracle), BF16/FP16 inputs with FP32 accumulation; outputs cast back to input dtype.
+- Head dim: multiples of 8/16 recommended; runtime guard enforces supported sizes, else fallback to SDPA gather.
+- Device capability: Triton enabled only on supported GPUs; CPU path always SDPA gather.
+- Empty selection / padded ranges: return exact zeros and skip compute; zero-length ranges ignored.
+- Determinism: stable reductions per (B,G,h); no cross-head atomics; outputs deterministic for fixed seeds.
+- Thresholds: tiny total selected length L may run faster on SDPA; expose `sel_triton_min_L` to prefer fallback under that threshold.
+
 14) Config Examples
 
 configs/base.yaml
