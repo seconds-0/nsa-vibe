@@ -162,9 +162,11 @@ class NSAAttention(nn.Module):
                 return self._forward_prefill_sequential(x, kv)
         else:
             # Projections
+            # Compute absolute position offset from existing cache length for RoPE on Q
+            t_prev = kv.K_sel.shape[2] if hasattr(kv, "K_sel") else 0
             Q_lin = self._shape_q(self.W_Q(x), B, S)  # [B,S,G,h,Dk]
-            # Apply RoPE to Q
-            pos = torch.arange(S, device=x.device)
+            # Apply RoPE to Q with absolute positions (decode)
+            pos = torch.arange(t_prev, t_prev + S, device=x.device)
             Q = apply_rope(Q_lin.view(B, S, self.n_heads, self.d_k).reshape(B, S, self.n_heads * self.d_k), pos)
             Q = Q.view(B, S, self.n_heads, self.d_k)
             G = self.n_kv_groups
@@ -176,6 +178,13 @@ class NSAAttention(nn.Module):
             V_win = self._shape_kv(self.W_V_win(x), B, S)
             K_cmp_raw = self._shape_kv(self.W_K_cmp(x), B, S)
             V_cmp_raw = self._shape_kv(self.W_V_cmp(x), B, S)
+
+            # Apply RoPE to K for selection/sliding branches using absolute position of the new token(s)
+            # Determine current token index before appending to caches
+            t_prev = kv.K_sel.shape[2] if hasattr(kv, "K_sel") else 0
+            pos_k = torch.arange(t_prev, t_prev + S, device=x.device)
+            K_sel = apply_rope(K_sel, pos_k)
+            K_win = apply_rope(K_win, pos_k)
 
             # decode step: append raw tokens and window, emit compressed every d after warmup l
             kv.update_selection_raw(K_sel, V_sel)
@@ -194,19 +203,38 @@ class NSAAttention(nn.Module):
                 # Emit compressed token from the last l raw tokens
                 K_last = kv.K_cmp_raw_seq[:, :, S_raw - self.l : S_raw, :]
                 V_last = kv.V_cmp_raw_seq[:, :, S_raw - self.l : S_raw, :]
-                K_cmp_new, V_cmp_new = avg_pool_phi_rope_kv(K_last, V_last, self.l, self.d)
+                pos_last = torch.arange(S_raw - self.l, S_raw, device=x.device)
+                K_cmp_new, V_cmp_new = avg_pool_phi_rope_kv(K_last, V_last, self.l, self.d, pos=pos_last)
                 kv.update_compressed(
                     torch.cat([kv.K_cmp, K_cmp_new], dim=2) if kv.K_cmp.numel() else K_cmp_new,
                     torch.cat([kv.V_cmp, V_cmp_new], dim=2) if kv.V_cmp.numel() else V_cmp_new,
                     self.l,
                     self.d,
                 )
+
+            # Ensure block metadata exists and covers current token index for selection (expand if needed)
+            t_token = kv.K_sel.shape[2] - 1
+            if not hasattr(kv, "meta") or kv.meta.sel_starts.numel() == 0:
+                kv.meta = build_block_meta(seq_len=max(t_token + 1, self.l_sel), l=self.l, d=self.d, l_sel=self.l_sel, n_sel=self.n_sel, w=self.w)
+            else:
+                # If current t exceeds covered selection range, rebuild meta with expanded seq_len
+                sel_max_end = int(kv.meta.sel_starts[-1].item()) + kv.meta.l_sel if kv.meta.sel_starts.numel() > 0 else 0
+                if (t_token + 1) > sel_max_end:
+                    kv.meta = build_block_meta(seq_len=t_token + 1, l=self.l, d=self.d, l_sel=self.l_sel, n_sel=self.n_sel, w=self.w)
             # Append predicted reads per formula for this step
             num_cmp = 0 if S_raw < self.l else (S_raw - self.l) // self.d + 1
             reads = num_cmp + self.n_sel * self.l_sel + min(self.w, S_raw)
             kv.append_reads_pred(reads)
             # Append actual reads equal to formula in M0
             kv.append_reads_actual(reads, self.n_sel * self.l_sel, num_cmp, min(self.w, S_raw))
+            log(
+                "decode.reads",
+                S_raw=int(S_raw),
+                num_cmp=int(num_cmp),
+                sel=int(self.n_sel * self.l_sel),
+                win=int(min(self.w, S_raw)),
+                total=int(reads),
+            )
 
             scale = 1.0 / (self.d_k ** 0.5)
             # Batched compute for decode is not required; use existing per-token logic above
@@ -219,14 +247,39 @@ class NSAAttention(nn.Module):
                 p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all[:, t : t + 1], kv.meta)
                 p_grp = p_slc_all.sum(dim=3).squeeze(1)  # [B,G,S_sel]
                 sel_ranges = select_topn_ranges(p_grp, kv.meta, self.n_sel, kv.K_sel.shape[2] - 1, True, 2)
+                # Observability: selection distance summary per step
+                try:
+                    starts = sel_ranges[..., 0].to(torch.int64)
+                    ends = sel_ranges[..., 1].to(torch.int64)
+                    lengths = (ends - starts).clamp_min(0)
+                    dist = (kv.K_sel.shape[2] - 1) - starts
+                    log(
+                        "decode.select",
+                        n_ranges=int(sel_ranges.shape[2]),
+                        mean_len=float(lengths.float().mean().item()) if lengths.numel() else 0.0,
+                        max_len=int(lengths.max().item()) if lengths.numel() else 0,
+                        mean_dist=float(dist.float().mean().item()) if dist.numel() else 0.0,
+                        max_dist=int(dist.max().item()) if dist.numel() else 0,
+                    )
+                except Exception:
+                    pass
                 Q_t = Q[:, t]
                 K_sel_t = kv.K_sel
                 V_sel_t = kv.V_sel
-                O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
+                # Selection attention: prefer packed path (env-gated), fallback to exact gather
+                force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
+                use_sel_pack = os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes") and not force_parity
+                if use_sel_pack:
+                    O_sel_bt = grouped_selection_attention_packed(Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1))
+                    O_sel = O_sel_bt[:, 0]
+                elif os.getenv("NSA_USE_SEL_MASK", "0").lower() in ("1", "true", "yes") and not force_parity:
+                    O_sel_bt = grouped_selection_attention_masked(Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1))
+                    O_sel = O_sel_bt[:, 0]
+                else:
+                    O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
                 win_len = min(self.w, kv.K_win.shape[2])
                 K_w = kv.K_win[:, :, kv.K_win.shape[2] - win_len : kv.K_win.shape[2], :]
                 V_w = kv.V_win[:, :, kv.V_win.shape[2] - win_len : kv.V_win.shape[2], :]
-                force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
                 fa2_all = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes")
                 fa2_win = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
                 fa2_cmp = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
@@ -242,6 +295,15 @@ class NSAAttention(nn.Module):
                     O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)
                 q_gp = Q_t.mean(dim=2)
                 gates = self.gate(q_gp, tau=self.gate_temp)
+                # Observability: gate stats
+                try:
+                    log(
+                        "decode.gates",
+                        mean=gates.mean(dim=(-1, -2)).tolist() if gates.dim() >= 2 else gates.mean().item(),
+                        std=gates.std(dim=(-1, -2)).tolist() if gates.dim() >= 2 else gates.std().item(),
+                    )
+                except Exception:
+                    pass
                 O = gates[..., 0:1] * O_cmp + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win
                 O_heads = O.reshape(B, self.n_heads, self.d_v)
                 out_t = self.out(O_heads.reshape(B, 1, -1))
@@ -289,7 +351,7 @@ class NSAAttention(nn.Module):
         # Build/refresh meta for selection and compressed mapping
         kv.meta = build_block_meta(seq_len=S, l=self.l, d=self.d, l_sel=self.l_sel, n_sel=self.n_sel, w=self.w)
         kv.update_window(K_win, V_win, self.w)
-        K_cmp, V_cmp = avg_pool_phi_rope_kv(K_cmp_raw, V_cmp_raw, self.l, self.d)
+        K_cmp, V_cmp = avg_pool_phi_rope_kv(K_cmp_raw, V_cmp_raw, self.l, self.d, pos=torch.arange(S, device=x.device))
         kv.update_compressed(K_cmp, V_cmp, self.l, self.d)
 
         # Selection scores (batched)
@@ -437,7 +499,7 @@ class NSAAttention(nn.Module):
         kv.update_selection_raw(K_sel, V_sel)
         kv.meta = build_block_meta(seq_len=S, l=self.l, d=self.d, l_sel=self.l_sel, n_sel=self.n_sel, w=self.w)
         kv.update_window(K_win, V_win, self.w)
-        K_cmp, V_cmp = avg_pool_phi_rope_kv(K_cmp_raw, V_cmp_raw, self.l, self.d)
+        K_cmp, V_cmp = avg_pool_phi_rope_kv(K_cmp_raw, V_cmp_raw, self.l, self.d, pos=torch.arange(S, device=x.device))
         kv.update_compressed(K_cmp, V_cmp, self.l, self.d)
 
         # Precompute p_grp_all batched for reuse per t

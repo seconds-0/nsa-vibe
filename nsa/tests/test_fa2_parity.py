@@ -7,6 +7,8 @@ from nsa.core.attention_kernels import (
     batched_causal_attention_compressed_masked,
     sliding_window_attention_fa2,
     compressed_attention_fa2,
+    sliding_window_attention_fa2_decode,
+    compressed_attention_fa2_decode,
 )
 from nsa.kernels.flash_wrappers import is_flash_available, fa2_supported
 from nsa.kernels.flash_wrappers import attention_bgh
@@ -85,7 +87,6 @@ def test_decode_paths_dense_bucket():
     K = torch.randn(B, G, S, Dk)
     V = torch.randn(B, G, S, Dv)
     # sliding decode
-    from nsa.core.attention_kernels import sliding_window_attention_fa2_decode
     for t in range(1, S + 1):
         out_ref = torch.zeros(B, G, h, Dv)
         start = max(0, t - w)
@@ -93,7 +94,6 @@ def test_decode_paths_dense_bucket():
         out = sliding_window_attention_fa2_decode(Q[:, t - 1], K[:, :, :t], V[:, :, :t], w)
         assert (out - out_ref).abs().max().item() < 1e-6
     # compressed decode
-    from nsa.core.attention_kernels import compressed_attention_fa2_decode
     l, d = 4, 2
     S_cmp = (S - l) // d + 1
     K_raw = torch.randn(B, G, S, Dk)

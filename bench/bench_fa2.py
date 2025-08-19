@@ -14,12 +14,15 @@ from nsa.kernels.flash_wrappers import fa2_supported
 def bench_pair(fn_ref, fn_new, *args, iters=10):
     # warmup
     fn_ref(*args)
+    torch.cuda.synchronize()  # Ensure warmup completes
     t0 = time.time()
     for _ in range(iters):
         fn_ref(*args)
+    torch.cuda.synchronize()  # Ensure all ref iterations complete
     t1 = time.time()
     for _ in range(iters):
         fn_new(*args)
+    torch.cuda.synchronize()  # Ensure all new iterations complete
     t2 = time.time()
     return (t1 - t0) / iters, (t2 - t1) / iters
 

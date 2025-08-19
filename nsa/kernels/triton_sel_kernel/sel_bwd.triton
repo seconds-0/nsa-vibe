@@ -1,0 +1,2 @@
+// Placeholder for Triton backward kernel (M5)
+// This file will contain the selection attention backward implementation.

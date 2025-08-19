@@ -79,15 +79,15 @@ PRD milestone M3 requires completing the full decode cache execution model so de
 - M1 thresholds (FA‑2) pending GPU benches — proceed with current conservative defaults; keep `NSA_FORCE_PARITY` to disable FA‑2 in CI.
 
 ### Implementation Checklist
-- [ ] Decode step cache updates: selection append, sliding window slide, compressed emission schedule (+ϕ on last `l`).
-- [ ] Selection at decode: `p_cmp → p_slc (CSR) → group‑reduce → top‑n (det, forced) → de‑dup/merge → ranges`.
-- [ ] Branch attentions at decode: SDPA on CPU; FA‑2 decode helpers on GPU with small‑length thresholds.
-- [ ] Gate & output assembly; return `[B,1,dim]` with residual wiring left to caller.
-- [ ] Counters: predicted and actual per‑step reads; per‑branch breakdown; unit asserts.
-- [ ] Causality & group‑consistency asserts (tests): no reads > t; identical selected ranges across heads in a GQA group.
-- [ ] Small‑S equivalence: configure coverage to match full attention; MAE ≤ tol FP32.
-- [ ] Observability: env‑gated logs (`NSA_DEBUG_LOG`/`NSA_DEBUG_TIMING`).
-- [ ] CPU fallback and deterministic seeds in CI; ensure tests green.
+- [x] Decode step cache updates: selection append, sliding window slide, compressed emission schedule (+ϕ on last `l`).
+- [x] Selection at decode: `p_cmp → p_slc (CSR) → group‑reduce → top‑n (det, forced) → de‑dup/merge → ranges`.
+- [x] Branch attentions at decode: SDPA on CPU; FA‑2 decode helpers on GPU with small‑length thresholds.
+- [x] Gate & output assembly; return `[B,1,dim]` with residual wiring left to caller.
+- [x] Counters: predicted and actual per‑step reads; per‑branch breakdown; unit asserts.
+- [x] Causality & group‑consistency asserts (tests): no reads > t; identical selected ranges across heads in a GQA group.
+- [x] Small‑S equivalence: configure coverage to match full attention; MAE ≤ tol FP32.
+- [x] Observability: env‑gated logs (`NSA_DEBUG_LOG`/`NSA_DEBUG_TIMING`).
+- [x] CPU fallback and deterministic seeds in CI; ensure tests green.
 
 ### Verification Steps
 - Run default suite (CPU) → green.
@@ -104,7 +104,7 @@ PRD milestone M3 requires completing the full decode cache execution model so de
 - Prefer clarity and correctness over micro‑perf at this stage; keep SDPA or per‑token reference path available for parity.
 
 ### Status
-Not Started
+Completed
 
 ### Notes
 - Keep `NSA_FORCE_PARITY=1` as an escape hatch in CI until FA‑2 decode parity is validated on GPU.
