@@ -104,10 +104,10 @@ def selection_attention_triton(
                 O[b, t, g] = O_pack[j]
         # Observability: estimate tokens/bytes read
         from nsa.core.debug import log
-        total_tokens = int(total_L) if 'total_L' in locals() else int(sum(k for k in buckets.keys()) * max(1, len(next(iter(buckets.values())))))
+        total_tokens = int(sum(L_i * len(items) for L_i, items in buckets.items())) if buckets else 0
         bytes_k = int(total_tokens * D * Q.element_size() if buckets else 0)
         bytes_v = int(total_tokens * Dv * V.element_size() if buckets else 0)
-        log("sel.triton.reads", total_tokens=total_tokens, bytes_k=bytes_k, bytes_v=bytes_v)
+        log("sel.triton.reads", total_tokens=total_tokens, bytes_k=bytes_k, bytes_v=bytes_v, buckets=len(buckets))
     except Exception:
         from nsa.core.attention_kernels import grouped_selection_attention_packed
         return grouped_selection_attention_packed(Q, K, V, ranges)
