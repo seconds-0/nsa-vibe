@@ -80,6 +80,14 @@ class ToyHead(nn.Module):
 
 def main():
 	cfg = TrainConfig()
+	# Env overrides for quick tuning
+	cfg.seed = int(os.getenv("NSA_TRAIN_SEED", str(cfg.seed)))
+	cfg.lr = float(os.getenv("NSA_TRAIN_LR", str(cfg.lr)))
+	cfg.warmup_steps = int(os.getenv("NSA_TRAIN_WARMUP", str(cfg.warmup_steps)))
+	cfg.max_grad_norm = float(os.getenv("NSA_TRAIN_CLIP", str(cfg.max_grad_norm)))
+	cfg.batch_size = int(os.getenv("NSA_TRAIN_BS", str(cfg.batch_size)))
+	cfg.max_len = int(os.getenv("NSA_TRAIN_MAX_LEN", str(cfg.max_len)))
+	cfg.steps = int(os.getenv("NSA_TRAIN_STEPS", str(cfg.steps)))
 	set_seed(cfg.seed)
 	device = torch.device(cfg.device)
 	model = nn.Sequential(
@@ -99,9 +107,20 @@ def main():
 	).to(device)
 	opt = optim.AdamW(model.parameters(), lr=cfg.lr)
 	scaler = GradScaler(enabled=cfg.use_amp)
+	debug = os.getenv("NSA_DEBUG_TRAIN", "0").lower() in ("1", "true", "yes")
+
+	def lr_at(step: int) -> float:
+		# Linear warmup to cosine decay
+		if step < cfg.warmup_steps:
+			return cfg.lr * (step + 1) / max(1, cfg.warmup_steps)
+		# Cosine from warmup to steps
+		t = (step - cfg.warmup_steps) / max(1, cfg.steps - cfg.warmup_steps)
+		return cfg.lr * 0.5 * (1.0 + math.cos(math.pi * t))
 
 	model.train()
 	for step in range(cfg.steps):
+		for pg in opt.param_groups:
+			pg["lr"] = lr_at(step)
 		x, labels, mask = synthetic_batch(cfg)
 		x = x.to(device)
 		labels = labels.to(device)
@@ -120,8 +139,14 @@ def main():
 			loss.backward()
 			nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
 			opt.step()
-		if step % 20 == 0:
-			print(f"step={step} loss={loss.item():.4f}")
+		if debug and step % 10 == 0:
+			# Print loss, lr, grad-norm
+			with torch.no_grad():
+				gn = 0.0
+				for p in model.parameters():
+					if p.grad is not None:
+						gn += float(p.grad.detach().norm().item())
+				print(f"step={step} lr={opt.param_groups[0]['lr']:.2e} loss={loss.item():.4f} grad_norm≈{gn:.2f}")
 
 	print("done")
 
