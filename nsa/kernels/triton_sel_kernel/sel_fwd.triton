@@ -1,0 +1,3 @@
+// Placeholder for Triton forward kernel (M4)
+// This file will contain the selection attention forward implementation.
+// Until implemented, Python wrapper falls back to packed SDPA path.
