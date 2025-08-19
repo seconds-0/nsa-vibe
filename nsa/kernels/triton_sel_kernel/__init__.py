@@ -29,6 +29,9 @@ def selection_attention_triton(
     Selection attention via Triton kernel (M4). Until kernels are implemented,
     this wrapper falls back to the packed or gather SDPA reference.
     """
+    # Clamp ranges to valid [0, S_kv] first for consistent semantics
+    S_kv = K.shape[2]
+    ranges = ranges.clamp(min=0, max=S_kv)
     # If Triton disabled or unavailable, fall back to reference implementations
     if not (_env_true("NSA_USE_TRITON_SEL", False) and triton_sel_available()):
         from nsa.core.attention_kernels import (
@@ -38,6 +41,26 @@ def selection_attention_triton(
         if use_packed_fallback:
             return grouped_selection_attention_packed(Q, K, V, ranges)
         return grouped_selection_attention(Q, K, V, ranges)
+
+    # Defensive input checks and gatekeeping
+    # - If training/grad enabled and not explicitly allowed, fall back to packed
+    if torch.is_grad_enabled() and (
+        Q.requires_grad or K.requires_grad or V.requires_grad
+    ) and not _env_true("NSA_SEL_TRITON_ALLOW_GRAD", False):
+        from nsa.core.attention_kernels import grouped_selection_attention_packed
+        return grouped_selection_attention_packed(Q, K, V, ranges)
+    # - Dtype support: only half/bfloat16
+    allowed_dtypes = {torch.float16, torch.bfloat16}
+    if Q.dtype not in allowed_dtypes or K.dtype not in allowed_dtypes or V.dtype not in allowed_dtypes:
+        from nsa.core.attention_kernels import grouped_selection_attention_packed
+        return grouped_selection_attention_packed(Q, K, V, ranges)
+    # - Alignment requirement (optional)
+    if _env_true("NSA_SEL_TRITON_REQUIRE_ALIGN", True):
+        D = Q.shape[-1]
+        Dv = V.shape[-1]
+        if (D % 8 != 0) or (Dv % 8 != 0):
+            from nsa.core.attention_kernels import grouped_selection_attention_packed
+            return grouped_selection_attention_packed(Q, K, V, ranges)
 
     # TODO(M4): Implement Triton forward path; for now, defer to packed fallback when rows have small L
     # Simple heuristic: use Triton only if total selected length per row ≥ sel_triton_min_L
@@ -123,6 +146,12 @@ def selection_attention_triton(
         bytes_k = int(total_tokens * D * Q.element_size() if buckets else 0)
         bytes_v = int(total_tokens * Dv * V.element_size() if buckets else 0)
         log("sel.triton.reads", total_tokens=total_tokens, bytes_k=bytes_k, bytes_v=bytes_v, buckets=len(buckets))
+        # Optional parity compare for observability
+        if _env_true("NSA_DEBUG_COMPARE", False):
+            from nsa.core.attention_kernels import grouped_selection_attention_packed
+            O_ref = grouped_selection_attention_packed(Q, K, V, ranges)
+            mae = (O - O_ref).abs().mean().item()
+            log("sel.triton.parity", mae=mae)
     except Exception:
         from nsa.core.attention_kernels import grouped_selection_attention_packed
         return grouped_selection_attention_packed(Q, K, V, ranges)
