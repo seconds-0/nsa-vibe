@@ -16,8 +16,8 @@ runtime:
   use_flash: true
   use_triton_sel: false
   compile_cmp_win: false
-  fa2_min_len_win: 16
-  fa2_min_len_cmp: 16
+  fa2_min_len_win: 1024  # Enable FA-2 for sliding windows ≥1024 tokens (RTX 4090: 7-8% speedup)
+  fa2_min_len_cmp: 1024  # Enable FA-2 for compressed attention ≥1024 tokens (SDPA faster <1024)
 train:
   lr: 3.0e-4
   warmup_steps: 50
