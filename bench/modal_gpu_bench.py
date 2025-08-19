@@ -26,6 +26,7 @@ app = modal.App("nsa-gpu-bench")
 gpu_image = (
     modal.Image.from_registry("nvcr.io/nvidia/pytorch:24.06-py3", add_python="3.10")
     .apt_install("git", "curl")
+    .pip_install("pyyaml")  # Required for parsing configs
     .run_commands(
         "curl -LsSf https://astral.sh/uv/install.sh | sh",
         "echo 'export PATH=/root/.cargo/bin:$PATH' >> ~/.bashrc",
@@ -133,7 +134,7 @@ def determine_thresholds(results: List[BenchmarkResult], safety_margin: float = 
     image=gpu_image,
     gpu=modal.gpu.T4(),  # Default to T4, can be overridden
     timeout=900,  # 15 minutes
-    retries=1,
+    retries=2,  # Retry once on failure
 )
 def run_gpu_benchmark(gpu_type: str = "T4") -> Dict:
     """
@@ -147,8 +148,9 @@ def run_gpu_benchmark(gpu_type: str = "T4") -> Dict:
     """
     import torch
     
-    # Clone repository
-    subprocess.run(["git", "clone", "https://github.com/seconds-0/nsa-vibe.git"], check=True)
+    # Clone repository (or update if exists)
+    if not os.path.exists("nsa-vibe"):
+        subprocess.run(["git", "clone", "https://github.com/seconds-0/nsa-vibe.git"], check=True)
     os.chdir("nsa-vibe")
     
     # Set up environment
@@ -184,6 +186,9 @@ def run_gpu_benchmark(gpu_type: str = "T4") -> Dict:
     
     if not device_info["cuda_available"]:
         return {"error": "No GPU available", "device_info": device_info}
+    
+    if not device_info.get("flash_available", False):
+        print("Warning: FlashAttention-2 not available, attempting to continue...")
     
     # Run parity tests
     print("Running GPU parity tests...")

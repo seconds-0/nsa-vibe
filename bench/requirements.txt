@@ -1,0 +1,13 @@
+# Requirements for automated GPU benchmarking tools
+
+# Core dependencies
+modal>=0.56.0     # Serverless GPU execution
+pyyaml>=6.0       # Config file parsing and updating
+
+# Optional providers (uncomment as needed)
+# runpod>=1.0.0   # RunPod API (future)
+# lambda-cloud>=0.1.0  # Lambda Cloud API (future)
+
+# For local benchmarking (should already be in main requirements.txt)
+torch>=2.0.0
+pytest>=7.0.0

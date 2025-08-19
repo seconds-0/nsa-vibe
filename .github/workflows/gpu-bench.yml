@@ -87,9 +87,9 @@ jobs:
         with:
           python-version: '3.10'
       
-      - name: Install Modal
+      - name: Install Dependencies
         run: |
-          pip install modal
+          pip install modal pyyaml
       
       - name: Run GPU Benchmark
         env:
@@ -107,9 +107,6 @@ jobs:
       - name: Parse Results and Update Config
         id: optimize
         run: |
-          # Install dependencies for threshold optimizer
-          pip install pyyaml
-          
           # Run optimizer
           SAFETY_MARGIN="${{ github.event.inputs.safety_margin || '1.2' }}"
           python bench/threshold_optimizer.py \
@@ -172,9 +169,7 @@ jobs:
             <details>
             <summary>📊 Benchmark Report</summary>
             
-            ```markdown
-            $(cat benchmark_report.md)
-            ```
+            See the [workflow artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the full benchmark report.
             
             </details>
             
@@ -229,9 +224,9 @@ jobs:
         with:
           python-version: '3.10'
       
-      - name: Install Modal
+      - name: Install Dependencies
         run: |
-          pip install modal pyyaml
+          pip install modal pyyaml pyyaml
       
       - name: Run Benchmark on ${{ matrix.gpu }}
         env:

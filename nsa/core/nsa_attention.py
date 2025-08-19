@@ -31,6 +31,7 @@ from nsa.core.attention_kernels import (
 )
 from nsa.core.selection_scorer import select_topn_ranges_batched
 from nsa.core.debug import log
+from nsa.core.block_index import build_block_meta
 
 
 class GateMLP(nn.Module):
@@ -285,6 +286,8 @@ class NSAAttention(nn.Module):
 
         # Update caches (prefill uses full sequence projections)
         kv.update_selection_raw(K_sel, V_sel)
+        # Build/refresh meta for selection and compressed mapping
+        kv.meta = build_block_meta(seq_len=S, l=self.l, d=self.d, l_sel=self.l_sel, n_sel=self.n_sel, w=self.w)
         kv.update_window(K_win, V_win, self.w)
         K_cmp, V_cmp = avg_pool_phi_rope_kv(K_cmp_raw, V_cmp_raw, self.l, self.d)
         kv.update_compressed(K_cmp, V_cmp, self.l, self.d)
@@ -432,6 +435,7 @@ class NSAAttention(nn.Module):
         V_cmp_raw = self._shape_kv(self.W_V_cmp(x), B, S)
 
         kv.update_selection_raw(K_sel, V_sel)
+        kv.meta = build_block_meta(seq_len=S, l=self.l, d=self.d, l_sel=self.l_sel, n_sel=self.n_sel, w=self.w)
         kv.update_window(K_win, V_win, self.w)
         K_cmp, V_cmp = avg_pool_phi_rope_kv(K_cmp_raw, V_cmp_raw, self.l, self.d)
         kv.update_compressed(K_cmp, V_cmp, self.l, self.d)
