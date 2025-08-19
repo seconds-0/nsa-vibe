@@ -214,7 +214,8 @@ def _get_block_sizes(D: int, L: int, Dv: int) -> tuple[int, int, int]:
         except Exception:
             return default
     BLOCK_D = _env_int("NSA_SEL_TRITON_BLOCK_D", 64 if D >= 64 else 32)
-    BLOCK_L = _env_int("NSA_SEL_TRITON_BLOCK_L", 128 if L >= 128 else 64)
+    # Conservative default for reliability across devices; autotune will refine
+    BLOCK_L = _env_int("NSA_SEL_TRITON_BLOCK_L", 64)
     BLOCK_DV = _env_int("NSA_SEL_TRITON_BLOCK_DV", 64 if Dv >= 64 else 32)
     return BLOCK_D, BLOCK_L, BLOCK_DV
 
@@ -270,7 +271,7 @@ def sel_attn_fwd_varlen(Q: torch.Tensor, K_all: torch.Tensor, V_all: torch.Tenso
     stride_vL, stride_vd = V_all.stride(0), V_all.stride(1)
     stride_on, stride_oh, stride_odv = O.stride(0), O.stride(1), O.stride(2)
     grid = (N * H,)
-    # Estimate a typical L for tuning from average row length
+    # Estimate a typical L for tuning from average row length (still conservative default for BLOCK_L)
     total_L = int(cu_seqlens[-1].item())
     avg_L = max(1, total_L // max(1, N))
     BLOCK_D, BLOCK_L, BLOCK_DV = _get_block_sizes(D, avg_L, Dv)

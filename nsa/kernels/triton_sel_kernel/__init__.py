@@ -19,6 +19,7 @@ def triton_sel_available() -> bool:
 
 _PACK_CACHE: dict[int, dict[str, torch.Tensor]] = {}
 _DEVICE_LOGGED: bool = False
+_PACK_CACHE_MAX_ENTRIES: int = 4
 
 
 def _get_pack_buffers(device: torch.device, total_L: int, D: int, Dv: int, N: int, dtype_k: torch.dtype, dtype_v: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -33,6 +34,9 @@ def _get_pack_buffers(device: torch.device, total_L: int, D: int, Dv: int, N: in
         Kb = torch.empty((total_L, D), device=device, dtype=dtype_k)
         Vb = torch.empty((total_L, Dv), device=device, dtype=dtype_v)
         cu = torch.empty((N + 1,), device=device, dtype=torch.int32)
+        # simple size-limited cache to prevent unbounded growth
+        if len(_PACK_CACHE) >= _PACK_CACHE_MAX_ENTRIES:
+            _PACK_CACHE.clear()
         _PACK_CACHE[key] = {"K": Kb, "V": Vb, "cu": cu}
     else:
         Kb = _PACK_CACHE[key]["K"][:total_L]
