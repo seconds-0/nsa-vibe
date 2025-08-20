@@ -3,6 +3,7 @@ from typing import Tuple, Optional
 
 import torch
 from torch.utils.cpp_extension import load as _load_ext
+from nsa.core.debug import log as _log
 
 from nsa.core.flags import env_true as _env_true
 
@@ -32,7 +33,9 @@ def _load_extension() -> Optional[object]:
             extra_cuda_cflags=["-O3"],
         )
         return _EXT
-    except Exception:
+    except (RuntimeError, OSError) as e:
+        # Narrow exception handling; preserve KeyboardInterrupt/SystemExit
+        _log("sel.cuda.build_failed", err=str(e))
         _EXT = None
         return None
 
@@ -57,7 +60,8 @@ def selection_attention_cuda(
     if use_cuda and ext is not None:
         try:
             return ext.sel_forward(Q, K, V, ranges)
-        except Exception:
-            pass  # fall through to fallback
+        except (RuntimeError, ValueError) as e:
+            _log("sel.cuda.forward_failed", err=str(e))
+            # fall through to fallback
     from nsa.core.attention_kernels import grouped_selection_attention_packed
     return grouped_selection_attention_packed(Q, K, V, ranges)

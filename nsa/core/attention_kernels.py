@@ -359,6 +359,22 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _is_sm89(device: torch.device) -> bool:
+    """Return True if running on CUDA device with SM 8.9 (Ada/RTX 4090)."""
+    if device.type != "cuda":
+        return False
+    try:
+        cap = torch.cuda.get_device_capability(device)
+        return cap == (8, 9)
+    except Exception:
+        return False
+
+
+def _fa2_forced() -> bool:
+    """Return True if FA-2 usage is explicitly forced via env."""
+    return _env_bool("NSA_FA2_FORCE", False)
+
+
 def sliding_window_attention_fa2(
     Q: torch.Tensor,  # [B,S,G,h,Dk]
     K: torch.Tensor,  # [B,G,S,Dk]

@@ -34,7 +34,7 @@ at::Tensor sel_forward(
   TORCH_CHECK(Q.is_cuda() && K.is_cuda() && V.is_cuda() && ranges.is_cuda(), "all tensors must be CUDA");
   TORCH_CHECK(Q.scalar_type() == at::kHalf || Q.scalar_type() == at::kBFloat16,
               "Q must be fp16 or bf16");
-  TORCH_CHECK(K.scalar_type() == Q.scalar_type() && V.scalar_type() == V.scalar_type(), "dtype mismatch");
+  TORCH_CHECK(K.scalar_type() == Q.scalar_type() && V.scalar_type() == Q.scalar_type(), "dtype mismatch");
 
   auto B = Q.size(0);
   auto S = Q.size(1);
@@ -61,6 +61,7 @@ at::Tensor sel_forward(
         Tensor Qbsg = Q[b][s][g];                    // [h,Dk]
 
         // scores: [h,L] = Q * K^T
+        // TODO: Consider batching across (b,s,g) and heads to reduce kernel launches
         Tensor scores = at::matmul(Qbsg.to(at::kFloat), Kbg.to(at::kFloat).transpose(0,1)) * scale; // [h,L]
         Tensor probs = at::softmax(scores, /*dim=*/-1); // [h,L]
         Tensor O = at::matmul(probs, Vbg.to(at::kFloat)); // [h,Dv]

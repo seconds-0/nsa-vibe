@@ -73,70 +73,69 @@ def benchmark_decode_step():
                        l=args.l, d=args.d, l_sel=args.l_sel, n_sel=args.n_sel, w=args.w).to(device)
 
     S_values = [int(x) for x in args.S_list.split(",")]
-    writer = None
+    def run_all(writer):
+        print(f"\n{'Context':<10} {'Total(ms)':<12} {'cmp(ms)':<10} {'sel(ms)':<10} {'win(ms)':<10} {'Reads':<12}")
+        print("-" * 76)
+
+        for S_ctx in S_values:
+            x_ctx = torch.randn(args.B, S_ctx, args.dim, device=device)
+            meta = build_block_meta(S_ctx + args.w, nsa.l, nsa.d, nsa.l_sel, n_sel=nsa.n_sel, w=nsa.w)
+            kv = create_empty_kv(args.B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, meta)
+            with torch.no_grad():
+                _, kv = nsa(x_ctx, kv, prefill=True)
+
+            def run_decode(model: NSAAttention, kv_state: NSA_KV) -> float:
+                times = []
+                for step in range(args.iters):
+                    x_tok = torch.randn(args.B, 1, args.dim, device=device)
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    t0 = time.perf_counter()
+                    with torch.no_grad():
+                        _, kv_new = model(x_tok, kv_state, prefill=False)
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    times.append(time.perf_counter() - t0)
+                    kv_state = kv_new
+                return float(np.mean(times[args.warmup:]) * 1000)
+
+            # total
+            model_total = nsa
+            ms_total = run_decode(model_total, kv)
+
+            # cmp-only
+            model_cmp = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+            model_cmp.load_state_dict(nsa.state_dict(), strict=False)
+            _force_branch(model_cmp, "cmp")
+            ms_cmp = run_decode(model_cmp, kv)
+
+            # sel-only
+            model_sel = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+            model_sel.load_state_dict(nsa.state_dict(), strict=False)
+            _force_branch(model_sel, "sel")
+            ms_sel = run_decode(model_sel, kv)
+
+            # win-only
+            model_win = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+            model_win.load_state_dict(nsa.state_dict(), strict=False)
+            _force_branch(model_win, "win")
+            ms_win = run_decode(model_win, kv)
+
+            S_current = S_ctx + args.iters
+            expected = compute_expected_reads(S_current, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w)
+            actual = kv.reads_act_total[-1].item() if kv.reads_act_total.numel() else -1
+            print(f"{S_ctx:<10} {ms_total:<12.2f} {ms_cmp:<10.2f} {ms_sel:<10.2f} {ms_win:<10.2f} {actual}/{expected}")
+            if writer:
+                writer.writerow([S_ctx, f"{ms_total:.3f}", f"{ms_cmp:.3f}", f"{ms_sel:.3f}", f"{ms_win:.3f}", int(actual), int(expected)])
+
     if args.csv:
-        f = open(args.csv, "w", newline="")
-        writer = csv.writer(f)
-        writer.writerow(["S", "ms_total", "ms_cmp", "ms_sel", "ms_win", "reads_actual", "reads_expected"])
-
-    print(f"\n{'Context':<10} {'Total(ms)':<12} {'cmp(ms)':<10} {'sel(ms)':<10} {'win(ms)':<10} {'Reads':<12}")
-    print("-" * 76)
-
-    for S_ctx in S_values:
-        x_ctx = torch.randn(args.B, S_ctx, args.dim, device=device)
-        meta = build_block_meta(S_ctx + args.w, nsa.l, nsa.d, nsa.l_sel, n_sel=nsa.n_sel, w=nsa.w)
-        kv = create_empty_kv(args.B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, meta)
-        with torch.no_grad():
-            _, kv = nsa(x_ctx, kv, prefill=True)
-
-        def run_decode(model: NSAAttention, kv_state: NSA_KV) -> float:
-            times = []
-            for step in range(args.iters):
-                x_tok = torch.randn(args.B, 1, args.dim, device=device)
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-                with torch.no_grad():
-                    _, kv_new = model(x_tok, kv_state, prefill=False)
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                times.append(time.perf_counter() - t0)
-                kv_state = kv_new
-            return float(np.mean(times[args.warmup:]) * 1000)
-
-        # total
-        model_total = nsa
-        ms_total = run_decode(model_total, kv)
-
-        # cmp-only
-        model_cmp = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
-        model_cmp.load_state_dict(nsa.state_dict(), strict=False)
-        _force_branch(model_cmp, "cmp")
-        ms_cmp = run_decode(model_cmp, kv)
-
-        # sel-only
-        model_sel = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
-        model_sel.load_state_dict(nsa.state_dict(), strict=False)
-        _force_branch(model_sel, "sel")
-        ms_sel = run_decode(model_sel, kv)
-
-        # win-only
-        model_win = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
-        model_win.load_state_dict(nsa.state_dict(), strict=False)
-        _force_branch(model_win, "win")
-        ms_win = run_decode(model_win, kv)
-
-        S_current = S_ctx + args.iters
-        expected = compute_expected_reads(S_current, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w)
-        actual = kv.reads_act_total[-1].item() if kv.reads_act_total.numel() else -1
-        print(f"{S_ctx:<10} {ms_total:<12.2f} {ms_cmp:<10.2f} {ms_sel:<10.2f} {ms_win:<10.2f} {actual}/{expected}")
-        if writer:
-            writer.writerow([S_ctx, f"{ms_total:.3f}", f"{ms_cmp:.3f}", f"{ms_sel:.3f}", f"{ms_win:.3f}", int(actual), int(expected)])
-
-    if writer:
-        f.close()
+        with open(args.csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["S", "ms_total", "ms_cmp", "ms_sel", "ms_win", "reads_actual", "reads_expected"])
+            run_all(writer)
+    else:
+        run_all(None)
 
 
 if __name__ == "__main__":
     benchmark_decode_step()
-
