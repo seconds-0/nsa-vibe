@@ -2,7 +2,7 @@
 Modal-based GPU benchmarking for NSA FlashAttention-2 thresholds.
 
 This script provisions GPU containers on-demand, runs benchmarks, and returns
-optimized thresholds for FA-2 sliding and compressed branches.
+optimized thresholds for FA-2 sliding/compressed and Triton selection.
 
 Usage:
     modal run bench/modal_gpu_bench.py [--gpu-type L4]
@@ -51,6 +51,7 @@ class ThresholdRecommendation:
     """Recommended thresholds based on benchmark results."""
     fa2_min_len_win: int
     fa2_min_len_cmp: int
+    sel_triton_min_L: int
     device_name: str
     torch_version: str
     cuda_version: str
@@ -130,6 +131,55 @@ def determine_thresholds(results: List[BenchmarkResult], safety_margin: float = 
     return win_threshold, cmp_threshold
 
 
+def parse_selection_output(output: str) -> List[Dict]:
+    """Parse bench/bench_sel_triton.py output lines into structured dicts.
+    Returns list of rows: {mode, N, H, D, Dv, L, nspans (opt), streams, tri_ms, ref_ms, speedup, mae}
+    """
+    rows: List[Dict] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("dense,") or line.startswith("varlen,"):
+            parts = line.split(',')
+            row: Dict[str, object] = {}
+            row['mode'] = parts[0]
+            for kv in parts[1:]:
+                if '=' not in kv:
+                    continue
+                k, v = kv.split('=', 1)
+                k = k.strip(); v = v.strip()
+                if k in ("N", "H", "D", "Dv", "L", "n", "streams"):
+                    try:
+                        row[k if k != 'n' else 'nspans'] = int(v)
+                    except Exception:
+                        pass
+                elif k in ("tri_ms", "ref_ms", "speedup", "mae"):
+                    try:
+                        row[k] = float(v.replace('x',''))
+                    except Exception:
+                        pass
+            rows.append(row)
+    return rows
+
+
+def determine_selection_min_L(rows: List[Dict], safety_margin: float = 1.2) -> int:
+    """Determine minimal L where Triton selection is faster than packed SDPA by safety margin.
+    Considers only rows with streams=1 and mode in {dense,varlen}; returns conservative threshold.
+    """
+    if not rows:
+        return 4096  # keep Triton effectively off by default
+    # Group by L and check both dense and varlen where available
+    thresholds = []
+    L_values = sorted({int(r.get('L', 0)) for r in rows if int(r.get('streams', 1)) == 1 and 'speedup' in r})
+    for L in L_values:
+        rL = [r for r in rows if int(r.get('L', -1)) == L and int(r.get('streams', 1)) == 1]
+        if rL and all(r.get('speedup', 0.0) >= safety_margin for r in rL):
+            thresholds.append(L)
+    if thresholds:
+        return min(thresholds)
+    # No L meets margin; return very conservative default
+    return max(L_values[-1], 4096) if L_values else 4096
+
+
 @app.function(
     image=gpu_image,
     gpu=modal.gpu.T4(),  # Default to T4, can be overridden
@@ -197,7 +247,7 @@ def run_gpu_benchmark(gpu_type: str = "T4") -> Dict:
         "-q", "-k", "fa2_gpu_varlen"
     ], capture_output=True, text=True, shell=True)
     
-    # Run benchmarks
+    # Run FA-2 benchmarks
     print("Running benchmarks...")
     bench_env = os.environ.copy()
     bench_env["NSA_USE_FA2"] = "1"
@@ -207,13 +257,36 @@ def run_gpu_benchmark(gpu_type: str = "T4") -> Dict:
         "./.venv/bin/python", "bench/bench_fa2.py"
     ], env=bench_env, capture_output=True, text=True)
     
-    # Parse results
+    # Parse FA-2 results
     results = parse_benchmark_output(bench_result.stdout)
     win_threshold, cmp_threshold = determine_thresholds(results)
+
+    # Run Triton selection benchmarks (opt-in envs set here)
+    print("Running selection benchmarks (Triton vs packed SDPA)...")
+    sel_env = os.environ.copy()
+    sel_env["NSA_USE_TRITON_SEL"] = "1"
+    sel_env["NSA_SEL_TRITON_GROUP"] = "1"
+    sel_env["NSA_SEL_TRITON_MIN_L"] = "64"
+    sel_env["PYTHONPATH"] = "."
+    sel_bench = subprocess.run([
+        "./.venv/bin/python", "bench/bench_sel_triton.py",
+        "--N", "1024", "--H", "8", "--D", "128", "--Dv", "128",
+        "--L_list", "64,128,256,512,1024", "--dist", "few", "--iters", "25", "--warmup", "5"
+    ], env=sel_env, capture_output=True, text=True)
+    # Multi-span varlen case
+    sel_bench2 = subprocess.run([
+        "./.venv/bin/python", "bench/bench_sel_triton.py",
+        "--N", "1024", "--H", "8", "--D", "128", "--Dv", "128",
+        "--L_list", "128,256,512,1024", "--dist", "many", "--iters", "25", "--warmup", "5"
+    ], env=sel_env, capture_output=True, text=True)
+    sel_output = (sel_bench.stdout or "") + "\n" + (sel_bench2.stdout or "")
+    sel_rows = parse_selection_output(sel_output)
+    sel_threshold = determine_selection_min_L(sel_rows, safety_margin=1.2)
     
     recommendation = ThresholdRecommendation(
         fa2_min_len_win=win_threshold,
         fa2_min_len_cmp=cmp_threshold,
+        sel_triton_min_L=sel_threshold,
         device_name=device_info["device_name"],
         torch_version=device_info["torch_version"],
         cuda_version=device_info["cuda_version"],
@@ -225,9 +298,11 @@ def run_gpu_benchmark(gpu_type: str = "T4") -> Dict:
         "parity_passed": parity_result.returncode == 0,
         "parity_output": parity_result.stdout,
         "benchmark_output": bench_result.stdout,
+        "selection_output": sel_output,
         "recommendation": {
             "fa2_min_len_win": recommendation.fa2_min_len_win,
             "fa2_min_len_cmp": recommendation.fa2_min_len_cmp,
+            "sel_triton_min_L": recommendation.sel_triton_min_L,
         },
         "results": [
             {

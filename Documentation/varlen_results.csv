@@ -1,0 +1,5 @@
+mode,N,H,D,Dv,L,nspans,streams,tri_ms,ref_ms,speedup,mae,status
+varlen,256,4,64,64,128,8,1,ERROR,ERROR,0.0000,inf,MLIR_CRASH
+varlen,256,8,64,64,256,8,1,ERROR,ERROR,0.0000,inf,MLIR_CRASH
+varlen,256,4,128,128,512,8,1,ERROR,ERROR,0.0000,inf,MLIR_CRASH
+varlen,1024,8,128,128,1024,8,1,ERROR,ERROR,0.0000,inf,MLIR_CRASH

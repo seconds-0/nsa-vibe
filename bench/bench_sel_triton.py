@@ -1,240 +1,247 @@
-#!/usr/bin/env python3
-"""
-Triton Selection Attention Benchmark (M4) - Hybrid Version
-
-Combines the best of both approaches:
-- Simple, direct benchmarking from other agent's version
-- Comprehensive analysis and reporting from my version
-
-Usage:
-    NSA_USE_TRITON_SEL=1 python bench/bench_sel_triton.py --N 256 --H 8 --D 128 --L_list 64,128,256,512 --dist many
-    NSA_USE_TRITON_SEL=1 python bench/bench_sel_triton.py --csv --output results.csv
-"""
-
 import argparse
-import csv
 import os
 import time
-from typing import List, Tuple
+from typing import List
 
 import torch
 
-# Precise benchmarking settings
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
+
+def _env_true(name: str, default: bool = False) -> bool:
+    v = os.getenv(name, "1" if default else "0").lower()
+    return v in ("1", "true", "yes", "on")
 
 
-def build_test_data(N: int, H: int, D: int, Dv: int, L: int, dist: str, device: torch.device):
-    """Build test tensors with realistic selection patterns."""
-    Q = torch.randn(N, H, D, device=device, dtype=torch.bfloat16)
-    
-    # Create selection ranges based on distribution
-    if dist == "few":
-        # Single long range per row
-        spans = [[(0, L)] for _ in range(N)]
-    elif dist == "many":
-        # 8 equal segments
-        n = 8
-        seg = max(1, L // n)
-        spans = [[(i * seg, min((i + 1) * seg, L)) for i in range(n)] for _ in range(N)]
-    else:
-        # Mixed: random segments
-        spans = []
-        for _ in range(N):
-            rem = L
-            s = 0
-            row = []
-            while rem > 0:
-                seg = min(rem, max(1, L // 8))
-                row.append((s, s + seg))
-                s += seg
-                rem -= seg
-            spans.append(row)
-    
-    # Build K/V from a shared pool; rows select spans from this pool
-    pool_len = L * 2
-    Kpool = torch.randn(pool_len, D, device=device, dtype=torch.bfloat16)
-    Vpool = torch.randn(pool_len, Dv, device=device, dtype=torch.bfloat16)
-    
-    K_rows: List[torch.Tensor] = []
-    V_rows: List[torch.Tensor] = []
-    for row_spans in spans:
-        idx = torch.cat([torch.arange(s, e, device=device) for (s, e) in row_spans], dim=0)
-        K_rows.append(Kpool.index_select(0, idx))
-        V_rows.append(Vpool.index_select(0, idx))
-    
-    return Q, K_rows, V_rows, spans, Kpool, Vpool
+def make_single_span(N: int, L: int, device: torch.device) -> torch.Tensor:
+    ranges = torch.zeros((N, 1, 2), device=device, dtype=torch.long)
+    ranges[:, 0, 0] = 0
+    ranges[:, 0, 1] = L
+    return ranges
 
 
-def benchmark_method(Q, K_rows, V_rows, method: str, iters: int, *, Kpool=None, Vpool=None, spans=None) -> float:
-    """Benchmark single method and return average time in ms."""
-    N, H, D = Q.shape
-    Dv = V_rows[0].shape[1]
-    
-    if method == "sdpa":
-        # Direct SDPA per row
-        times = []
-        for i in range(N):
-            k = K_rows[i]
-            v = V_rows[i]
-            # Expand for multi-head: [1, H, L, D]
-            Kf = k.unsqueeze(0).unsqueeze(0).expand(1, H, k.shape[0], D)
-            Vf = v.unsqueeze(0).unsqueeze(0).expand(1, H, v.shape[0], Dv)
-            Qf = Q[i:i+1].unsqueeze(2)  # [1, H, D] -> [1, H, 1, D]
-            
-            torch.cuda.synchronize()
-            t0 = time.time()
-            for _ in range(iters):
-                _ = torch.nn.functional.scaled_dot_product_attention(Qf, Kf, Vf, is_causal=True)
-            torch.cuda.synchronize()
-            times.append((time.time() - t0) / iters)
-        
-        return sum(times) / len(times) * 1000  # ms
-        
-    elif method == "triton":
-        # Triton via selection_attention_triton wrapper
-        from nsa.kernels.triton_sel_kernel import selection_attention_triton
-        
-        # Build NSA-compatible tensors: [B,S,G,h,D] and ranges [B,S,G,n,2]
-        B, S, G = N, 1, 1
-        Q_nsa = Q.view(N, 1, 1, H, D)  # [N,1,1,H,D]
-        if Kpool is not None and Vpool is not None and spans is not None:
-            # Use shared pool per row and build multi-range selection
-            K_nsa = Kpool.unsqueeze(0).unsqueeze(0).expand(N, 1, -1, -1)  # [N,1,S_pool,D]
-            V_nsa = Vpool.unsqueeze(0).unsqueeze(0).expand(N, 1, -1, -1)  # [N,1,S_pool,Dv]
-            max_n = max(len(row) for row in spans)
-            ranges = torch.zeros((N, 1, 1, max_n, 2), device=Q.device, dtype=torch.int64)
-            for i, row_spans in enumerate(spans):
-                for j, (s, e) in enumerate(row_spans):
-                    ranges[i, 0, 0, j, 0] = s
-                    ranges[i, 0, 0, j, 1] = e
+def make_multi_span(N: int, L: int, n: int, device: torch.device) -> torch.Tensor:
+    # Split L into n contiguous spans of equal size (last may be longer)
+    base = L // n
+    rem = L - base * n
+    starts = []
+    pos = 0
+    for i in range(n):
+        ln = base + (1 if i < rem else 0)
+        starts.append((pos, pos + ln))
+        pos += ln
+    ranges = torch.zeros((N, n, 2), device=device, dtype=torch.long)
+    for i, (s, e) in enumerate(starts):
+        ranges[:, i, 0] = s
+        ranges[:, i, 1] = e
+    return ranges
+
+
+def _maybe_write_csv(csv_path: str | None, row: dict) -> None:
+    if not csv_path:
+        return
+    import csv
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            w.writeheader()
+        w.writerow(row)
+
+
+def run_dense(N: int, H: int, D: int, Dv: int, L: int, iters: int, warmup: int, streams: int, csv: str | None, device: torch.device) -> None:
+    torch.manual_seed(0)
+    Q = torch.randn(N, H, D, device=device, dtype=torch.float16)
+    K = torch.randn(N, L, D, device=device, dtype=torch.float16)
+    V = torch.randn(N, L, Dv, device=device, dtype=torch.float16)
+
+    from nsa.kernels.triton_sel_kernel.sel_fwd import sel_attn_fwd_dense, sel_attn_fwd_dense_group
+    # Warmup
+    for _ in range(warmup):
+        if streams <= 1:
+            if _env_true("NSA_SEL_TRITON_GROUP", False):
+                sel_attn_fwd_dense_group(Q, K, V)
+            else:
+                sel_attn_fwd_dense(Q, K, V)
         else:
-            # Fallback: per-row contiguous selection
-            K_nsa = torch.stack([k for k in K_rows], dim=0).unsqueeze(1)  # [N,1,L,D]
-            V_nsa = torch.stack([v for v in V_rows], dim=0).unsqueeze(1)  # [N,1,L,Dv]
-            max_n = 1
-            ranges = torch.zeros((N, 1, 1, max_n, 2), device=Q.device, dtype=torch.int64)
-            for i, k_row in enumerate(K_rows):
-                ranges[i, 0, 0, 0, 0] = 0
-                ranges[i, 0, 0, 0, 1] = k_row.shape[0]
-        
-        torch.cuda.synchronize()
-        t0 = time.time()
+            s = [torch.cuda.Stream() for _ in range(streams)]
+            with torch.cuda.stream(s[0]):
+                if _env_true("NSA_SEL_TRITON_GROUP", False):
+                    sel_attn_fwd_dense_group(Q, K, V)
+                else:
+                    sel_attn_fwd_dense(Q, K, V)
+            for st in s[1:]:
+                with torch.cuda.stream(st):
+                    # Launch identical work to exercise concurrent kernels
+                    if _env_true("NSA_SEL_TRITON_GROUP", False):
+                        sel_attn_fwd_dense_group(Q, K, V)
+                    else:
+                        sel_attn_fwd_dense(Q, K, V)
+            torch.cuda.synchronize()
+    # Timed runs
+    if streams <= 1:
+        torch.cuda.synchronize(); t0 = time.perf_counter()
         for _ in range(iters):
-            _ = selection_attention_triton(Q_nsa, K_nsa, V_nsa, ranges)
-        torch.cuda.synchronize()
-        
-        return (time.time() - t0) / iters * 1000  # ms
-    
+            if _env_true("NSA_SEL_TRITON_GROUP", False):
+                O_tri = sel_attn_fwd_dense_group(Q, K, V)
+            else:
+                O_tri = sel_attn_fwd_dense(Q, K, V)
+        torch.cuda.synchronize(); t1 = time.perf_counter()
+        ms_tri = (t1 - t0) * 1e3 / iters
     else:
-        raise ValueError(f"Unknown method: {method}")
+        torch.cuda.synchronize(); t0 = time.perf_counter()
+        for _ in range(iters):
+            s = [torch.cuda.Stream() for _ in range(streams)]
+            outs = []
+            for st in s:
+                with torch.cuda.stream(st):
+                    if _env_true("NSA_SEL_TRITON_GROUP", False):
+                        outs.append(sel_attn_fwd_dense_group(Q, K, V))
+                    else:
+                        outs.append(sel_attn_fwd_dense(Q, K, V))
+            torch.cuda.synchronize();
+        t1 = time.perf_counter()
+        ms_tri = (t1 - t0) * 1e3 / iters / streams
+
+    # Reference: packed SDPA through wrapper-by-bucket
+    from nsa.core.attention_kernels import grouped_selection_attention_packed
+    # Build reference with B=N, S=1, G=1 so each row is independent
+    Qw = Q.unsqueeze(1).unsqueeze(1)                # [N,1,1,H,D]
+    Kw = K.unsqueeze(1)                             # [N,1,L,D]
+    Vw = V.unsqueeze(1)                             # [N,1,L,Dv]
+    ranges = make_single_span(N, L, device).unsqueeze(1).unsqueeze(1)  # [N,1,1,1,2]
+    for _ in range(warmup):
+        grouped_selection_attention_packed(Qw, Kw, Vw, ranges)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        O_ref = grouped_selection_attention_packed(Qw, Kw, Vw, ranges)
+    torch.cuda.synchronize(); t1 = time.perf_counter()
+    ms_ref = (t1 - t0) * 1e3 / iters
+
+    mae = (O_tri - O_ref.squeeze(1).squeeze(1)).abs().float().mean().item()
+    print(f"dense,N={N},H={H},D={D},Dv={Dv},L={L},streams={streams}, tri_ms={ms_tri:.3f}, ref_ms={ms_ref:.3f}, speedup={ms_ref/ms_tri:.2f}x, mae={mae:.4e}")
+    _maybe_write_csv(csv, {
+        'mode': 'dense', 'N': N, 'H': H, 'D': D, 'Dv': Dv, 'L': L,
+        'streams': streams, 'tri_ms': f"{ms_tri:.4f}", 'ref_ms': f"{ms_ref:.4f}", 'speedup': f"{ms_ref/ms_tri:.4f}", 'mae': f"{mae:.6e}"
+    })
+
+
+def run_varlen(N: int, H: int, D: int, Dv: int, L: int, nspans: int, iters: int, warmup: int, streams: int, csv: str | None, device: torch.device) -> None:
+    torch.manual_seed(0)
+    Q = torch.randn(N, H, D, device=device, dtype=torch.float16)
+    # Build concatenated K/V by spans
+    ranges = make_multi_span(N, L, nspans, device)  # [N,n,2]
+    total_L = N * L
+    K_all = torch.empty(total_L, D, device=device, dtype=torch.float16)
+    V_all = torch.empty(total_L, Dv, device=device, dtype=torch.float16)
+    write = 0
+    for i in range(N):
+        # For benchmark, fill continuous block for row i
+        K_row = torch.randn(L, D, device=device, dtype=torch.float16)
+        V_row = torch.randn(L, Dv, device=device, dtype=torch.float16)
+        K_all[write : write + L] = K_row
+        V_all[write : write + L] = V_row
+        write += L
+    cu = torch.arange(0, (N + 1) * L, step=L, device=device, dtype=torch.int32)
+
+    from nsa.kernels.triton_sel_kernel.sel_fwd import sel_attn_fwd_varlen, sel_attn_fwd_varlen_group
+    # Warmup
+    for _ in range(warmup):
+        if streams <= 1:
+            if _env_true("NSA_SEL_TRITON_GROUP", False):
+                sel_attn_fwd_varlen_group(Q, K_all, V_all, cu)
+            else:
+                sel_attn_fwd_varlen(Q, K_all, V_all, cu)
+        else:
+            s = [torch.cuda.Stream() for _ in range(streams)]
+            for st in s:
+                with torch.cuda.stream(st):
+                    if _env_true("NSA_SEL_TRITON_GROUP", False):
+                        sel_attn_fwd_varlen_group(Q, K_all, V_all, cu)
+                    else:
+                        sel_attn_fwd_varlen(Q, K_all, V_all, cu)
+            torch.cuda.synchronize()
+    if streams <= 1:
+        torch.cuda.synchronize(); t0 = time.perf_counter()
+        for _ in range(iters):
+            if _env_true("NSA_SEL_TRITON_GROUP", False):
+                O_tri = sel_attn_fwd_varlen_group(Q, K_all, V_all, cu)
+            else:
+                O_tri = sel_attn_fwd_varlen(Q, K_all, V_all, cu)
+        torch.cuda.synchronize(); t1 = time.perf_counter()
+        ms_tri = (t1 - t0) * 1e3 / iters
+    else:
+        torch.cuda.synchronize(); t0 = time.perf_counter()
+        for _ in range(iters):
+            s = [torch.cuda.Stream() for _ in range(streams)]
+            for st in s:
+                with torch.cuda.stream(st):
+                    if _env_true("NSA_SEL_TRITON_GROUP", False):
+                        sel_attn_fwd_varlen_group(Q, K_all, V_all, cu)
+                    else:
+                        sel_attn_fwd_varlen(Q, K_all, V_all, cu)
+            torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        ms_tri = (t1 - t0) * 1e3 / iters / streams
+
+    # Reference via packed SDPA wrapper
+    from nsa.core.attention_kernels import grouped_selection_attention_packed
+    # Build per-row K/V tensors; [N,L,D*]
+    K_rows = torch.empty(N, L, D, device=device, dtype=torch.float16)
+    V_rows = torch.empty(N, L, Dv, device=device, dtype=torch.float16)
+    for i in range(N):
+        K_rows[i] = K_all[i * L : (i + 1) * L]
+        V_rows[i] = V_all[i * L : (i + 1) * L]
+    # Reference with B=N, S=1, G=1
+    Qw = Q.unsqueeze(1).unsqueeze(1)                # [N,1,1,H,D]
+    Kw = K_rows.unsqueeze(1)                        # [N,1,L,D]
+    Vw = V_rows.unsqueeze(1)                        # [N,1,L,Dv]
+    rangesw = ranges.unsqueeze(1).unsqueeze(1)      # [N,1,1,n,2]
+    for _ in range(warmup):
+        grouped_selection_attention_packed(Qw, Kw, Vw, rangesw)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        O_ref = grouped_selection_attention_packed(Qw, Kw, Vw, rangesw)
+    torch.cuda.synchronize(); t1 = time.perf_counter()
+    ms_ref = (t1 - t0) * 1e3 / iters
+
+    mae = (O_tri - O_ref.squeeze(1).squeeze(1)).abs().float().mean().item()
+    print(f"varlen,N={N},H={H},D={D},Dv={Dv},L={L},n={nspans},streams={streams}, tri_ms={ms_tri:.3f}, ref_ms={ms_ref:.3f}, speedup={ms_ref/ms_tri:.2f}x, mae={mae:.4e}")
+    _maybe_write_csv(csv, {
+        'mode': 'varlen', 'N': N, 'H': H, 'D': D, 'Dv': Dv, 'L': L, 'nspans': nspans,
+        'streams': streams, 'tri_ms': f"{ms_tri:.4f}", 'ref_ms': f"{ms_ref:.4f}", 'speedup': f"{ms_ref/ms_tri:.4f}", 'mae': f"{mae:.6e}"
+    })
 
 
 def main():
-    parser = argparse.ArgumentParser(description="M4 Triton Selection Benchmark - Hybrid Version")
-    parser.add_argument("--N", type=int, default=256, help="Number of rows")
-    parser.add_argument("--H", type=int, default=8, help="Number of heads")
-    parser.add_argument("--D", type=int, default=128, help="Head dimension")
-    parser.add_argument("--Dv", type=int, default=128, help="Value dimension")
-    parser.add_argument("--L_list", type=str, default="64,128,256", help="Selected lengths (comma-separated)")
-    parser.add_argument("--dist", type=str, default="many", choices=["few", "many", "mixed"], help="Range distribution")
-    parser.add_argument("--iters", type=int, default=20, help="Benchmark iterations")
-    parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations")
-    parser.add_argument("--csv", action="store_true", help="Output CSV format")
-    parser.add_argument("--output", type=str, help="Save results to file")
-    parser.add_argument("--enable_triton", action="store_true", help="Set NSA_USE_TRITON_SEL=1 if not already set")
-    
-    args = parser.parse_args()
-    
-    if not torch.cuda.is_available():
-        print("CUDA required for benchmarking")
-        return
-    
-    # Check Triton availability
-    try:
-        import triton
-        triton_version = triton.__version__
-    except ImportError:
-        print("Triton not available")
-        return
-    
-    # Enable Triton for selection if requested and not already set
-    if args.enable_triton and "NSA_USE_TRITON_SEL" not in os.environ:
-        os.environ["NSA_USE_TRITON_SEL"] = "1"
-    
+    p = argparse.ArgumentParser()
+    p.add_argument("--N", type=int, default=256)
+    p.add_argument("--H", type=int, default=8)
+    p.add_argument("--D", type=int, default=64)
+    p.add_argument("--Dv", type=int, default=64)
+    p.add_argument("--L_list", type=str, default="64,128,256,512")
+    p.add_argument("--dist", type=str, choices=["few", "many", "mixed"], default="few")
+    p.add_argument("--iters", type=int, default=50)
+    p.add_argument("--warmup", type=int, default=5)
+    p.add_argument("--streams", type=int, default=1)
+    p.add_argument("--csv", type=str, default=None)
+    p.add_argument("--decode", type=int, default=0)
+    args = p.parse_args()
+
+    assert torch.cuda.is_available(), "CUDA GPU required"
     device = torch.device("cuda")
-    L_list = [int(x.strip()) for x in args.L_list.split(",")]
-    
-    results = []
-    
-    if not args.csv:
-        print("="*80)
-        print("M4 TRITON SELECTION BENCHMARK (Hybrid)")
-        print("="*80)
-        print(f"Device: {torch.cuda.get_device_name()}")
-        print(f"Triton: {triton_version}")
-        print(f"Config: N={args.N}, H={args.H}, D={args.D}, Dv={args.Dv}, dist={args.dist}")
-        print()
-        print(f"{'L':>6} {'SDPA(ms)':>10} {'Triton(ms)':>12} {'Speedup':>10} {'Status':>10}")
-        print("-" * 60)
+    L_list: List[int] = [int(x) for x in args.L_list.split(",")]
+
+    # Dense few-long case
+    if args.dist == "few":
+        for L in L_list:
+            run_dense(args.N, args.H, args.D, args.Dv, L, args.iters, args.warmup, args.streams, args.csv, device)
     else:
-        print("method,N,H,D,Dv,L,dist,time_ms,speedup")
-    
-    for L in L_list:
-        try:
-            # Build test data
-            Q, K_rows, V_rows, spans, Kpool, Vpool = build_test_data(args.N, args.H, args.D, args.Dv, L, args.dist, device)
-            
-            # Warmup both methods
-            for _ in range(args.warmup):
-                _ = benchmark_method(Q, K_rows, V_rows, "sdpa", 1)
-                _ = benchmark_method(Q, K_rows, V_rows, "triton", 1, Kpool=Kpool, Vpool=Vpool, spans=spans)
-            
-            # Benchmark
-            sdpa_time = benchmark_method(Q, K_rows, V_rows, "sdpa", args.iters)
-            triton_time = benchmark_method(Q, K_rows, V_rows, "triton", args.iters, Kpool=Kpool, Vpool=Vpool, spans=spans)
-            speedup = sdpa_time / triton_time if triton_time > 0 else 0.0
-            
-            status = "FASTER" if speedup > 1.0 else "SLOWER"
-            
-            if args.csv:
-                print(f"sdpa,{args.N},{args.H},{args.D},{args.Dv},{L},{args.dist},{sdpa_time:.3f},1.0")
-                print(f"triton,{args.N},{args.H},{args.D},{args.Dv},{L},{args.dist},{triton_time:.3f},{speedup:.3f}")
-            else:
-                print(f"{L:>6} {sdpa_time:>10.3f} {triton_time:>12.3f} {speedup:>10.2f}x {status:>10}")
-            
-            results.append({
-                'L': L, 'sdpa_ms': sdpa_time, 'triton_ms': triton_time, 'speedup': speedup,
-                'N': args.N, 'H': args.H, 'D': args.D, 'Dv': args.Dv, 'dist': args.dist
-            })
-            
-        except Exception as e:
-            if args.csv:
-                print(f"error,{args.N},{args.H},{args.D},{args.Dv},{L},{args.dist},0.0,0.0")
-            else:
-                print(f"{L:>6} {'ERROR':>10} {'ERROR':>12} {'0.00x':>10} {str(e)[:10]:>10}")
-    
-    # Analysis (only for non-CSV mode)
-    if not args.csv and results:
-        print()
-        faster_results = [r for r in results if r['speedup'] >= 1.2]
-        if faster_results:
-            min_L = min(r['L'] for r in faster_results)
-            print(f"✅ Triton ≥1.2x faster starting at L={min_L}")
-            print(f"📊 Recommendation: sel_triton_min_L = {min_L}")
-        else:
-            print(f"❌ Triton not consistently faster (≥1.2x)")
-            print(f"📊 Recommendation: Keep sel_triton_min_L high (≥1024)")
-    
-    # Save results if requested
-    if args.output and results:
-        with open(args.output, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=results[0].keys())
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"Results saved to {args.output}")
+        # Varlen multi-span case
+        for L in L_list:
+            nspans = 8 if args.dist == "many" else 4
+            run_varlen(args.N, args.H, args.D, args.Dv, L, nspans, args.iters, args.warmup, args.streams, args.csv, device)
 
 
 if __name__ == "__main__":
     main()
-

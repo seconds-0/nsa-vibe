@@ -15,6 +15,104 @@ except Exception:  # pragma: no cover - CPU CI
 if triton is not None:
     @triton.autotune(
         configs=[
+            triton.Config({}, num_warps=2, num_stages=1),
+            triton.Config({}, num_warps=4, num_stages=1),
+            triton.Config({}, num_warps=4, num_stages=2),
+            triton.Config({}, num_warps=8, num_stages=2),
+            triton.Config({}, num_warps=4, num_stages=3),
+        ],
+        key=["D", "Dv"],
+    )
+    @triton.jit
+    def _sel_attn_fwd_dense_group_kernel(
+        Q_ptr,  # [N, H, D]
+        K_ptr,  # [N, L, D]
+        V_ptr,  # [N, L, Dv]
+        O_ptr,  # [N, H, Dv]
+        N, H, L, D, Dv,
+        stride_qn, stride_qh, stride_qd,
+        stride_kn, stride_kL, stride_kd,
+        stride_vn, stride_vL, stride_vd,
+        stride_on, stride_oh, stride_odv,
+        inv_sqrt_d,
+        BLOCK_H: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_L: tl.constexpr,
+        BLOCK_DV: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        n = pid
+        # Base pointers
+        q_base = Q_ptr + n * stride_qn
+        k_base = K_ptr + n * stride_kn
+        v_base = V_ptr + n * stride_vn
+        o_base = O_ptr + n * stride_on
+
+        offs_H = tl.arange(0, BLOCK_H)
+        offs_L = tl.arange(0, BLOCK_L)
+        offs_D = tl.arange(0, BLOCK_D)
+        offs_Dv = tl.arange(0, BLOCK_DV)
+        Hmask = offs_H < H
+
+        # Running softmax stats per head
+        m = tl.full((BLOCK_H,), float('-inf'), dtype=tl.float32)
+        lse = tl.zeros((BLOCK_H,), dtype=tl.float32)
+
+        # Pass 1: compute m and lse over L
+        for l0 in range(0, L, BLOCK_L):
+            Lmask = l0 + offs_L < L
+            logits_tile = tl.zeros((BLOCK_H, BLOCK_L), dtype=tl.float32)
+            for d0 in range(0, D, BLOCK_D):
+                Dmask = d0 + offs_D < D
+                # Load Q tile for all heads
+                q_ptrs = q_base + offs_H[:, None] * stride_qh + (d0 + offs_D)[None, :] * stride_qd
+                q_tile = tl.load(q_ptrs, mask=(Hmask[:, None] & Dmask[None, :]), other=0.0)
+                # Load K tile for this L,D block
+                rows = (l0 + offs_L).to(tl.int32)[:, None]
+                cols = (d0 + offs_D).to(tl.int32)[None, :]
+                k_ptrs = k_base + rows * stride_kL + cols * stride_kd
+                k_tile = tl.load(k_ptrs, mask=(Lmask[:, None] & Dmask[None, :]), other=0.0)
+                # logits_tile += q_tile @ k_tile^T  -> [H,L]
+                logits_tile += tl.sum(q_tile[:, None, :] * k_tile[None, :, :], axis=2)
+            logits_tile *= inv_sqrt_d
+            # Update per-head m, lse
+            masked_logits = tl.where(Lmask[None, :], logits_tile, float('-inf'))
+            tile_max = tl.max(masked_logits, axis=1)
+            new_m = tl.maximum(m, tile_max)
+            lse = lse * tl.exp(m - new_m) + tl.sum(tl.where(Lmask[None, :], tl.exp(logits_tile - new_m[:, None]), 0.0), axis=1)
+            m = new_m
+
+        # Pass 2: accumulate outputs across V, reusing p per L-tile across all Dv tiles
+        for l0 in range(0, L, BLOCK_L):
+            Lmask = l0 + offs_L < L
+            # Recompute logits for this tile once
+            logits_tile = tl.zeros((BLOCK_H, BLOCK_L), dtype=tl.float32)
+            for d0 in range(0, D, BLOCK_D):
+                Dmask = d0 + offs_D < D
+                q_ptrs = q_base + offs_H[:, None] * stride_qh + (d0 + offs_D)[None, :] * stride_qd
+                q_tile = tl.load(q_ptrs, mask=(Hmask[:, None] & Dmask[None, :]), other=0.0)
+                rows = (l0 + offs_L).to(tl.int32)[:, None]
+                cols = (d0 + offs_D).to(tl.int32)[None, :]
+                k_ptrs = k_base + rows * stride_kL + cols * stride_kd
+                k_tile = tl.load(k_ptrs, mask=(Lmask[:, None] & Dmask[None, :]), other=0.0)
+                logits_tile += tl.sum(q_tile[:, None, :] * k_tile[None, :, :], axis=2)
+            logits_tile *= inv_sqrt_d
+            p = tl.where(Lmask[None, :], tl.exp(logits_tile - m[:, None]) / lse[:, None], 0.0)  # [H,L]
+            # Iterate Dv tiles accumulating directly to O
+            for dv0 in range(0, Dv, BLOCK_DV):
+                DVmask = dv0 + offs_Dv < Dv
+                rows = (l0 + offs_L).to(tl.int32)[:, None]
+                cols_v = (dv0 + offs_Dv).to(tl.int32)[None, :]
+                v_ptrs = v_base + rows * stride_vL + cols_v * stride_vd
+                v_tile = tl.load(v_ptrs, mask=(Lmask[:, None] & DVmask[None, :]), other=0.0)  # [L,DV]
+                partial = tl.sum(p[:, :, None] * v_tile[None, :, :], axis=1)  # [H,DV]
+                o_ptrs = o_base + offs_H[:, None] * stride_oh + (dv0 + offs_Dv)[None, :] * stride_odv
+                # Accumulate across L-tiles: use read-modify-write
+                prev = tl.load(o_ptrs, mask=(Hmask[:, None] & DVmask[None, :]), other=0.0)
+                tl.store(o_ptrs, prev + partial, mask=(Hmask[:, None] & DVmask[None, :]))
+
+    @triton.autotune(
+        configs=[
             triton.Config({}, num_warps=4, num_stages=2),
             triton.Config({}, num_warps=8, num_stages=2),
             triton.Config({}, num_warps=4, num_stages=3),
@@ -187,7 +285,7 @@ if triton is not None:
                     k_ptrs = K_ptr + rows * stride_kL + cols * stride_kd
                     k_tile = tl.load(
                         k_ptrs,
-                        mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
+                        mask=(Lmask[:, None] & Dmask[None, :]),
                         other=0.0,
                     )
                     logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
@@ -250,10 +348,193 @@ def sel_attn_fwd_dense(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> tor
         stride_on, stride_oh, stride_odv,
         inv_sqrt_d,
         BLOCK_D=BLOCK_D, BLOCK_L=BLOCK_L, BLOCK_DV=BLOCK_DV,
-        num_warps=4, num_stages=2,
     )
     return O
 
+
+def sel_attn_fwd_dense_group(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
+    """
+    Group-centric Triton forward for dense single-span batches, computing all heads per row
+    in one program to maximize K/V reuse across heads.
+    Q: [N, H, D], K: [N, L, D], V: [N, L, Dv] -> O: [N, H, Dv]
+    """
+    assert triton is not None and torch.cuda.is_available(), "Triton/GPU required"
+    N, H, D = Q.shape
+    L = K.shape[1]
+    Dv = V.shape[2]
+    Q = Q.contiguous(); K = K.contiguous(); V = V.contiguous()
+    O = torch.zeros((N, H, Dv), device=Q.device, dtype=V.dtype)
+    stride_qn, stride_qh, stride_qd = Q.stride(0), Q.stride(1), Q.stride(2)
+    stride_kn, stride_kL, stride_kd = K.stride(0), K.stride(1), K.stride(2)
+    stride_vn, stride_vL, stride_vd = V.stride(0), V.stride(1), V.stride(2)
+    stride_on, stride_oh, stride_odv = O.stride(0), O.stride(1), O.stride(2)
+    grid = (N,)
+    # Choose tile sizes
+    def _env_int(name: str, default: int) -> int:
+        try:
+            v = int(os.getenv(name, str(default)))
+            return max(16, v)
+        except Exception:
+            return default
+    BLOCK_D = _env_int("NSA_SEL_TRITON_BLOCK_D", 64 if D >= 64 else 32)
+    BLOCK_L = _env_int("NSA_SEL_TRITON_BLOCK_L", 128 if L >= 128 else 64)
+    BLOCK_DV = _env_int("NSA_SEL_TRITON_BLOCK_DV", 64 if Dv >= 64 else 32)
+    # Cap heads per program to 16 for now
+    BLOCK_H = min(16, max(1, int(os.getenv("NSA_SEL_TRITON_BLOCK_H", "16"))))
+    if H > BLOCK_H:
+        # Fallback to per-head kernel if too many heads
+        return sel_attn_fwd_dense(Q, K, V)
+    inv_sqrt_d = 1.0 / math.sqrt(D)
+    _sel_attn_fwd_dense_group_kernel[grid](
+        Q, K, V, O,
+        N, H, L, D, Dv,
+        stride_qn, stride_qh, stride_qd,
+        stride_kn, stride_kL, stride_kd,
+        stride_vn, stride_vL, stride_vd,
+        stride_on, stride_oh, stride_odv,
+        inv_sqrt_d,
+        BLOCK_H=BLOCK_H, BLOCK_D=BLOCK_D, BLOCK_L=BLOCK_L, BLOCK_DV=BLOCK_DV,
+    )
+    return O
+
+if triton is not None:
+    @triton.autotune(
+        configs=[
+            triton.Config({}, num_warps=2, num_stages=1),
+            triton.Config({}, num_warps=4, num_stages=1),
+            triton.Config({}, num_warps=4, num_stages=2),
+            triton.Config({}, num_warps=8, num_stages=2),
+            triton.Config({}, num_warps=4, num_stages=3),
+        ],
+        key=["D", "Dv"],
+    )
+    @triton.jit
+    def _sel_attn_fwd_varlen_group_kernel(
+        Q_ptr,   # [N, H, D]
+        K_ptr,   # [TotalL, D]
+        V_ptr,   # [TotalL, Dv]
+        CU_ptr,  # [N+1] int32
+        O_ptr,   # [N, H, Dv]
+        N, H, D, Dv,
+        stride_qn, stride_qh, stride_qd,
+        stride_kL, stride_kd,
+        stride_vL, stride_vd,
+        stride_on, stride_oh, stride_odv,
+        inv_sqrt_d,
+        BLOCK_H: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_L: tl.constexpr,
+        BLOCK_DV: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        n = pid
+        q_base = Q_ptr + n * stride_qn
+        o_base = O_ptr + n * stride_on
+        cuN = tl.load(CU_ptr + N)
+        rs = tl.load(CU_ptr + n)
+        re = tl.load(CU_ptr + n + 1)
+        zero_i32 = tl.full((1,), 0, dtype=tl.int32)
+        row_start = tl.maximum(zero_i32, tl.minimum(rs, cuN))
+        row_end = tl.maximum(row_start, tl.minimum(re, cuN))
+        L = row_end - row_start
+
+        offs_H = tl.arange(0, BLOCK_H)
+        offs_L = tl.arange(0, BLOCK_L)
+        offs_D = tl.arange(0, BLOCK_D)
+        offs_Dv = tl.arange(0, BLOCK_DV)
+        Hmask = offs_H < H
+        # Running stats
+        m = tl.full((BLOCK_H,), float('-inf'), dtype=tl.float32)
+        lse = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        # Pass 1
+        for l0 in range(0, L, BLOCK_L):
+            Lmask = l0 + offs_L < L
+            logits_tile = tl.zeros((BLOCK_H, BLOCK_L), dtype=tl.float32)
+            for d0 in range(0, D, BLOCK_D):
+                Dmask = d0 + offs_D < D
+                q_ptrs = q_base + offs_H[:, None] * stride_qh + (d0 + offs_D)[None, :] * stride_qd
+                q_tile = tl.load(q_ptrs, mask=(Hmask[:, None] & Dmask[None, :]), other=0.0)
+                rows = (row_start + l0 + offs_L).to(tl.int32)[:, None]
+                cols = (d0 + offs_D).to(tl.int32)[None, :]
+                k_ptrs = K_ptr + rows * stride_kL + cols * stride_kd
+                k_tile = tl.load(k_ptrs, mask=(Lmask[:, None] & Dmask[None, :]), other=0.0)
+                logits_tile += tl.sum(q_tile[:, None, :] * k_tile[None, :, :], axis=2)
+            logits_tile *= inv_sqrt_d
+            masked = tl.where(Lmask[None, :], logits_tile, float('-inf'))
+            tile_max = tl.max(masked, axis=1)
+            new_m = tl.maximum(m, tile_max)
+            lse = lse * tl.exp(m - new_m) + tl.sum(tl.where(Lmask[None, :], tl.exp(logits_tile - new_m[:, None]), 0.0), axis=1)
+            m = new_m
+        # Pass 2: reuse p across Dv
+        for l0 in range(0, L, BLOCK_L):
+            Lmask = l0 + offs_L < L
+            logits_tile = tl.zeros((BLOCK_H, BLOCK_L), dtype=tl.float32)
+            for d0 in range(0, D, BLOCK_D):
+                Dmask = d0 + offs_D < D
+                q_ptrs = q_base + offs_H[:, None] * stride_qh + (d0 + offs_D)[None, :] * stride_qd
+                q_tile = tl.load(q_ptrs, mask=(Hmask[:, None] & Dmask[None, :]), other=0.0)
+                rows = (row_start + l0 + offs_L).to(tl.int32)[:, None]
+                cols = (d0 + offs_D).to(tl.int32)[None, :]
+                k_ptrs = K_ptr + rows * stride_kL + cols * stride_kd
+                k_tile = tl.load(k_ptrs, mask=(Lmask[:, None] & Dmask[None, :]), other=0.0)
+                logits_tile += tl.sum(q_tile[:, None, :] * k_tile[None, :, :], axis=2)
+            logits_tile *= inv_sqrt_d
+            p = tl.where(Lmask[None, :], tl.exp(logits_tile - m[:, None]) / lse[:, None], 0.0)
+            for dv0 in range(0, Dv, BLOCK_DV):
+                DVmask = dv0 + offs_Dv < Dv
+                rows = (row_start + l0 + offs_L).to(tl.int32)[:, None]
+                cols_v = (dv0 + offs_Dv).to(tl.int32)[None, :]
+                v_ptrs = V_ptr + rows * stride_vL + cols_v * stride_vd
+                v_tile = tl.load(v_ptrs, mask=(Lmask[:, None] & DVmask[None, :]), other=0.0)
+                partial = tl.sum(p[:, :, None] * v_tile[None, :, :], axis=1)
+                o_ptrs = o_base + offs_H[:, None] * stride_oh + (dv0 + offs_Dv)[None, :] * stride_odv
+                prev = tl.load(o_ptrs, mask=(Hmask[:, None] & DVmask[None, :]), other=0.0)
+                tl.store(o_ptrs, prev + partial, mask=(Hmask[:, None] & DVmask[None, :]))
+
+
+def sel_attn_fwd_varlen_group(Q: torch.Tensor, K_all: torch.Tensor, V_all: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    """
+    Group-centric varlen Triton forward using cu_seqlens. Q:[N,H,D], K_all/V_all:[TotalL,*], cu:[N+1] -> O:[N,H,Dv]
+    """
+    assert triton is not None and torch.cuda.is_available(), "Triton/GPU required"
+    N, H, D = Q.shape
+    Dv = V_all.shape[1]
+    Q = Q.contiguous(); K_all = K_all.contiguous(); V_all = V_all.contiguous()
+    O = torch.zeros((N, H, Dv), device=Q.device, dtype=V_all.dtype)
+    stride_qn, stride_qh, stride_qd = Q.stride(0), Q.stride(1), Q.stride(2)
+    stride_kL, stride_kd = K_all.stride(0), K_all.stride(1)
+    stride_vL, stride_vd = V_all.stride(0), V_all.stride(1)
+    stride_on, stride_oh, stride_odv = O.stride(0), O.stride(1), O.stride(2)
+    grid = (N,)
+    # Derive average L for tile defaults
+    total_L = int(cu_seqlens[-1].item())
+    avg_L = max(1, total_L // max(1, N))
+    def _env_int(name: str, default: int) -> int:
+        try:
+            v = int(os.getenv(name, str(default)))
+            return max(16, v)
+        except Exception:
+            return default
+    BLOCK_D = _env_int("NSA_SEL_TRITON_BLOCK_D", 64 if D >= 64 else 32)
+    BLOCK_L = _env_int("NSA_SEL_TRITON_BLOCK_L", 128 if avg_L >= 128 else 64)
+    BLOCK_DV = _env_int("NSA_SEL_TRITON_BLOCK_DV", 64 if Dv >= 64 else 32)
+    BLOCK_H = min(16, max(1, int(os.getenv("NSA_SEL_TRITON_BLOCK_H", "16"))))
+    if H > BLOCK_H:
+        # Fallback to per-head varlen kernel
+        return sel_attn_fwd_varlen(Q, K_all, V_all, cu_seqlens)
+    inv_sqrt_d = 1.0 / math.sqrt(D)
+    _sel_attn_fwd_varlen_group_kernel[grid](
+        Q, K_all, V_all, cu_seqlens,
+        O,
+        N, H, D, Dv,
+        stride_qn, stride_qh, stride_qd,
+        stride_kL, stride_kd,
+        stride_vL, stride_vd,
+        stride_on, stride_oh, stride_odv,
+        inv_sqrt_d,
+        BLOCK_H=BLOCK_H, BLOCK_D=BLOCK_D, BLOCK_L=BLOCK_L, BLOCK_DV=BLOCK_DV,
+    )
+    return O
 
 def sel_attn_fwd_varlen(Q: torch.Tensor, K_all: torch.Tensor, V_all: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
     """
@@ -289,5 +570,3 @@ def sel_attn_fwd_varlen(Q: torch.Tensor, K_all: torch.Tensor, V_all: torch.Tenso
         num_warps=4, num_stages=2,
     )
     return O
-
-

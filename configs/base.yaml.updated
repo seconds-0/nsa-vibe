@@ -1,0 +1,25 @@
+model:
+  dim: 2560
+  n_heads: 64
+  n_kv_groups: 4
+  d_k: 192
+  d_v: 128
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: avg
+runtime:
+  precision: bf16
+  use_flash: true
+  use_triton_sel: false
+  compile_cmp_win: false
+  fa2_min_len_win: 512
+  fa2_min_len_cmp: 32
+  sel_triton_min_L: 4096
+train:
+  lr: 0.0003
+  warmup_steps: 50
+  max_grad_norm: 1.0

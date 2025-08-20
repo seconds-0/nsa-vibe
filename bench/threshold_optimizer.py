@@ -23,6 +23,7 @@ class BenchmarkData:
     cuda_version: str
     sliding_results: List[Dict]  # List of {S, w, speedup, masked_ms, fa2_ms}
     compressed_results: List[Dict]  # List of {S, speedup, masked_ms, fa2_ms}
+    selection_rows: Optional[List[Dict]] = None
     
 
 class ThresholdOptimizer:
@@ -97,12 +98,35 @@ class ThresholdOptimizer:
                     "fa2_ms": r["fa2_ms"],
                 })
         
+        # Selection rows (optional)
+        sel_rows = []
+        sel_out = data.get("selection_output", "")
+        if sel_out:
+            # Mirror parser from modal bench
+            for line in sel_out.splitlines():
+                line = line.strip()
+                if not (line.startswith("dense,") or line.startswith("varlen,")):
+                    continue
+                parts = line.split(',')
+                row: Dict[str, object] = {"mode": parts[0]}
+                for kv in parts[1:]:
+                    if '=' not in kv:
+                        continue
+                    k, v = kv.split('=', 1)
+                    k = k.strip(); v = v.strip()
+                    if k in ("N", "H", "D", "Dv", "L", "n", "streams"):
+                        row[k if k != 'n' else 'nspans'] = int(v)
+                    elif k in ("tri_ms", "ref_ms", "speedup", "mae"):
+                        row[k] = float(v.replace('x',''))
+                sel_rows.append(row)
+
         return BenchmarkData(
             device=data["device_info"]["device_name"],
             torch_version=data["device_info"]["torch_version"],
             cuda_version=data["device_info"]["cuda_version"],
             sliding_results=sliding,
             compressed_results=compressed,
+            selection_rows=sel_rows or None,
         )
     
     def load_text_output(self, text_path: Union[str, Path]) -> BenchmarkData:
@@ -144,6 +168,18 @@ class ThresholdOptimizer:
         cmp_threshold = self._find_compressed_threshold(data.compressed_results)
         
         return win_threshold, cmp_threshold
+
+    def determine_sel_threshold(self, data: BenchmarkData, safety_margin: Optional[float] = None) -> int:
+        rows = data.selection_rows or []
+        if not rows:
+            return 4096
+        margin = safety_margin or self.safety_margin
+        L_values = sorted({int(r.get('L', 0)) for r in rows if int(r.get('streams', 1)) == 1 and 'speedup' in r})
+        for L in L_values:
+            rL = [r for r in rows if int(r.get('L', -1)) == L and int(r.get('streams', 1)) == 1]
+            if rL and all(r.get('speedup', 0.0) >= margin for r in rL):
+                return L
+        return max(L_values[-1], 4096) if L_values else 4096
     
     def _find_sliding_threshold(self, results: List[Dict]) -> int:
         """Find minimum window size where FA-2 consistently beats masked."""
@@ -191,6 +227,7 @@ class ThresholdOptimizer:
                      config_path: Union[str, Path],
                      win_threshold: int,
                      cmp_threshold: int,
+                     sel_threshold: Optional[int] = None,
                      backup: bool = True) -> None:
         """
         Update configuration file with new thresholds.
@@ -219,13 +256,17 @@ class ThresholdOptimizer:
         
         config["runtime"]["fa2_min_len_win"] = win_threshold
         config["runtime"]["fa2_min_len_cmp"] = cmp_threshold
+        if sel_threshold is not None:
+            config["runtime"]["sel_triton_min_L"] = sel_threshold
         
         # Write updated config
         with open(config_path, 'w') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     
-    def generate_report(self, data: BenchmarkData, win_threshold: int, cmp_threshold: int) -> str:
+    def generate_report(self, data: BenchmarkData, win_threshold: int, cmp_threshold: int, sel_threshold: Optional[int] = None) -> str:
         """Generate markdown report of benchmark results and recommendations."""
+        sel_line = f"- `runtime.sel_triton_min_L`: **{sel_threshold}**\n" if sel_threshold is not None else ""
+        
         report = f"""# GPU Benchmark Results
 
 ## Device Information
@@ -237,7 +278,7 @@ class ThresholdOptimizer:
 ## Recommended Thresholds
 - `runtime.fa2_min_len_win`: **{win_threshold}**
 - `runtime.fa2_min_len_cmp`: **{cmp_threshold}**
-
+{sel_line}
 ## Benchmark Results
 
 ### Sliding Window Performance
@@ -295,6 +336,7 @@ def main():
     
     # Determine thresholds
     win_threshold, cmp_threshold = optimizer.determine_thresholds(data)
+    sel_threshold = optimizer.determine_sel_threshold(data)
     
     # Print results
     print(f"Device: {data.device}")
@@ -302,17 +344,18 @@ def main():
     print(f"\nRecommended Thresholds:")
     print(f"  fa2_min_len_win: {win_threshold}")
     print(f"  fa2_min_len_cmp: {cmp_threshold}")
+    print(f"  sel_triton_min_L: {sel_threshold}")
     
     # Generate report if requested
     if args.report:
-        report = optimizer.generate_report(data, win_threshold, cmp_threshold)
+        report = optimizer.generate_report(data, win_threshold, cmp_threshold, sel_threshold)
         with open(args.report, 'w') as f:
             f.write(report)
         print(f"\nReport saved to {args.report}")
     
     # Update config unless dry-run
     if not args.dry_run:
-        optimizer.update_config(args.config, win_threshold, cmp_threshold)
+        optimizer.update_config(args.config, win_threshold, cmp_threshold, sel_threshold)
         print(f"\nConfig updated: {args.config}")
     else:
         print("\n(Dry run - config not updated)")

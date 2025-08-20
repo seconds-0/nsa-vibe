@@ -1,0 +1,15 @@
+# Sliding window benchmark (w=512)
+# Device: cuda
+S=128 w=512 sliding masked 1.02 ms  fa2 66.32 ms  speedup x0.02
+S=256 w=512 sliding masked 3.60 ms  fa2 100.62 ms  speedup x0.04
+S=512 w=512 sliding masked 14.09 ms  fa2 209.46 ms  speedup x0.07
+Traceback (most recent call last):
+  File "/root/nsa-vibe/bench/bench_fa2.py", line 142, in <module>
+    run_sliding_benchmark(args.heads, args.dk, args.dv, S_list, args.w, args.iters, device)
+  File "/root/nsa-vibe/bench/bench_fa2.py", line 75, in run_sliding_benchmark
+    s_ref, s_new = bench_pair(sliding_window_attention_masked, sliding_window_attention_fa2, Q, K, V, w, iters=iters)
+  File "/root/nsa-vibe/bench/bench_fa2.py", line 16, in bench_pair
+    fn_ref(*args)
+  File "/root/nsa-vibe/nsa/core/attention_kernels.py", line 194, in sliding_window_attention_masked
+    Of = F.scaled_dot_product_attention(Qrf, Krf, Vrf, attn_mask=Mf)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 8.00 GiB. GPU 0 has a total capacity of 23.64 GiB of which 3.04 GiB is free. Process 1567553 has 20.59 GiB memory in use. Of the allocated memory 18.18 GiB is allocated by PyTorch, and 1.97 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

@@ -1,0 +1,6 @@
+# Compressed attention benchmark (l=32, d=16)
+# Device: cuda
+S=128 l=32 d=16 compressed masked 0.55 ms  fa2 2.86 ms  speedup x0.19
+S=256 l=32 d=16 compressed masked 0.54 ms  fa2 2.85 ms  speedup x0.19
+S=512 l=32 d=16 compressed masked 0.92 ms  fa2 147.78 ms  speedup x0.01
+S=1024 l=32 d=16 compressed masked 3.56 ms  fa2 264.62 ms  speedup x0.01

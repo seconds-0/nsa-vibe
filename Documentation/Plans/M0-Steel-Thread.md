@@ -1,7 +1,7 @@
 # M0 — Steel Thread Workplan (NSA)
 
 - **Task ID**: M0-Steel-Thread
-- **Status**: In Progress
+- **Status**: Completed
 - **Driver**: Lead Engineer (you)
 - **Scope**: Minimal, verifiable end-to-end NSA path using SDPA everywhere, avg-pool ϕ, prefill + 1-step decode, with tests and counters from day 1.
 
@@ -89,6 +89,14 @@ Deliver a working NSA module that can replace full attention in a LLaMA-style bl
 - Run counters smoke: `pytest -q -k decode_counters` and verify exact integer formula.
 - Visual sanity: dump heatmaps/histograms for a small S; confirm selection is causal and sparse; gates near uniform at init.
 
+## Completion Evidence
+- Core implementation: `nsa/core/nsa_attention.py`, `nsa/core/selection_scorer.py`, `nsa/cache/kv_cache.py`.
+- Tests passing in CI (CPU):
+  - `nsa/tests/test_equiv_small.py` (small‑S equivalence)
+  - `nsa/tests/test_decode_counters.py`, `nsa/tests/test_decode_step.py` (reads and decode ordering)
+  - `nsa/tests/test_block_math.py`, `nsa/tests/test_masks.py` (Eq. 9 mapping, causality)
+  - `nsa/tests/test_group_consistency.py`, `nsa/tests/test_group_consistency_sel.py` (GQA consistency)
+
 ## Decision Authority
 - You (Lead Engineer) may decide independently:
   - Gate MLP dims, zero-init, temperature default (τ=1.0).
@@ -124,4 +132,3 @@ Deliver a working NSA module that can replace full attention in a LLaMA-style bl
 - Fast tests: `uv run -q pytest`
 - Counters (long-context smoke): `uv run -q pytest -k decode_counters`
 - Optional demo: `uv run python cli/demo_infer.py --config configs/base.yaml`
-
