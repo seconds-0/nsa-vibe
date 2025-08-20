@@ -33,6 +33,13 @@ Guidance for coding agents (Codex CLI, Cursor, Claude Code) contributing to this
 - CPU fallback must work: selection gathers then SDPA; cmp/win use SDPA.
 - Observability: expose/read counters, per‑branch token reads, gate stats; heatmaps for p_cmp/p_slc when applicable.
 
+## Communication Style (for agents)
+
+- Be opinionated and decisive: recommend and execute actions that advance the PRD without asking “if you want” for obvious, low‑risk steps.
+- Take initiative on small, reversible changes (bench fixes, docs alignment, tests) and push them with clear commit messages.
+- Ask for approval only for destructive operations, costly builds, or scope changes that affect milestones.
+- Before tool calls, state succinctly what you will do next (1–2 sentences), then do it.
+
 ## M0 Execution Constraints (steel thread)
 
 - SDPA everywhere for cmp/sel/win. No Triton kernels or imports.

@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Successfully completed M0-M3 validation on RTX 4090 hardware. All core functionality tests passed. **Key finding: FA-2 provides minimal speedups on RTX 4090 (0.01x-0.20x), significantly below the 1.2x threshold required for production use.** Updated configuration defaults to effectively disable FA-2 on this hardware.
+Successfully completed M0-M3 validation on RTX 4090 hardware. All core functionality tests passed. **Key findings: (1) FA-2 provides minimal speedups on RTX 4090 (0.01x-0.20x), significantly below the 1.2x threshold required for production use. (2) Decode benchmark shows selection overhead is only 1-3%, eliminating justification for M4 custom CUDA selection kernel development.** Updated configuration defaults to effectively disable FA-2 on this hardware.
 
 ## Test Results
 
@@ -70,16 +70,16 @@ PYTHONPATH=. uv run -q python bench/bench_fa2.py --mode cmp --heads 8 --dk 64 --
 
 ## Configuration Updates
 
-Updated `configs/base.yaml` with performance-based thresholds:
+Updated `configs/base.yaml` with performance-based thresholds (aligned with ADR-2025-08-M4-02 for SM 8.9):
 
 ```yaml
 runtime:
-  fa2_min_len_win: 1024  # Conservative threshold (still slower than SDPA)
-  fa2_min_len_cmp: 1024  # Conservative threshold (still slower than SDPA) 
-  sel_triton_min_L: 4096 # Triton permanently disabled on RTX 4090
+  fa2_min_len_win: 999999  # Disable FA-2 on RTX 4090 by default (override via NSA_FA2_FORCE=1)
+  fa2_min_len_cmp: 999999  # Disable FA-2 on RTX 4090 by default (override via NSA_FA2_FORCE=1)
+  sel_triton_min_L: 4096   # Keep Triton selection disabled on RTX 4090 unless forced
 ```
 
-**Rationale:** Even at the most favorable sequence lengths tested (S=2048), FA-2 achieved only 0.20x speedup vs SDPA. The 1.2x production threshold is never reached, making FA-2 unsuitable for RTX 4090 workloads.
+**Rationale:** Even at the most favorable sequence lengths tested (S=2048), FA-2 achieved only 0.20x vs SDPA. The 1.2x production threshold is never reached, making FA-2 unsuitable for RTX 4090 workloads. Per ADR-2025-08-M4-02, Triton selection is also disabled on SM 8.9; SDPA is the production path.
 
 ## Recommendations
 
@@ -98,8 +98,10 @@ runtime:
 
 1. **FA-2 Benchmark Logs:** `fa2_win.txt`, `fa2_cmp.txt`
 2. **Updated Configuration:** `configs/base.yaml` with conservative thresholds
-3. **Performance Report:** This document
-4. **Test Logs:** All validation test outputs
+3. **Decode Benchmark Results:** `decode_gpu.csv` with detailed per-branch timing analysis
+4. **Decode Benchmark Report:** `Documentation/RTX-4090-Decode-Benchmark-Report.md`
+5. **Performance Report:** This document
+6. **Test Logs:** All validation test outputs
 
 ## Hardware Profile
 
