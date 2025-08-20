@@ -17,7 +17,7 @@ Loss decreased: True ✓
 # 3. TESTS PASSING - Core algorithms verified
 $ python3 -m pytest --tb=no
 ===================== 20 passed, 45 skipped =====================
-✓ test_train_smoke.py     # Training capability
+✓ test_train_smoke.py     # TrainiZ XZng capability
 ✓ test_decode_counters.py # Token economics per paper
 ✓ test_equiv_small.py     # Matches full attention
 ✓ test_group_consistency  # GQA working
