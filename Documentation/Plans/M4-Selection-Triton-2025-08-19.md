@@ -71,4 +71,4 @@ Selection attention currently uses a parity-first gather/SDPA path (with an opti
 - [ ] Observability counters (selected tokens/bytes)
 
 ### Status
-In Progress
+Paused — superseded by ADR-2025-08-M4-02 for RTX 4090. Triton selection is disabled by default on SM 8.9 and remains research-only. See CUDA selection spike for alternative path.

@@ -16,9 +16,9 @@ runtime:
   use_flash: true
   use_triton_sel: false
   compile_cmp_win: false
-  fa2_min_len_win: 1024  # Enable FA-2 for sliding windows ≥1024 tokens (RTX 4090: 7-8% speedup)
-  fa2_min_len_cmp: 1024  # Enable FA-2 for compressed attention ≥1024 tokens (SDPA faster <1024)
-  sel_triton_min_L: 64   # Use Triton selection only when total selected length per row is ≥ this
+  fa2_min_len_win: 999999  # Disable FA-2 on RTX 4090 (SM 8.9) by default; override via NSA_FA2_FORCE=1 for experiments
+  fa2_min_len_cmp: 999999  # Disable FA-2 on RTX 4090 (SM 8.9) by default; override via NSA_FA2_FORCE=1 for experiments
+  sel_triton_min_L: 4096 # Permanently disable Triton selection on RTX 4090 (see ADR); use SDPA fallback
 train:
   lr: 3.0e-4
   warmup_steps: 50

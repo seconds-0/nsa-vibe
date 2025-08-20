@@ -118,9 +118,11 @@ jobs:
           # Extract thresholds for output
           WIN_THRESHOLD=$(grep "fa2_min_len_win:" benchmark_report.md | grep -oE '[0-9]+' | head -1)
           CMP_THRESHOLD=$(grep "fa2_min_len_cmp:" benchmark_report.md | grep -oE '[0-9]+' | head -1)
+          SEL_THRESHOLD=$(grep "sel_triton_min_L:" benchmark_report.md | grep -oE '[0-9]+' | head -1)
           
           echo "win_threshold=$WIN_THRESHOLD" >> $GITHUB_OUTPUT
           echo "cmp_threshold=$CMP_THRESHOLD" >> $GITHUB_OUTPUT
+          echo "sel_threshold=$SEL_THRESHOLD" >> $GITHUB_OUTPUT
       
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -143,11 +145,12 @@ jobs:
             
             - fa2_min_len_win: ${{ steps.optimize.outputs.win_threshold }}
             - fa2_min_len_cmp: ${{ steps.optimize.outputs.cmp_threshold }}
+            - sel_triton_min_L: ${{ steps.optimize.outputs.sel_threshold }}
             
             Automated benchmark results from GPU: ${{ needs.trigger-check.outputs.gpu_type }}
           branch: auto/update-fa2-thresholds-${{ github.run_id }}
           delete-branch: true
-          title: '[Auto] Update FA-2 thresholds from ${{ needs.trigger-check.outputs.gpu_type }} benchmarks'
+          title: '[Auto] Update thresholds from ${{ needs.trigger-check.outputs.gpu_type }} benchmarks'
           body: |
             ## 🚀 Automated FA-2 Threshold Update
             
@@ -161,6 +164,7 @@ jobs:
             ### New Thresholds
             - `runtime.fa2_min_len_win`: **${{ steps.optimize.outputs.win_threshold }}**
             - `runtime.fa2_min_len_cmp`: **${{ steps.optimize.outputs.cmp_threshold }}**
+            - `runtime.sel_triton_min_L`: **${{ steps.optimize.outputs.sel_threshold }}**
             
             ### Artifacts
             - [Benchmark Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})

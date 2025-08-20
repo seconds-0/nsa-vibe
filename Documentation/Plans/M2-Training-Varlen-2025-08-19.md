@@ -117,7 +117,14 @@ We have an NSA attention module with M0 correctness and M1 FA‑2 performance fo
 - Allow small numeric drift in grads within FP32/AMP tolerances.
 
 ### Status
-Not Started
+Completed
+
+### Completion Evidence
+- Minimal model/block integration present; toy training driver in `scripts/train_toy.py`.
+- Varlen collate helpers and packing used across attention paths; tests in `nsa/tests/test_collate_varlen.py`.
+- Backward/gradcheck tests: `nsa/tests/test_backward_varlen.py`, `nsa/tests/test_gradcheck_varlen.py` (opt‑in GPU; CPU fallback in CI).
+- Training smoke: `nsa/tests/test_train_smoke.py` passes; loss decreases on tiny shapes.
+- Learnable ϕ: opt‑in Conv1d path added, parity‑safe at init (`nsa/tests/test_phi_mlp_equiv.py`).
 
 ### Notes
 - Keep `NSA_FORCE_PARITY=1` in CI by default; training GPU suite opt‑in with `NSA_TEST_TRAIN=1`.

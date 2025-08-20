@@ -10,9 +10,22 @@ This is an implementation of Native Sparse Attention (NSA), a drop-in attention 
 
 ### SSH Connection Setup
 1. **SSH Key Location**: Prime Intellect ED25519 key is at `~/.ssh/primeintellect_ed25519`
-2. **Connection Command**: `ssh -i ~/.ssh/primeintellect_ed25519 root@<IP> -p <PORT>`
-3. **Pod Template**: Use "UBUNTU 22, CUDA 12" base image for cleanest environment
-4. **Note**: The private key MUST be in your local SSH directory with 600 permissions for authentication to work
+2. **Quick Connect (provided)**: `ssh root@47.47.180.127 -p 12181`
+   - If key auth is required: `ssh -i ~/.ssh/primeintellect_ed25519 root@47.47.180.127 -p 12181`
+3. **Recommended ~/.ssh/config** (easier usage):
+   ```
+   Host prime-4090
+     HostName 47.47.180.127
+     Port 12181
+     User root
+     IdentityFile ~/.ssh/primeintellect_ed25519
+     IdentitiesOnly yes
+     ServerAliveInterval 30
+     ServerAliveCountMax 6
+   ```
+   Then connect with: `ssh prime-4090`
+4. **Pod Template**: Use "UBUNTU 22, CUDA 12" base image for cleanest environment
+5. **Note**: The private key MUST be in your local SSH directory with 600 permissions for authentication to work
 
 ### Pod Setup Script
 ```bash
@@ -29,6 +42,32 @@ pip install triton packaging ninja
 pip install flash-attn --no-build-isolation
 pip install numpy hydra-core pydantic pytest hypothesis ruff mypy
 ```
+
+### Quick: Run Selection Benches + Threshold
+```bash
+# Enable group kernels and lower min-L for bench only
+NSA_USE_TRITON_SEL=1 NSA_SEL_TRITON_GROUP=1 NSA_SEL_TRITON_MIN_L=64 \
+PYTHONPATH=. .venv/bin/python bench/bench_sel_triton.py \
+  --N 1024 --H 8 --D 128 --Dv 128 --L_list 64,128,256,512,1024 \
+  --dist few --iters 50 --warmup 5 --streams 1 --csv sel_dense.csv
+
+NSA_USE_TRITON_SEL=1 NSA_SEL_TRITON_GROUP=1 NSA_SEL_TRITON_MIN_L=64 \
+PYTHONPATH=. .venv/bin/python bench/bench_sel_triton.py \
+  --N 1024 --H 8 --D 128 --Dv 128 --L_list 128,256,512,1024 \
+  --dist many --iters 50 --warmup 5 --streams 2 --csv sel_varlen.csv
+
+# Compute a recommended sel_triton_min_L at margin 1.2x and write a report
+PYTHONPATH=. .venv/bin/python bench/sel_threshold_from_csv.py \
+  --dense sel_dense.csv --varlen sel_varlen.csv --margin 1.2 --out selection_report.md
+```
+
+### Important: Production Guardrails (ADR-2025-08-M4-02)
+- Triton selection is non‑viable on RTX 4090 (Ada, SM 8.9). The wrapper detects SM 8.9 and forces fallback to packed SDPA unless `NSA_TRITON_SEL_FORCE=1` is set for experiments.
+- Default `runtime.sel_triton_min_L=4096` keeps Triton effectively off. Do not enable in production on consumer GPUs.
+
+### Experimental: CUDA Selection (forward)
+- Flag: `NSA_SEL_CUDA=1` to route selection through the CUDA wrapper (currently falls back to packed SDPA until the kernel is implemented).
+- Bench: `PYTHONPATH=. uv run -q python bench/bench_sel_cuda.py --N 1024 --H 8 --D 128 --Dv 128 --L_list 128,256,512`
 
 ## Build and Test Commands
 
@@ -60,6 +99,24 @@ uv run python bench/bench_prefill.py --config configs/base.yaml
 
 # Benchmark decode performance and token-reads
 uv run python bench/bench_decode.py --config configs/base.yaml
+```
+
+### Milestone Smokes (CPU default)
+```bash
+# Quick pass over key M0–M3 tests
+uv run -q python scripts/run_milestone_smoke.py
+
+# Long-context selection smoke (optional, large S)
+PYTHONPATH=. uv run -q python bench/needle_64k_smoke.py --S 65536 --device cpu
+```
+
+### Experimental CUDA Selection (GPU)
+```bash
+# Build and route selection via CUDA ATen implementation (still behind flags)
+NSA_SEL_CUDA_BUILD=1 NSA_SEL_CUDA=1 \
+PYTHONPATH=. uv run -q python bench/bench_sel_cuda.py --N 1024 --H 8 --D 128 --Dv 128 --L_list 128,256,512
+
+# In-model decode path will also honor NSA_SEL_CUDA=1 (falls back safely otherwise)
 ```
 
 ### Demo

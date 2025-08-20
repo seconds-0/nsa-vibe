@@ -19,6 +19,7 @@ from nsa.core.packing import (
 
 # Simple grow-on-demand workspaces for varlen packing to avoid frequent allocations
 _VARLEN_WS: dict[tuple, dict[str, torch.Tensor]] = {}
+_SEL_PACK_WS: dict[tuple, dict[str, torch.Tensor]] = {}
 
 
 def _get_varlen_workspace(
@@ -277,10 +278,19 @@ def grouped_selection_attention_packed(
             # rows with L=0 remain zeros
             continue
         N = len(bucket_idx)
-        # Build Q, K, V batches
-        Qb = torch.zeros((N, h, Dk), dtype=Q.dtype, device=device)
-        Kb = torch.zeros((N, L, Dk), dtype=K.dtype, device=device)
-        Vb = torch.zeros((N, L, V.shape[-1]), dtype=V.dtype, device=device)
+        # Workspace-backed Q, K, V batches to reduce allocations
+        ws_key = (str(device), Q.dtype, K.dtype, V.dtype, h, Dk, V.shape[-1])
+        ws = _SEL_PACK_WS.get(ws_key)
+        need_new = ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
+        if need_new:
+            Qb = torch.empty((N, h, Dk), dtype=Q.dtype, device=device)
+            Kb = torch.empty((N, L, Dk), dtype=K.dtype, device=device)
+            Vb = torch.empty((N, L, V.shape[-1]), dtype=V.dtype, device=device)
+            _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
+        else:
+            Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
+            Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
+            Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
         map_rows = []
         for j, ridx in enumerate(bucket_idx):
             b, t, g, idx = rows[ridx]
@@ -349,6 +359,22 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _is_sm89(device: torch.device) -> bool:
+    """Return True if running on CUDA device with SM 8.9 (Ada/RTX 4090)."""
+    if device.type != "cuda":
+        return False
+    try:
+        cap = torch.cuda.get_device_capability(device)
+        return cap == (8, 9)
+    except Exception:
+        return False
+
+
+def _fa2_forced() -> bool:
+    """Return True if FA-2 usage is explicitly forced via env."""
+    return _env_bool("NSA_FA2_FORCE", False)
+
+
 def sliding_window_attention_fa2(
     Q: torch.Tensor,  # [B,S,G,h,Dk]
     K: torch.Tensor,  # [B,G,S,Dk]
@@ -362,6 +388,9 @@ def sliding_window_attention_fa2(
     """
     B, S, G, h, Dk = Q.shape
     device = Q.device
+    # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
+    if _is_sm89(device) and not _fa2_forced():
+        return sliding_window_attention_masked(Q, K, V, w)
     # Compute effective per-row window lengths and buckets
     lengths = compute_sliding_lengths(S, w, device)
     max_len = int(lengths.max().item()) if lengths.numel() > 0 else 0
@@ -519,6 +548,9 @@ def compressed_attention_fa2(
     """
     B, S, G, h, Dk = Q.shape
     device = Q.device
+    # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
+    if _is_sm89(device) and not _fa2_forced():
+        return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     S_cmp = K_cmp.shape[2]
     if S_cmp == 0:
         return torch.zeros((B, S, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
@@ -654,6 +686,14 @@ def compressed_attention_fa2(
 
 def sliding_window_attention_fa2_decode(q_t: torch.Tensor, K_win: torch.Tensor, V_win: torch.Tensor, w: int) -> torch.Tensor:
     B, G, h, Dk = q_t.shape
+    # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
+    if _is_sm89(q_t.device) and not _fa2_forced():
+        end = K_win.shape[2]
+        win_len = min(w, end)
+        if win_len == 0:
+            return torch.zeros((B, G, h, V_win.shape[-1]), dtype=V_win.dtype, device=V_win.device)
+        start = end - win_len
+        return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
     end = K_win.shape[2]
     win_len = min(w, end)
     if win_len == 0:
@@ -689,6 +729,9 @@ def compressed_attention_fa2_decode(q_t: torch.Tensor, K_cmp: torch.Tensor, V_cm
         B, G, h, _ = q_t.shape
         return torch.zeros((B, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
     B, G, h, Dk = q_t.shape
+    # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
+    if _is_sm89(q_t.device) and not _fa2_forced():
+        return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     if not fa2_supported(q_t.device, q_t.dtype, Dk):
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     try:
