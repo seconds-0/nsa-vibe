@@ -60,7 +60,7 @@ if triton is not None:
                 k_ptrs = K_ptr + n * stride_kn + rows * stride_kL + cols * stride_kd
                 k_tile = tl.load(
                     k_ptrs,
-                    mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
+                    mask=(Lmask[:, None] & Dmask[None, :]),
                     other=0.0,
                 )
                 logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
@@ -88,7 +88,7 @@ if triton is not None:
                     k_ptrs = K_ptr + n * stride_kn + rows * stride_kL + cols * stride_kd
                     k_tile = tl.load(
                         k_ptrs,
-                        mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
+                        mask=(Lmask[:, None] & Dmask[None, :]),
                         other=0.0,
                     )
                     logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
@@ -99,7 +99,7 @@ if triton is not None:
                 v_ptrs = V_ptr + n * stride_vn + rows * stride_vL + cols_v * stride_vd
                 v_tile = tl.load(
                     v_ptrs,
-                    mask=tl.broadcast_to(Lmask[:, None], v_ptrs.shape) & tl.broadcast_to(DVmask[None, :], v_ptrs.shape),
+                    mask=(Lmask[:, None] & DVmask[None, :]),
                     other=0.0,
                 )
                 acc += tl.sum(v_tile * p[:, None], axis=0)
@@ -161,7 +161,7 @@ if triton is not None:
                 k_ptrs = K_ptr + rows * stride_kL + cols * stride_kd
                 k_tile = tl.load(
                     k_ptrs,
-                    mask=tl.broadcast_to(Lmask[:, None], k_ptrs.shape) & tl.broadcast_to(Dmask[None, :], k_ptrs.shape),
+                    mask=(Lmask[:, None] & Dmask[None, :]),
                     other=0.0,
                 )
                 logits_tile += tl.sum(k_tile * q_vec[None, :], axis=1)
@@ -198,7 +198,7 @@ if triton is not None:
                 v_ptrs = V_ptr + rows * stride_vL + cols_v * stride_vd
                 v_tile = tl.load(
                     v_ptrs,
-                    mask=tl.broadcast_to(Lmask[:, None], v_ptrs.shape) & tl.broadcast_to(DVmask[None, :], v_ptrs.shape),
+                    mask=(Lmask[:, None] & DVmask[None, :]),
                     other=0.0,
                 )
                 acc += tl.sum(v_tile * p[:, None], axis=0)

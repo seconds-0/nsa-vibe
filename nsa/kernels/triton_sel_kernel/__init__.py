@@ -68,25 +68,19 @@ def _log_device_once() -> None:
 class _SelAttnTritonFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, ranges: torch.Tensor) -> torch.Tensor:
-        # Save tensors for backward; ranges is int so safe
         ctx.save_for_backward(Q, K, V, ranges)
-        # Use triton wrapper in forward (may still fall back per guards)
         return selection_attention_triton(Q, K, V, ranges)
 
     @staticmethod
     def backward(ctx, dO: torch.Tensor):
         Q, K, V, ranges = ctx.saved_tensors
-        # Compute grads via packed SDPA reference path for correctness
         Q_r = Q.detach().requires_grad_(True)
         K_r = K.detach().requires_grad_(True)
         V_r = V.detach().requires_grad_(True)
         from nsa.core.attention_kernels import grouped_selection_attention_packed
         O_ref = grouped_selection_attention_packed(Q_r, K_r, V_r, ranges)
         O_ref.backward(dO)
-        dQ = Q_r.grad
-        dK = K_r.grad
-        dV = V_r.grad
-        return dQ, dK, dV, None
+        return Q_r.grad, K_r.grad, V_r.grad, None
 
 
 def selection_attention_triton(
@@ -97,37 +91,33 @@ def selection_attention_triton(
     *,
     use_packed_fallback: bool = True,
 ) -> torch.Tensor:
-    """
-    Selection attention via Triton kernel (M4). Until kernels are implemented,
-    this wrapper falls back to the packed or gather SDPA reference.
-    """
-    # Clamp ranges to valid [0, S_kv] first for consistent semantics
     S_kv = K.shape[2]
     ranges = ranges.clamp(min=0, max=S_kv)
-    # If Triton disabled or unavailable, fall back to reference implementations
     if not (_env_true("NSA_USE_TRITON_SEL", False) and triton_sel_available()):
         from nsa.core.attention_kernels import (
             grouped_selection_attention_packed,
             grouped_selection_attention,
         )
-        if use_packed_fallback:
-            return grouped_selection_attention_packed(Q, K, V, ranges)
-        return grouped_selection_attention(Q, K, V, ranges)
+        return grouped_selection_attention_packed(Q, K, V, ranges) if use_packed_fallback else grouped_selection_attention(Q, K, V, ranges)
 
-    # Defensive input checks and gatekeeping
-    # - If training/grad enabled and not explicitly allowed, fall back to packed
+    # Assertions / logs for contiguity & strides (opt-in)
+    if _env_true("NSA_DEBUG_SHAPES", False):
+        from nsa.core.debug import log
+        log("sel.triton.input", Q=Q, K=K, V=V, ranges=ranges)
+        assert Q.is_contiguous(), "Q must be contiguous"
+        assert K.is_contiguous(), "K must be contiguous"
+        assert V.is_contiguous(), "V must be contiguous"
+
     if torch.is_grad_enabled() and (Q.requires_grad or K.requires_grad or V.requires_grad):
         if _env_true("NSA_SEL_TRITON_ALLOW_GRAD", False):
             return _SelAttnTritonFn.apply(Q, K, V, ranges)
         else:
             from nsa.core.attention_kernels import grouped_selection_attention_packed
             return grouped_selection_attention_packed(Q, K, V, ranges)
-    # - Dtype support: only half/bfloat16
     allowed_dtypes = {torch.float16, torch.bfloat16}
     if Q.dtype not in allowed_dtypes or K.dtype not in allowed_dtypes or V.dtype not in allowed_dtypes:
         from nsa.core.attention_kernels import grouped_selection_attention_packed
         return grouped_selection_attention_packed(Q, K, V, ranges)
-    # - Alignment requirement (optional)
     if _env_true("NSA_SEL_TRITON_REQUIRE_ALIGN", True):
         D = Q.shape[-1]
         Dv = V.shape[-1]
@@ -137,19 +127,17 @@ def selection_attention_triton(
 
     # Simple heuristic: use Triton only if total selected length per row ≥ sel_triton_min_L
     try:
-        min_L = int(os.getenv("NSA_SEL_TRITON_MIN_L", "64"))
+        min_L = int(os.getenv("NSA_SEL_TRITON_MIN_L", "1024"))
     except Exception:
-        min_L = 64
+        min_L = 1024
 
     B, S, G, n, _ = ranges.shape
-    # Compute total selected length per (b,t,g)
-    lengths = (ranges[..., 1] - ranges[..., 0]).clamp_min(0)  # [B,S,G,n]
-    total_L = lengths.sum(dim=-1)  # [B,S,G]
+    lengths = (ranges[..., 1] - ranges[..., 0]).clamp_min(0)
+    total_L = lengths.sum(dim=-1)
     if (total_L < min_L).all():
         from nsa.core.attention_kernels import grouped_selection_attention_packed
         return grouped_selection_attention_packed(Q, K, V, ranges)
 
-    # Pack rows by identical total_L to minimize padding; call Triton per bucket
     B, S, G, h, D = Q.shape
     Dv = V.shape[-1]
     _log_device_once()
@@ -161,16 +149,16 @@ def selection_attention_triton(
                 r = ranges[b, t, g]
                 spans = []
                 for i in range(r.shape[0]):
-                    s0 = int(r[i, 0].item())
-                    e0 = int(r[i, 1].item())
+                    s0 = int(r[i, 0].item()); e0 = int(r[i, 1].item())
                     if e0 > s0:
                         spans.append((s0, e0))
                 L_i = sum(e - s for (s, e) in spans)
                 idx_map.append((b, t, g, L_i, spans))
-    # Bucket by L
+
     buckets: dict[int, list[Tuple[int, int, int, list[Tuple[int, int]]]]] = {}
     for b, t, g, L_i, spans in idx_map:
         buckets.setdefault(L_i, []).append((b, t, g, spans))
+
     O = torch.zeros((B, S, G, h, Dv), device=Q.device, dtype=V.dtype)
     try:
         from .sel_fwd import sel_attn_fwd_dense, sel_attn_fwd_varlen
@@ -179,7 +167,6 @@ def selection_attention_triton(
                 continue
             N = len(items)
             Q_pack = torch.empty((N, h, D), device=Q.device, dtype=Q.dtype)
-            # Build varlen packed K/V and cu_seqlens
             total_L = N * L_i
             K_pack, V_pack, cu = _get_pack_buffers(Q.device, total_L, D, Dv, N, Q.dtype, V.dtype)
             cu[0] = 0
@@ -199,7 +186,6 @@ def selection_attention_triton(
                 V_pack[write : write + Lw] = V[b, g, idx]
                 write += Lw
                 cu[j + 1] = write
-            # Dense fast-path when each row is a single contiguous span
             use_dense = True
             for _, _, _, spans in items:
                 if len(spans) != 1:
@@ -221,7 +207,6 @@ def selection_attention_triton(
                     from nsa.core.debug import log
                     log("sel.triton.shapes", path="varlen", Q=Q_pack, K=K_pack, V=V_pack)
                 O_pack = sel_attn_fwd_varlen(Q_pack, K_pack, V_pack, cu)
-            # Scatter back
             for j, (b, t, g, _) in enumerate(items):
                 O[b, t, g] = O_pack[j]
             if use_timing and start_evt is not None:
@@ -236,10 +221,8 @@ def selection_attention_triton(
         total_tokens = int(sum(L_i * len(items) for L_i, items in buckets.items())) if buckets else 0
         bytes_k = int(total_tokens * D * Q.element_size() if buckets else 0)
         bytes_v = int(total_tokens * Dv * V.element_size() if buckets else 0)
-        # Histogram of lengths per bucket
         hist = {int(L_i): len(items) for L_i, items in buckets.items()}
         log("sel.triton.reads", total_tokens=total_tokens, bytes_k=bytes_k, bytes_v=bytes_v, buckets=len(buckets), hist=str(hist))
-        # Optional parity compare for observability
         if _env_true("NSA_DEBUG_COMPARE", False):
             from nsa.core.attention_kernels import grouped_selection_attention_packed
             O_ref = grouped_selection_attention_packed(Q, K, V, ranges)
@@ -255,5 +238,4 @@ def selection_attention_triton(
             pass
         return grouped_selection_attention_packed(Q, K, V, ranges)
     return O
-
 
