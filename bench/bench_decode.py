@@ -84,7 +84,7 @@ def benchmark_decode_step():
             with torch.no_grad():
                 _, kv = nsa(x_ctx, kv, prefill=True)
 
-            def run_decode(model: NSAAttention, kv_state: NSA_KV) -> float:
+            def run_decode(model: NSAAttention, kv_state: NSA_KV) -> tuple[float, NSA_KV]:
                 times = []
                 for step in range(args.iters):
                     x_tok = torch.randn(args.B, 1, args.dim, device=device)
@@ -97,33 +97,34 @@ def benchmark_decode_step():
                         torch.cuda.synchronize()
                     times.append(time.perf_counter() - t0)
                     kv_state = kv_new
-                return float(np.mean(times[args.warmup:]) * 1000)
+                return float(np.mean(times[args.warmup:]) * 1000), kv_state
 
             # total
             model_total = nsa
-            ms_total = run_decode(model_total, kv)
+            ms_total, kv_after_total = run_decode(model_total, kv)
 
             # cmp-only
             model_cmp = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
             model_cmp.load_state_dict(nsa.state_dict(), strict=False)
             _force_branch(model_cmp, "cmp")
-            ms_cmp = run_decode(model_cmp, kv)
+            ms_cmp, _ = run_decode(model_cmp, kv)
 
             # sel-only
             model_sel = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
             model_sel.load_state_dict(nsa.state_dict(), strict=False)
             _force_branch(model_sel, "sel")
-            ms_sel = run_decode(model_sel, kv)
+            ms_sel, _ = run_decode(model_sel, kv)
 
             # win-only
             model_win = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
             model_win.load_state_dict(nsa.state_dict(), strict=False)
             _force_branch(model_win, "win")
-            ms_win = run_decode(model_win, kv)
+            ms_win, _ = run_decode(model_win, kv)
 
             S_current = S_ctx + args.iters
             expected = compute_expected_reads(S_current, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w)
-            actual = kv.reads_act_total[-1].item() if kv.reads_act_total.numel() else -1
+            # Use reads from the final KV state after total-branch decode
+            actual = kv_after_total.reads_act_total[-1].item() if kv_after_total.reads_act_total.numel() else -1
             print(f"{S_ctx:<10} {ms_total:<12.2f} {ms_cmp:<10.2f} {ms_sel:<10.2f} {ms_win:<10.2f} {actual}/{expected}")
             if writer:
                 writer.writerow([S_ctx, f"{ms_total:.3f}", f"{ms_cmp:.3f}", f"{ms_sel:.3f}", f"{ms_win:.3f}", int(actual), int(expected)])
