@@ -1,6 +1,7 @@
 import time
 import csv
 import argparse
+import os
 import numpy as np
 import torch
 
@@ -66,6 +67,8 @@ def benchmark_decode_step():
     ap.add_argument("--iters", type=int, default=32)
     ap.add_argument("--warmup", type=int, default=8)
     ap.add_argument("--csv", type=str, default=None)
+    ap.add_argument("--branch_force_mode", type=str, default="bias", choices=["bias", "env"],
+                    help="How to force single-branch benches: 'bias' (modify gate biases) or 'env' (set NSA_FORCE_BRANCH)")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -112,23 +115,38 @@ def benchmark_decode_step():
             reads_actual_total = int(reads_after)
             reads_actual_decode = int(max(0, reads_after - reads_before))
 
-            # cmp-only
-            model_cmp = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
-            model_cmp.load_state_dict(nsa.state_dict(), strict=False)
-            _force_branch(model_cmp, "cmp")
-            ms_cmp, _ = run_decode(model_cmp, kv)
+            if args.branch_force_mode == "env":
+                # Use NSA_FORCE_BRANCH env override to avoid touching model weights
+                def timed_force(which: str) -> float:
+                    prev = os.environ.get("NSA_FORCE_BRANCH")
+                    os.environ["NSA_FORCE_BRANCH"] = which
+                    try:
+                        t, _ = run_decode(nsa, kv)
+                    finally:
+                        if prev is None:
+                            os.environ.pop("NSA_FORCE_BRANCH", None)
+                        else:
+                            os.environ["NSA_FORCE_BRANCH"] = prev
+                    return t
+                ms_cmp = timed_force("cmp")
+                ms_sel = timed_force("sel")
+                ms_win = timed_force("win")
+            else:
+                # Bias forcing (legacy)
+                model_cmp = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+                model_cmp.load_state_dict(nsa.state_dict(), strict=False)
+                _force_branch(model_cmp, "cmp")
+                ms_cmp, _ = run_decode(model_cmp, kv)
 
-            # sel-only
-            model_sel = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
-            model_sel.load_state_dict(nsa.state_dict(), strict=False)
-            _force_branch(model_sel, "sel")
-            ms_sel, _ = run_decode(model_sel, kv)
+                model_sel = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+                model_sel.load_state_dict(nsa.state_dict(), strict=False)
+                _force_branch(model_sel, "sel")
+                ms_sel, _ = run_decode(model_sel, kv)
 
-            # win-only
-            model_win = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
-            model_win.load_state_dict(nsa.state_dict(), strict=False)
-            _force_branch(model_win, "win")
-            ms_win, _ = run_decode(model_win, kv)
+                model_win = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+                model_win.load_state_dict(nsa.state_dict(), strict=False)
+                _force_branch(model_win, "win")
+                ms_win, _ = run_decode(model_win, kv)
 
             S_current = S_ctx + args.iters
             expected_total = compute_expected_reads(S_current, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w)
@@ -137,12 +155,11 @@ def benchmark_decode_step():
 
             print(f"{S_ctx:<10} {ms_total:<12.2f} {ms_cmp:<10.2f} {ms_sel:<10.2f} {ms_win:<10.2f} {reads_actual_decode}/{expected_decode:<7} {reads_actual_total}/{expected_total}")
             if writer:
-                # Preserve legacy columns (total) and add explicit decode/total breakdown
+                # Legacy columns only (expected by tests)
                 writer.writerow([
                     S_ctx,
                     f"{ms_total:.3f}", f"{ms_cmp:.3f}", f"{ms_sel:.3f}", f"{ms_win:.3f}",
                     int(reads_actual_total), int(expected_total),
-                    int(reads_actual_decode), int(expected_decode),
                 ])
 
     if args.csv:
@@ -150,10 +167,7 @@ def benchmark_decode_step():
             writer = csv.writer(f)
             writer.writerow([
                 "S", "ms_total", "ms_cmp", "ms_sel", "ms_win",
-                # legacy-compatible total reads columns
                 "reads_actual", "reads_expected",
-                # explicit decode-only breakdown (new)
-                "reads_actual_decode", "reads_expected_decode",
             ])
             run_all(writer)
     else:

@@ -45,6 +45,14 @@ class GateMLP(nn.Module):
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, q_group_pooled: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
+        fb = os.getenv("NSA_FORCE_BRANCH")
+        if fb:
+            fb = fb.strip().lower()
+            if fb in ("cmp", "sel", "win"):
+                idx = 0 if fb == "cmp" else (1 if fb == "sel" else 2)
+                one = torch.zeros((*q_group_pooled.shape[:-1], 3), device=q_group_pooled.device, dtype=q_group_pooled.dtype)
+                one[..., idx] = 1.0
+                return one
         x = F.silu(self.fc1(q_group_pooled))
         g = self.fc2(x) / max(tau, 1e-6)
         p = F.softmax(g, dim=-1)
@@ -335,7 +343,10 @@ class NSAAttention(nn.Module):
                     )
                 except Exception:
                     pass
-                O = gates[..., 0:1] * O_cmp + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win
+                w_cmp = gates[..., 0:1].unsqueeze(-1)
+                w_sel = gates[..., 1:2].unsqueeze(-1)
+                w_win = gates[..., 2:3].unsqueeze(-1)
+                O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
                 O_heads = O.reshape(B, self.n_heads, self.d_v)
                 out_t = self.out(O_heads.reshape(B, 1, -1))
                 outs.append(out_t)
@@ -469,12 +480,11 @@ class NSAAttention(nn.Module):
         # Gates and combine
         q_gp = Q.mean(dim=3)  # [B,S,G,Dk]
         gates = self.gate(q_gp.reshape(B * S * self.n_kv_groups, self.d_k), tau=self.gate_temp)
-        gates = gates.view(B, S, self.n_kv_groups, 3).unsqueeze(3)  # [B,S,G,1,3]
-        O = (
-            gates[..., 0:1] * O_cmp +
-            gates[..., 1:2] * O_sel +
-            gates[..., 2:3] * O_win
-        )  # [B,S,G,h,Dv]
+        gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
+        w_cmp = gates[..., 0:1].unsqueeze(3)
+        w_sel = gates[..., 1:2].unsqueeze(3)
+        w_win = gates[..., 2:3].unsqueeze(3)
+        O = (w_cmp * O_cmp + w_sel * O_sel + w_win * O_win)  # [B,S,G,h,Dv]
 
         # Output projection
         O_heads = O.reshape(B, S, self.n_kv_groups * self.h_per_group, self.d_v)
@@ -510,7 +520,10 @@ class NSAAttention(nn.Module):
                 print(f"NSA-DBG win_mae={win_mae:.6e}")
 
                 # Final output recompute using seq per-branch
-                O_seq = gates[..., 0:1] * O_cmp_seq + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win_seq
+                w_cmp_dbg = gates[..., 0:1].unsqueeze(-1)
+                w_sel_dbg = gates[..., 1:2].unsqueeze(-1)
+                w_win_dbg = gates[..., 2:3].unsqueeze(-1)
+                O_seq = w_cmp_dbg * O_cmp_seq + w_sel_dbg * O_sel + w_win_dbg * O_win_seq
                 O_heads_seq = O_seq.reshape(B, S, self.n_kv_groups * self.h_per_group, self.d_v)
                 out_seq = self.out(O_heads_seq.reshape(B, S, -1))
                 out_mae = (out - out_seq).abs().mean().item()
@@ -567,7 +580,10 @@ class NSAAttention(nn.Module):
             O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)
             q_gp = Q_t.mean(dim=2)
             gates = self.gate(q_gp, tau=self.gate_temp)
-            O = gates[..., 0:1] * O_cmp + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win
+            w_cmp = gates[..., 0:1].unsqueeze(-1)
+            w_sel = gates[..., 1:2].unsqueeze(-1)
+            w_win = gates[..., 2:3].unsqueeze(-1)
+            O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
             O_heads = O.reshape(B, self.n_heads, self.d_v)
             out_t = self.out(O_heads.reshape(B, 1, -1))
             outs.append(out_t)

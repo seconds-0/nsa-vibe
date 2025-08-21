@@ -1,0 +1,17 @@
+# GPU-focused install for CUDA 12.1 Linux hosts with Torch 2.4 wheels
+# Use: python -m venv .venv && . .venv/bin/activate
+#      pip install -U pip wheel setuptools
+#      pip install --index-url https://download.pytorch.org/whl/cu121 -r requirements-gpu-cu121-torch24.txt
+
+torch==2.4.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+triton>=3.0,<3.2
+flash-attn
+
+# Common tools
+numpy
+hydra-core
+pydantic
+pytest
+hypothesis
+ruff
+mypy

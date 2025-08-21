@@ -36,7 +36,8 @@ def fa2_supported(device: torch.device, dtype: torch.dtype, head_dim: int) -> bo
 		return False
 	if head_dim % 8 != 0:
 		return False
-	return is_flash_available()
+	# Prefer varlen availability probe for FA-2 usage
+	return is_flash_varlen_available() or is_flash_available()
 
 
 def attention_bgh(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, causal: bool = True) -> torch.Tensor:
@@ -60,7 +61,8 @@ def attention_bgh(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, causal: boo
 		v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
 		attn = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
 		o = attn.squeeze(1).reshape(B, G, h, -1)
-		return o
+		# Guard against rare numerical issues on some GPU precisions
+		return torch.nan_to_num(o, nan=0.0)
 
 
 def attention_fa2_varlen_stub(*args, **kwargs):
@@ -151,4 +153,3 @@ def attention_fa2_varlen(
 			)
 		except Exception:
 			raise NotImplementedError("FA-2 varlen API not available; caller should fallback")
-

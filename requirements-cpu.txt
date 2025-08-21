@@ -1,0 +1,12 @@
+# CPU/CI baseline (Torch 2.3)
+torch==2.3.*
+triton>=2.3,<3.1 ; platform_system == "Linux"
+
+# Common tools
+numpy
+hydra-core
+pydantic
+pytest
+hypothesis
+ruff
+mypy

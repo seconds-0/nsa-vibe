@@ -208,25 +208,53 @@ class LocalRunner(BenchmarkRunner):
 
 
 class RunPodRunner(BenchmarkRunner):
-    """Run benchmarks on RunPod (future implementation)."""
-    
+    """Run benchmarks on RunPod (scaffolded; dry-run until API wired)."""
+
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.environ.get("RUNPOD_API_KEY")
-    
+
     def is_available(self) -> bool:
-        """Check if RunPod API is configured."""
-        return bool(self.api_key)
-    
+        """Available if API key present, otherwise allow dry-run for planning."""
+        return True  # allow dry-run to print instructions
+
     def run(self, gpu_type: str = "L4") -> Dict:
-        """Run benchmark on RunPod."""
-        print(f"RunPod runner not yet implemented. Would run on {gpu_type}")
-        # TODO: Implement RunPod API integration
-        # This would:
-        # 1. Create a serverless endpoint or pod
-        # 2. Run the benchmark script
-        # 3. Fetch results
-        # 4. Clean up resources
-        return {}
+        """Plan a RunPod job; if API key present, hint at next steps."""
+        if not self.api_key:
+            print("RunPod API key not set. Dry-run mode: printing plan only.")
+            plan = {
+                "provider": "runpod",
+                "gpu": gpu_type,
+                "steps": [
+                    "Provision pod with desired GPU and CUDA image",
+                    "Clone repo and install requirements",
+                    "Run Triton parity (forward/backward) with force flags",
+                    "Run decode bench with env branch forcing and write CSV",
+                    "Upload logs and CSV artifacts",
+                ],
+                "env": {
+                    "PYTHONPATH": ".",
+                    "NSA_USE_TRITON_SEL": "1",
+                    "NSA_TRITON_SEL_FORCE": "1",
+                    "NSA_SEL_TRITON_ALLOW_GRAD": "1",
+                },
+                "commands": [
+                    "PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_parity_gpu.py",
+                    "PYTHONPATH=. NSA_SEL_TRITON_ALLOW_GRAD=1 pytest -q nsa/tests/test_triton_sel_backward_gpu.py",
+                    "PYTHONPATH=. python bench/bench_decode.py --S_list 512,1024,2048,4096 --iters 64 --warmup 8 --csv decode_gpu_final.csv --branch_force_mode env",
+                    "python bench/summarize_decode_csv.py decode_gpu_final.csv",
+                ],
+            }
+            print(json.dumps(plan, indent=2))
+            return {
+                "device_info": {"device_name": f"RunPod::{gpu_type}", "torch_version": None, "cuda_version": None, "cuda_available": True},
+                "results": [],
+                "recommendation": {},
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        else:
+            print(f"RunPod runner API key detected. Implement API call to launch {gpu_type} here.")
+            # Placeholder return until fully implemented
+            return {}
 
 
 class LambdaCloudRunner(BenchmarkRunner):
