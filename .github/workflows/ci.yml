@@ -17,14 +17,20 @@ jobs:
         with:
             python-version: '3.10'
 
-      - name: Install uv
-        run: |
-          pip install uv
-
       - name: Create venv and install deps
         run: |
-          uv venv -p 3.10 .venv
-          uv pip sync requirements-cpu.txt
+          python -m venv .venv
+          . ./.venv/bin/activate
+          pip install -U pip wheel setuptools
+          pip install -r requirements-cpu.txt
+
+      - name: Environment diagnostics
+        run: |
+          ./.venv/bin/python -V
+          ./.venv/bin/python -m pip list
+          ./.venv/bin/python -c "import sys; print('PYTHONPATH', sys.path[0])"
+          ./.venv/bin/python -c "import tomli; print('tomli imported OK')" || true
+          ./.venv/bin/python -m pytest --version || true
 
       - name: Lint (ruff)
         run: |
@@ -36,10 +42,59 @@ jobs:
           ./.venv/bin/python -m mypy --version || true
           ./.venv/bin/python -m mypy nsa || true
 
+      - name: Collect tests (CPU)
+        env:
+          PYTHONPATH: "."
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          ./.venv/bin/python -m pytest --collect-only -q || true
+
       - name: Run tests (CPU)
         env:
-          NSA_PREFILL_BATCHED: '1'
+          PYTHONPATH: "."
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          ./.venv/bin/python -m pytest -q
+          ./.venv/bin/python -m pytest -q -vv | tee test-output.txt
 
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-test-log
+          path: test-output.txt
 
+  build-batched-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+            python-version: '3.10'
+
+      - name: Create venv and install deps
+        run: |
+          python -m venv .venv
+          . ./.venv/bin/activate
+          pip install -U pip wheel setuptools
+          pip install -r requirements-cpu.txt
+
+      - name: Run batched prefill smoke (CPU)
+        env:
+          NSA_PREFILL_BATCHED: '1'
+          PYTHONPATH: '.'
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          ./.venv/bin/python -m pytest -q -vv \
+            nsa/tests/test_equiv_small.py \
+            nsa/tests/test_equiv_full_coverage.py \
+            nsa/tests/test_decode_reads_trend.py \
+            nsa/tests/test_phi_mlp_equiv.py
+
+      - name: Upload batched smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-batched-smoke-log
+          path: test-output.txt

@@ -13,7 +13,13 @@ def build_inv_freq(
     return inv_freq  # [half]
 
 
-def apply_rope(x: torch.Tensor, pos: torch.Tensor, base: float = 10000.0) -> torch.Tensor:
+def apply_rope(
+    x: torch.Tensor,
+    pos: torch.Tensor,
+    base: float = 10000.0,
+    *,
+    scale: float = 1.0,
+) -> torch.Tensor:
     """
     Apply rotary position embeddings along the last dimension.
 
@@ -28,7 +34,10 @@ def apply_rope(x: torch.Tensor, pos: torch.Tensor, base: float = 10000.0) -> tor
     # pos shape broadcasting to [..., S, D/2]
     while pos.dim() < x.dim() - 1:
         pos = pos.unsqueeze(0)
-    angles = pos.to(x.dtype).unsqueeze(-1) * inv_freq  # [..., S, D/2]
+    # Simple NTK/YARN-style extension via position scaling: effective_pos = pos / scale
+    if scale <= 0:
+        scale = 1.0
+    angles = (pos.to(x.dtype) / float(scale)).unsqueeze(-1) * inv_freq  # [..., S, D/2]
     sin = torch.sin(angles)
     cos = torch.cos(angles)
     x_2 = x.view(*x.shape[:-1], D // 2, 2)

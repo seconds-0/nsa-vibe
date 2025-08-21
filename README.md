@@ -25,6 +25,10 @@ Decode bench (CSV + summary)
 - `PYTHONPATH=. python bench/bench_decode.py --S_list 512,1024,2048,4096 --iters 64 --warmup 8 --csv artifacts/decode_gpu_final.csv`
 - `python scripts/summarize_bench.py artifacts/decode_gpu_final.csv`
 
+End-to-end test runner
+- `PYTHONPATH=. python scripts/run_m7_readiness.py --out artifacts/run_$(date +%Y%m%d-%H%M)`
+- Optional flags: `--enable-triton` (parity tests), `--enable-fa2` (if available), `--skip-long` (omit 64k probes)
+
 Training showcase (tiny byte‑LM)
 - `CONFIG=configs/train_showcase.yaml PYTHONPATH=. python scripts/train_showcase.py`
 
