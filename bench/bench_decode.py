@@ -155,11 +155,12 @@ def benchmark_decode_step():
 
             print(f"{S_ctx:<10} {ms_total:<12.2f} {ms_cmp:<10.2f} {ms_sel:<10.2f} {ms_win:<10.2f} {reads_actual_decode}/{expected_decode:<7} {reads_actual_total}/{expected_total}")
             if writer:
-                # Legacy columns only (expected by tests)
+                # Write legacy columns plus decode-only read counts for accurate analysis
                 writer.writerow([
                     S_ctx,
                     f"{ms_total:.3f}", f"{ms_cmp:.3f}", f"{ms_sel:.3f}", f"{ms_win:.3f}",
                     int(reads_actual_total), int(expected_total),
+                    int(reads_actual_decode), int(expected_decode),
                 ])
 
     if args.csv:
@@ -168,6 +169,7 @@ def benchmark_decode_step():
             writer.writerow([
                 "S", "ms_total", "ms_cmp", "ms_sel", "ms_win",
                 "reads_actual", "reads_expected",
+                "reads_actual_decode", "reads_expected_decode",
             ])
             run_all(writer)
     else:

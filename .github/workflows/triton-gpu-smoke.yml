@@ -1,0 +1,54 @@
+name: Triton GPU Smoke (M4)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"  # Weekly Monday 03:00 UTC
+
+jobs:
+  a100:
+    name: A100/H100 Triton Parity
+    runs-on: [self-hosted, linux, x64, gpu, a100]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install deps (uv)
+        run: |
+          pip install uv
+          uv venv -p 3.10 .venv
+          uv pip sync -r requirements.txt
+      - name: Triton parity + fallback smokes
+        env:
+          NSA_TEST_TRITON_SEL: "1"
+          NSA_USE_TRITON_SEL: "1"
+          NSA_DEBUG_LOG: "1"
+          NSA_LOG_LIMIT: "20"
+        run: |
+          . .venv/bin/activate
+          pytest -q -k "triton_sel_parity or triton_sel_parity_gpu or triton_sel_fallback_logging"
+
+  sm89-guard:
+    name: SM 8.9 Guard (ADR fallback)
+    runs-on: [self-hosted, linux, x64, gpu, sm89]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install deps (uv)
+        run: |
+          pip install uv
+          uv venv -p 3.10 .venv
+          uv pip sync -r requirements.txt
+      - name: Assert ADR fallback
+        env:
+          NSA_TEST_TRITON_SEL: "1"
+          NSA_USE_TRITON_SEL: "1"
+        run: |
+          . .venv/bin/activate
+          pytest -q -k "triton_sel_parity or triton_sel_parity_gpu or triton_sel_fallback_logging"
+

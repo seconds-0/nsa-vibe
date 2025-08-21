@@ -24,12 +24,12 @@ jobs:
       - name: Create venv and install deps
         run: |
           uv venv -p 3.10 .venv
-          uv pip sync requirements.txt
+          uv pip sync requirements-cpu.txt
 
       - name: Lint (ruff)
         run: |
           ./.venv/bin/python -m ruff --version || true
-          ./.venv/bin/python -m ruff . || true
+          ./.venv/bin/python -m ruff check . || true
 
       - name: Type check (mypy)
         run: |

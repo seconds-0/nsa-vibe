@@ -45,11 +45,11 @@ PYTHONPATH=. python scripts/gpu_sanity.py | tee "$RUN_DIR/sanity.out" || true
 
 echo "[oneshot] triton forward parity" >&2
 NSA_USE_TRITON_SEL=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. \
-  pytest -q nsa/tests/test_triton_sel_parity_gpu.py | tee "$RUN_DIR/triton_fwd.txt" || true
+  pytest -q -vv nsa/tests/test_triton_sel_parity_gpu.py | tee "$RUN_DIR/triton_fwd.txt" || true
 
 echo "[oneshot] triton backward parity" >&2
 NSA_USE_TRITON_SEL=1 NSA_SEL_TRITON_ALLOW_GRAD=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. \
-  pytest -q nsa/tests/test_triton_sel_backward_gpu.py | tee "$RUN_DIR/triton_bwd.txt" || true
+  pytest -q -vv nsa/tests/test_triton_sel_backward_gpu.py | tee "$RUN_DIR/triton_bwd.txt" || true
 
 echo "[oneshot] decode bench + summary" >&2
 PYTHONPATH=. python bench/bench_decode.py --B 1 --dim 256 --heads 8 --groups 2 --dk 32 --dv 32 \

@@ -10,3 +10,7 @@ pytest
 hypothesis
 ruff
 mypy
+
+# Dependencies for pytest and mypy
+pluggy
+typing-extensions
