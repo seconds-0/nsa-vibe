@@ -10,8 +10,8 @@ This is an implementation of Native Sparse Attention (NSA), a drop-in attention 
 
 ### SSH Connection Setup
 1. **SSH Key Location**: Prime Intellect ED25519 key is at `~/.ssh/primeintellect_ed25519`
-2. **Quick Connect (provided)**: `ssh root@47.47.180.127 -p 12181`
-   - If key auth is required: `ssh -i ~/.ssh/primeintellect_ed25519 root@47.47.180.127 -p 12181`
+2. **Current Prime Intellect Host**: `ssh -i ~/.ssh/primeintellect_ed25519 ubuntu@216.81.248.82`
+3. **Old Host Reference (legacy)**: `ssh root@47.47.180.127 -p 12181`
 3. **Recommended ~/.ssh/config** (easier usage):
    ```
    Host prime-4090

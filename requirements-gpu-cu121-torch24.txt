@@ -11,7 +11,10 @@ flash-attn
 numpy
 hydra-core
 pydantic
+transformers
+datasets
 pytest
 hypothesis
 ruff
 mypy
+tensorboard

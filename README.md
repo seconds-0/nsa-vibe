@@ -25,6 +25,11 @@ Decode bench (CSV + summary)
 - `PYTHONPATH=. python bench/bench_decode.py --S_list 512,1024,2048,4096 --iters 64 --warmup 8 --csv artifacts/decode_gpu_final.csv`
 - `python scripts/summarize_bench.py artifacts/decode_gpu_final.csv`
 
+Prime Intellect Runbook (SSH)
+- Bootstrap GPU env: `bash scripts/prime_bootstrap.sh`
+- Start training (auto‑picks config by VRAM, handles 1–2 GPUs): `bash scripts/train_m7c_prime.sh`
+- Logs: `artifacts/train_runs/` and `artifacts/m7c_125m/` (training.csv, checkpoints)
+
 End-to-end test runner
 - `PYTHONPATH=. python scripts/run_m7_readiness.py --out artifacts/run_$(date +%Y%m%d-%H%M)`
 - Optional flags: `--enable-triton` (parity tests), `--enable-fa2` (if available), `--skip-long` (omit 64k probes)
