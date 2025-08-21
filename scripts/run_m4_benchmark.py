@@ -69,7 +69,7 @@ def setup_pod_and_benchmark():
     ]
 
     # Create combined script
-    script_content = " && ".join(setup_commands)
+    " && ".join(setup_commands)
 
     print("=" * 80)
     print("M4 TRITON SELECTION BENCHMARK SCRIPT")

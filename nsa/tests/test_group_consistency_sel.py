@@ -14,7 +14,7 @@ def test_group_consistency_identical_ranges_cpu():
     ranges = torch.tensor([[[[[8, 24], [32, 48]]]]], dtype=torch.int64)
     from nsa.kernels.triton_sel_kernel import selection_attention_triton
 
-    O = selection_attention_triton(Q, K, V, ranges)
+    selection_attention_triton(Q, K, V, ranges)
     # outputs across heads should differ only due to Q; ensure that if Q heads equal, outputs equal
     Q[:, :, :, 1:] = Q[:, :, :, :1]
     O2 = selection_attention_triton(Q, K, V, ranges)

@@ -1,11 +1,10 @@
 from __future__ import annotations
-from typing import Optional
 
 import torch
 
 
 def build_inv_freq(
-    dim: int, base: float = 10000.0, device: Optional[torch.device] = None
+    dim: int, base: float = 10000.0, device: torch.device | None = None
 ) -> torch.Tensor:
     assert dim % 2 == 0, "RoPE requires even dimension"
     half = dim // 2

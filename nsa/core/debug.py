@@ -34,7 +34,7 @@ def log(tag: str, **fields: Any) -> None:
 
 def _safe(v: Any) -> str:
     try:
-        if isinstance(v, (int, float, str)):
+        if isinstance(v, int | float | str):
             return str(v)
         if hasattr(v, "shape"):
             return str(tuple(int(x) for x in v.shape))

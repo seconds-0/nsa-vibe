@@ -214,8 +214,6 @@ def test_decode_selection_only_equivalence_full_sel():
         # Build full-attn reference using selection projections (covers all 0..t)
         H = n_heads
         W_Q = nsa.W_Q
-        W_K = nsa.W_K_sel
-        W_V = nsa.W_V_sel
         Qh = W_Q(x_tok).view(B, 1, H, d_k).permute(0, 2, 1, 3)
         Kh = kv.K_sel.repeat_interleave(nsa.h_per_group, dim=1)  # [B,H,S,Dk]
         Vh = kv.V_sel.repeat_interleave(nsa.h_per_group, dim=1)  # [B,H,S,Dv]

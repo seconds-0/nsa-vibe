@@ -16,3 +16,4 @@ pluggy
 typing-extensions
 pygments
 exceptiongroup
+iniconfig

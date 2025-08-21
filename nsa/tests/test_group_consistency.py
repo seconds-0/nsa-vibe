@@ -5,7 +5,7 @@ from nsa.core.selection_scorer import group_reduce_pslc, map_pcmp_to_pslc
 
 
 def test_group_reduce_identical_across_heads():
-    B, G, h, Dk = 2, 3, 4, 8
+    B, G, h, _Dk = 2, 3, 4, 8
     S_cmp = 10
     # construct meta
     meta = build_block_meta(1024, l=32, d=16, l_sel=64, n_sel=16, w=512)

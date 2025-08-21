@@ -23,7 +23,7 @@ def test_selection_cuda_fallback_on_forward_error(monkeypatch):
 
     # Tiny CPU tensors
     B, S, G, h, Dk, Dv = 1, 2, 1, 2, 4, 4
-    S_kv, n = 8, 2
+    S_kv, _n = 8, 2
     Q = torch.randn(B, S, G, h, Dk)
     K = torch.randn(B, G, S_kv, Dk)
     V = torch.randn(B, G, S_kv, Dv)

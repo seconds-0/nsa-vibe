@@ -26,7 +26,7 @@ def main():
     env = read_text(base / "env.txt")
     routing = read_text(base / "routing.json")
     sanity = read_text(base / "sanity.out")
-    dec_csv = read_text(base / "decode_gpu_final.csv")
+    read_text(base / "decode_gpu_final.csv")
     dec_sum = read_text(base / "decode_summary.txt")
     tfwd = read_text(base / "triton_fwd.txt")
     tbwd = read_text(base / "triton_bwd.txt")

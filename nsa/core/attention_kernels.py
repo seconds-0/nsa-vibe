@@ -82,7 +82,7 @@ def batched_causal_attention_compressed(
     num_cmp = torch.where(tpos + 1 < l, 0, ((tpos + 1 - l) // d) + 1).clamp(max=S_cmp)
     col = torch.arange(S_cmp, device=device).view(1, S_cmp)
     # disallowed mask: True means masked
-    disallowed = col >= num_cmp.view(S, 1)  # [S,S_cmp]
+    col >= num_cmp.view(S, 1)  # [S,S_cmp]
     # Enforce token-level causality as well: no compressed tokens emitted from future blocks beyond t
     # When l=d=1, S_cmp == S and this reduces to standard causal
 
@@ -131,8 +131,7 @@ def grouped_selection_attention(
     ranges: torch.Tensor,  # [B,S,G,n,2]
 ) -> torch.Tensor:  # [B,S,G,h,Dv]
     B, S, G, h, Dk = Q.shape
-    S_kv = K.shape[2]
-    device = Q.device
+    K.shape[2]
 
     # Path 1: exact sequential-equivalence gather per (b,t,g)
     out = torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=V.device)
@@ -263,7 +262,7 @@ def grouped_selection_attention_packed(
     by identical L, and run one SDPA per bucket.
     """
     B, S, G, h, Dk = Q.shape
-    S_kv = K.shape[2]
+    K.shape[2]
     device = Q.device
     # Initialize output
     out = torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=device)
@@ -501,7 +500,7 @@ def sliding_window_attention_fa2(
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
-                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+                    return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.varlen_all", N=int(N), total_k=int(total_k), ms=dt)
@@ -555,7 +554,7 @@ def sliding_window_attention_fa2(
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
-                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+                    return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.bucket", path="varlen", L=L, N=int(N), ms=dt)

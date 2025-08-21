@@ -236,7 +236,7 @@ def run_gpu_benchmark(gpu_type: str = "T4") -> dict:
             ],
             check=False,
         )  # Don't fail if install doesn't work
-    except:
+    except (RuntimeError, OSError):
         pass
 
     # Verify GPU and FA-2 availability

@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from torch.utils.cpp_extension import load as _load_ext

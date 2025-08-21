@@ -6,8 +6,7 @@ import sys
 def test_check_env_pairing_runs():
     proc = subprocess.run(
         [sys.executable, "scripts/check_env_pairing.py"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         timeout=30,
     )
