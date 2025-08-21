@@ -23,6 +23,11 @@ Scope: Verify NSA correctness gates and training harness readiness to start M7C 
 
 ## Commands and Expectations
 
+Pre-flight config sanity
+- Command: `PYTHONPATH=. python scripts/check_config.py configs/m7c_125m.yaml > artifacts/test-reports/config_check.json`
+- Expectation: exits 0 and prints computed reads; errors out if `d` does not divide `l` or `l_sel`.
+- Deliverable: `artifacts/test-reports/config_check.json`
+
 ### 1) NSA correctness (CPU-safe)
 - Command:
   - `PYTHONPATH=. pytest -q -k "test_equiv_small or test_block_math or test_masks or test_group_consistency or test_decode_counters or test_selection_packed" > artifacts/test-reports/cpu-correctness.txt`
