@@ -1,10 +1,13 @@
 import os
-import torch
+
 import pytest
+import torch
 
-from nsa.core.attention_kernels import sliding_window_attention_masked, batched_causal_attention_compressed_masked
+from nsa.core.attention_kernels import (
+    batched_causal_attention_compressed_masked,
+    sliding_window_attention_masked,
+)
 from nsa.kernels.flash_wrappers import attention_bgh
-
 
 RUN_MASKED = os.getenv("NSA_TEST_MASKED", "0").lower() in ("1", "true", "yes")
 
@@ -37,8 +40,12 @@ def _cmp_parity_compressed(B=1, S=8, G=1, h=2, Dk=8, Dv=8, l=4, d=2):
         K_raw = torch.randn(B, G, S, Dk)
         V_raw = torch.randn(B, G, S, Dv)
         # naive pool to create deterministic K_cmp/V_cmp windows (d-stride, length l)
-        K_cmp = torch.stack([K_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2)
-        V_cmp = torch.stack([V_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2)
+        K_cmp = torch.stack(
+            [K_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2
+        )
+        V_cmp = torch.stack(
+            [V_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2
+        )
     # Reference per-t
     out_ref = torch.zeros(B, S, G, h, Dv)
     for t in range(S):
@@ -49,7 +56,9 @@ def _cmp_parity_compressed(B=1, S=8, G=1, h=2, Dk=8, Dv=8, l=4, d=2):
     return (out - out_ref).abs().max().item()
 
 
-@pytest.mark.skipif(not RUN_MASKED, reason="Masked parity tests are opt-in; set NSA_TEST_MASKED=1 to run")
+@pytest.mark.skipif(
+    not RUN_MASKED, reason="Masked parity tests are opt-in; set NSA_TEST_MASKED=1 to run"
+)
 @pytest.mark.parametrize("w", [1, 4, 8])
 @pytest.mark.parametrize("S", [4, 8])
 def test_parity_sliding_masked(S, w):
@@ -57,7 +66,9 @@ def test_parity_sliding_masked(S, w):
     assert max_err < 1e-6
 
 
-@pytest.mark.skipif(not RUN_MASKED, reason="Masked parity tests are opt-in; set NSA_TEST_MASKED=1 to run")
+@pytest.mark.skipif(
+    not RUN_MASKED, reason="Masked parity tests are opt-in; set NSA_TEST_MASKED=1 to run"
+)
 @pytest.mark.parametrize("l,d", [(4, 2), (2, 1)])
 @pytest.mark.parametrize("S", [4, 8])
 def test_parity_compressed_masked(S, l, d):

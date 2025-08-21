@@ -2,10 +2,14 @@
 import subprocess
 import sys
 
-
 SUITES = [
     # M0 correctness
-    ["pytest", "-q", "-k", "test_equiv_small or test_block_math or test_masks or test_group_consistency"],
+    [
+        "pytest",
+        "-q",
+        "-k",
+        "test_equiv_small or test_block_math or test_masks or test_group_consistency",
+    ],
     # M3 decode counters/order
     ["pytest", "-q", "-k", "test_decode_counters or test_decode_step"],
     # Selection packed parity (CPU)
@@ -31,4 +35,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

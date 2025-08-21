@@ -1,10 +1,9 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
 def full_attention_reference_from_nsa_weights(x: torch.Tensor, nsa: NSAAttention) -> torch.Tensor:
@@ -87,5 +86,3 @@ def test_smallS_equivalence():
     y_ref = full_attention_reference_from_nsa_weights(x, nsa)
     mae = (y_nsa - y_ref).abs().mean().item()
     assert mae < 1e-5
-
-

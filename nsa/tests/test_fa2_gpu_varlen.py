@@ -1,14 +1,13 @@
 import os
+
 import pytest
 import torch
 
 from nsa.core.attention_kernels import (
-    sliding_window_attention_fa2,
     compressed_attention_fa2,
+    sliding_window_attention_fa2,
 )
-from nsa.kernels.flash_wrappers import is_flash_available
-from nsa.kernels.flash_wrappers import attention_bgh, fa2_supported
-
+from nsa.kernels.flash_wrappers import attention_bgh, fa2_supported, is_flash_available
 
 RUN_FA2 = os.getenv("NSA_TEST_FA2", "0").lower() in ("1", "true", "yes")
 
@@ -35,7 +34,12 @@ def test_sliding_varlen_vs_sdpa_gpu():
     for t in range(S):
         end = t + 1
         start = max(0, end - w)
-        out_ref[:, t] = attention_bgh(Q[:, t].to(torch.float32), K[:, :, start:end].to(torch.float32), V[:, :, start:end].to(torch.float32), causal=True).to(torch.float16)
+        out_ref[:, t] = attention_bgh(
+            Q[:, t].to(torch.float32),
+            K[:, :, start:end].to(torch.float32),
+            V[:, :, start:end].to(torch.float32),
+            causal=True,
+        ).to(torch.float16)
     # force varlen path
     os.environ["NSA_FA2_FORCE_VARLEN"] = "1"
     out = sliding_window_attention_fa2(Q, K, V, w)
@@ -60,7 +64,12 @@ def test_compressed_varlen_vs_sdpa_gpu():
     for t in range(S):
         L = 0 if (t + 1) < l else min(((t + 1 - l) // d) + 1, S_cmp)
         if L > 0:
-            out_ref[:, t] = attention_bgh(Q[:, t].to(torch.float32), K_cmp[:, :, :L].to(torch.float32), V_cmp[:, :, :L].to(torch.float32), causal=True).to(torch.float16)
+            out_ref[:, t] = attention_bgh(
+                Q[:, t].to(torch.float32),
+                K_cmp[:, :, :L].to(torch.float32),
+                V_cmp[:, :, :L].to(torch.float32),
+                causal=True,
+            ).to(torch.float16)
     os.environ["NSA_FA2_FORCE_VARLEN"] = "1"
     out = compressed_attention_fa2(Q, K_cmp, V_cmp, l, d)
     mae = (out.to(torch.float32) - out_ref.to(torch.float32)).abs().mean().item()
@@ -105,5 +114,3 @@ def test_gpu_determinism_note():
     # Non-bitwise determinism acceptable; check small tolerance
     mae = (out1.to(torch.float32) - out2.to(torch.float32)).abs().mean().item()
     assert mae <= 1e-5
-
-

@@ -1,7 +1,7 @@
 import os
+
 import pytest
 import torch
-
 
 CUDA_OK = torch.cuda.is_available()
 
@@ -31,8 +31,8 @@ def test_triton_selection_backward_parity_gpu():
     ).unsqueeze(2)  # [S,1,n,2] -> [S,G,n,2]
     ranges = ranges.unsqueeze(0)  # [B,S,G,n,2]
 
-    from nsa.kernels.triton_sel_kernel import selection_attention_triton
     from nsa.core.attention_kernels import grouped_selection_attention_packed
+    from nsa.kernels.triton_sel_kernel import selection_attention_triton
 
     # Triton forward + custom backward
     out_tri = selection_attention_triton(Q, K, V, ranges)
@@ -54,4 +54,3 @@ def test_triton_selection_backward_parity_gpu():
     assert torch.allclose(gQ_tri, gQ_ref, atol=5e-3, rtol=5e-3)
     assert torch.allclose(gK_tri, gK_ref, atol=5e-3, rtol=5e-3)
     assert torch.allclose(gV_tri, gV_ref, atol=5e-3, rtol=5e-3)
-

@@ -1,10 +1,9 @@
-import pytest
 import torch
 
 from nsa.core.attention_kernels import (
-    sliding_window_attention,
     batched_causal_attention_compressed,
     grouped_selection_attention,
+    sliding_window_attention,
 )
 
 

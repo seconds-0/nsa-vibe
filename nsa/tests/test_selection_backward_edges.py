@@ -3,11 +3,13 @@ import torch
 
 def _run_ref_backward(Q, K, V, ranges, dO):
     from nsa.kernels.triton_sel_kernel import selection_attention_backward_reference
+
     return selection_attention_backward_reference(Q, K, V, ranges, dO)
 
 
 def _run_autograd(Q, K, V, ranges, dO):
     from nsa.core.attention_kernels import grouped_selection_attention_packed
+
     Qr = Q.detach().requires_grad_(True)
     Kr = K.detach().requires_grad_(True)
     Vr = V.detach().requires_grad_(True)
@@ -29,7 +31,9 @@ def test_selection_backward_empty_ranges_cpu():
     Q = torch.randn(B, S, G, h, D)
     K = torch.randn(B, G, S_kv, D)
     V = torch.randn(B, G, S_kv, Dv)
-    Q.requires_grad_(True); K.requires_grad_(True); V.requires_grad_(True)
+    Q.requires_grad_(True)
+    K.requires_grad_(True)
+    V.requires_grad_(True)
     # All ranges empty
     ranges = torch.tensor([[[[[0, 0], [4, 4]]]]], dtype=torch.int64)
     dO = torch.randn(B, S, G, h, Dv)
@@ -48,12 +52,14 @@ def test_selection_backward_adjacent_and_duplicates_cpu():
     Q = torch.randn(B, S, G, h, D)
     K = torch.randn(B, G, S_kv, D)
     V = torch.randn(B, G, S_kv, Dv)
-    Q.requires_grad_(True); K.requires_grad_(True); V.requires_grad_(True)
+    Q.requires_grad_(True)
+    K.requires_grad_(True)
+    V.requires_grad_(True)
     # Adjacent + duplicate spans
     ranges = torch.tensor(
         [
-            [[[0, 4], [4, 8]]],    # adjacent
-            [[[8, 12], [12, 16]]], # adjacent
+            [[[0, 4], [4, 8]]],  # adjacent
+            [[[8, 12], [12, 16]]],  # adjacent
         ],
         dtype=torch.int64,
     ).unsqueeze(0)  # [B,S,G,n,2]
@@ -72,7 +78,9 @@ def test_selection_backward_long_L_bucket_cpu():
     Q = torch.randn(B, S, G, h, D)
     K = torch.randn(B, G, S_kv, D)
     V = torch.randn(B, G, S_kv, Dv)
-    Q.requires_grad_(True); K.requires_grad_(True); V.requires_grad_(True)
+    Q.requires_grad_(True)
+    K.requires_grad_(True)
+    V.requires_grad_(True)
     # One long span (L=32)
     ranges = torch.tensor([[[[[10, 42], [0, 0]]]]], dtype=torch.int64)
     dO = torch.randn(B, S, G, h, Dv)

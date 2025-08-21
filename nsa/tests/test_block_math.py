@@ -1,4 +1,3 @@
-import math
 
 import pytest
 import torch
@@ -47,5 +46,3 @@ def test_divisibility_guards():
         _ = build_block_meta(1024, l=30, d=16, l_sel=64, n_sel=16, w=512)
     with pytest.raises(ValueError):
         _ = build_block_meta(1024, l=32, d=12, l_sel=60, n_sel=16, w=512)
-
-

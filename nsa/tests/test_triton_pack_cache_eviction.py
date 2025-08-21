@@ -1,16 +1,16 @@
-import os
 import importlib
+
 import torch
 
 
 def test_pack_cache_eviction_soft_cap(monkeypatch):
     # Import module fresh to access cache
-    m = importlib.import_module('nsa.kernels.triton_sel_kernel')
+    m = importlib.import_module("nsa.kernels.triton_sel_kernel")
     # Set tiny cap to trigger eviction
-    monkeypatch.setenv('NSA_SEL_TRITON_PACK_CACHE_MAX_MB', '1')
+    monkeypatch.setenv("NSA_SEL_TRITON_PACK_CACHE_MAX_MB", "1")
     importlib.reload(m)
     # Allocate buffers exceeding 1MB soft cap
-    device = torch.device('cpu')
+    device = torch.device("cpu")
     # total elements ~ 300k floats ~ 1.2MB (4 bytes each)
     total_L = 300_000
     D = 1

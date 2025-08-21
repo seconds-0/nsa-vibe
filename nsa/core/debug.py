@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict
+from typing import Any
 
 
 def _flag(name: str) -> bool:
@@ -11,7 +11,7 @@ def debug_enabled() -> bool:
     return _flag("NSA_DEBUG_LOG")
 
 
-_COUNTS: Dict[str, int] = {}
+_COUNTS: dict[str, int] = {}
 
 
 def log(tag: str, **fields: Any) -> None:
@@ -41,5 +41,3 @@ def _safe(v: Any) -> str:
         return str(v)
     except Exception:
         return "<unrepr>"
-
-

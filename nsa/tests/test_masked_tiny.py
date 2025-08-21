@@ -1,13 +1,13 @@
 import os
+
 import pytest
 import torch
 
 from nsa.core.attention_kernels import (
-    sliding_window_attention_masked,
     batched_causal_attention_compressed_masked,
+    sliding_window_attention_masked,
 )
 from nsa.kernels.flash_wrappers import attention_bgh
-
 
 RUN_MASKED = os.getenv("NSA_TEST_MASKED", "0").lower() in ("1", "true", "yes")
 
@@ -35,7 +35,9 @@ def _ref_compressed(Q, K_cmp, V_cmp, l, d):
     return out
 
 
-@pytest.mark.skipif(not RUN_MASKED, reason="Tiny masked parity tests are opt-in; set NSA_TEST_MASKED=1")
+@pytest.mark.skipif(
+    not RUN_MASKED, reason="Tiny masked parity tests are opt-in; set NSA_TEST_MASKED=1"
+)
 @pytest.mark.parametrize("S", [1, 2, 3, 4])
 def test_masked_sliding_tiny_parity(S):
     torch.manual_seed(0)
@@ -50,7 +52,9 @@ def test_masked_sliding_tiny_parity(S):
         assert max_err < 1e-6
 
 
-@pytest.mark.skipif(not RUN_MASKED, reason="Tiny masked parity tests are opt-in; set NSA_TEST_MASKED=1")
+@pytest.mark.skipif(
+    not RUN_MASKED, reason="Tiny masked parity tests are opt-in; set NSA_TEST_MASKED=1"
+)
 @pytest.mark.parametrize("S", [1, 2, 3, 4])
 @pytest.mark.parametrize("l,d", [(1, 1), (2, 1)])
 def test_masked_compressed_tiny_parity(S, l, d):
@@ -65,8 +69,12 @@ def test_masked_compressed_tiny_parity(S, l, d):
     else:
         K_raw = torch.randn(B, G, S, Dk)
         V_raw = torch.randn(B, G, S, Dv)
-        K_cmp = torch.stack([K_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2)
-        V_cmp = torch.stack([V_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2)
+        K_cmp = torch.stack(
+            [K_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2
+        )
+        V_cmp = torch.stack(
+            [V_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2
+        )
     out_ref = _ref_compressed(Q, K_cmp, V_cmp, l, d)
     out = batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     max_err = (out - out_ref).abs().max().item()
@@ -98,5 +106,3 @@ def test_masked_compressed_determinism():
     out1 = batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     out2 = batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     assert torch.allclose(out1, out2, atol=0.0, rtol=0.0)
-
-

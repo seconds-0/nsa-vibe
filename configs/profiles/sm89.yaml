@@ -1,0 +1,8 @@
+runtime:
+  # RTX 4090 (SM 8.9) policy: Triton selection disabled; SDPA is production
+  use_triton_sel: false
+  sel_triton_min_L: 4096
+  # FA‑2 off by default on SM 8.9
+  fa2_min_len_win: 999999
+  fa2_min_len_cmp: 999999
+

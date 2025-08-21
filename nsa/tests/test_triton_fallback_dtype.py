@@ -14,4 +14,3 @@ def test_triton_wrapper_falls_back_on_float32():
     out_wrap = selection_attention_triton(Q, K, V, ranges)
     out_ref = grouped_selection_attention_packed(Q, K, V, ranges)
     assert torch.allclose(out_wrap, out_ref, atol=1e-5)
-

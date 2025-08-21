@@ -1,0 +1,9 @@
+runtime:
+  # A100/H100 policy: Triton selection allowed under guardrails
+  use_triton_sel: true
+  # Set after running selection benches with margin ≥ 1.2×
+  sel_triton_min_L: 2048
+  # Optional FA‑2 gates (tune via FA‑2 benches)
+  fa2_min_len_win: 256
+  fa2_min_len_cmp: 128
+

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import sys
 import csv
+import sys
 
 
 def summarize(csv_paths):
@@ -46,4 +46,3 @@ if __name__ == "__main__":
         print("usage: summarize_bench.py bench1.csv [bench2.csv ...]")
         sys.exit(1)
     summarize(sys.argv[1:])
-

@@ -1,8 +1,8 @@
 import torch
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
 def run_ref_branch(x: torch.Tensor, nsa: NSAAttention, branch: str) -> torch.Tensor:
@@ -43,7 +43,9 @@ def run_ref_branch(x: torch.Tensor, nsa: NSAAttention, branch: str) -> torch.Ten
 def test_ablation_sliding_equiv():
     torch.manual_seed(0)
     B, S, dim = 1, 8, 64
-    nsa = NSAAttention(dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=16)
+    nsa = NSAAttention(
+        dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=16
+    )
     x = torch.randn(B, S, dim)
     y = run_ref_branch(x, nsa, "win")
     assert y.shape == (B, S, dim)
@@ -52,9 +54,9 @@ def test_ablation_sliding_equiv():
 def test_ablation_compressed_equiv():
     torch.manual_seed(1)
     B, S, dim = 1, 8, 64
-    nsa = NSAAttention(dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=16)
+    nsa = NSAAttention(
+        dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=16
+    )
     x = torch.randn(B, S, dim)
     y = run_ref_branch(x, nsa, "cmp")
     assert y.shape == (B, S, dim)
-
-

@@ -11,6 +11,7 @@ def main():
         return 1
     try:
         import triton
+
         triton_ver = triton.__version__
     except Exception:
         triton_ver = None
@@ -45,4 +46,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

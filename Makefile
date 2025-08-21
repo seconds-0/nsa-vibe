@@ -2,7 +2,7 @@ PYTHON := python
 PIP := pip
 VENV := .venv
 
-.PHONY: venv install cpu-tests routing bench-decode bench-summarize triton-fwd triton-bwd lint oneshot pr env-pair
+.PHONY: venv install cpu-tests routing bench-decode bench-summarize bench-report triton-fwd triton-bwd lint oneshot pr env-pair clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -19,10 +19,14 @@ routing:
 	$(PYTHON) scripts/print_routing.py || true
 
 bench-decode:
-	PYTHONPATH=. $(PYTHON) bench/bench_decode.py --S_list 512,1024 --iters 16 --warmup 4 --csv decode_test.csv --branch_force_mode env
+	mkdir -p artifacts
+	PYTHONPATH=. $(PYTHON) bench/bench_decode.py --S_list 512,1024 --iters 16 --warmup 4 --csv artifacts/decode_test.csv --branch_force_mode env
 
 bench-summarize:
-	$(PYTHON) bench/summarize_decode_csv.py decode_test.csv
+	$(PYTHON) bench/summarize_decode_csv.py artifacts/decode_test.csv
+
+bench-report:
+	bash scripts/bench_report.sh
 
 triton-fwd:
 	NSA_USE_TRITON_SEL=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_parity_gpu.py
@@ -42,3 +46,6 @@ pr:
 
 env-pair:
 	python scripts/check_env_pairing.py
+
+clean:
+	bash scripts/cleanup_repo.sh

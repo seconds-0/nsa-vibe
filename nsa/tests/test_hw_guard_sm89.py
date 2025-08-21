@@ -1,4 +1,3 @@
-import os
 import importlib
 
 import torch
@@ -17,4 +16,3 @@ def test_fa2_forced_env_flag(tmp_path, monkeypatch):
     # forced on
     monkeypatch.setenv("NSA_FA2_FORCE", "1")
     assert mod._fa2_forced() is True
-

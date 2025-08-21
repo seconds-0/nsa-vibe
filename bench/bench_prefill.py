@@ -1,10 +1,11 @@
 import time
+
 import numpy as np
 import torch
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
 def create_empty_kv(B: int, G: int, d_k: int, d_v: int, meta) -> NSA_KV:
@@ -52,7 +53,18 @@ def benchmark_prefill_scaling():
 
     for B, S in configs:
         print(f"\nTesting B={B}, S={S}...")
-        nsa = NSAAttention(dim=dim, n_heads=n_heads, n_kv_groups=n_kv_groups, d_k=d_k, d_v=d_v, l=32, d=16, l_sel=64, n_sel=16, w=512)
+        nsa = NSAAttention(
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_groups=n_kv_groups,
+            d_k=d_k,
+            d_v=d_v,
+            l=32,
+            d=16,
+            l_sel=64,
+            n_sel=16,
+            w=512,
+        )
         nsa = nsa.to(device)
         x = torch.randn(B, S, dim, device=device)
         meta = build_block_meta(S, 32, 16, 64, n_sel=16, w=512)
@@ -87,12 +99,10 @@ def benchmark_prefill_scaling():
         t256 = next(r for r in singles if r["S"] == 256)["mean_ms"]
         t512 = next(r for r in singles if r["S"] == 512)["mean_ms"]
         t1024 = next(r for r in singles if r["S"] == 1024)["mean_ms"]
-        print(f"256->512: {t512/t256:.2f}x; 512->1024: {t1024/t512:.2f}x")
+        print(f"256->512: {t512 / t256:.2f}x; 512->1024: {t1024 / t512:.2f}x")
 
     return results
 
 
 if __name__ == "__main__":
     benchmark_prefill_scaling()
-
-

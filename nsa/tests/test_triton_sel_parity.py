@@ -1,11 +1,14 @@
 import os
+
 import pytest
 import torch
 
 RUN_TRITON_SEL = os.getenv("NSA_TEST_TRITON_SEL", "0").lower() in ("1", "true", "yes")
 
 
-@pytest.mark.skipif(not RUN_TRITON_SEL, reason="Triton selection tests are opt-in; set NSA_TEST_TRITON_SEL=1")
+@pytest.mark.skipif(
+    not RUN_TRITON_SEL, reason="Triton selection tests are opt-in; set NSA_TEST_TRITON_SEL=1"
+)
 def test_triton_sel_dense_parity_small():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for Triton")
@@ -22,6 +25,7 @@ def test_triton_sel_dense_parity_small():
     V = torch.randn(N, L, Dv, device=device, dtype=torch.float16)
 
     from nsa.kernels.triton_sel_kernel.sel_fwd import sel_attn_fwd_dense
+
     O_tri = sel_attn_fwd_dense(Q, K, V).float()
 
     # Reference: SDPA over packed rows -> treat each (n,h) as query row with causal over full L
@@ -36,5 +40,3 @@ def test_triton_sel_dense_parity_small():
 
     mae = (O_tri - O_ref).abs().mean().item()
     assert mae < 1e-3
-
-

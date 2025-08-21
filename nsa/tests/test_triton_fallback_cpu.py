@@ -1,4 +1,3 @@
-import os
 import torch
 
 from nsa.core.attention_kernels import grouped_selection_attention_packed
@@ -16,4 +15,3 @@ def test_triton_wrapper_falls_back_on_cpu(monkeypatch):
     out_wrap = selection_attention_triton(Q, K, V, ranges)
     out_ref = grouped_selection_attention_packed(Q, K, V, ranges)
     assert torch.allclose(out_wrap, out_ref, atol=1e-5)
-

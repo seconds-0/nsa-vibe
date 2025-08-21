@@ -1,13 +1,14 @@
-import time
-import csv
 import argparse
+import csv
 import os
+import time
+
 import numpy as np
 import torch
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
 def create_empty_kv(B: int, G: int, d_k: int, d_v: int, meta) -> NSA_KV:
@@ -43,11 +44,17 @@ def _force_branch(model: NSAAttention, which: str) -> None:
         return
     with torch.no_grad():
         if which == "cmp":
-            model.gate.fc2.bias.copy_(torch.tensor([1000.0, -1000.0, -1000.0], device=model.gate.fc2.bias.device))
+            model.gate.fc2.bias.copy_(
+                torch.tensor([1000.0, -1000.0, -1000.0], device=model.gate.fc2.bias.device)
+            )
         elif which == "sel":
-            model.gate.fc2.bias.copy_(torch.tensor([-1000.0, 1000.0, -1000.0], device=model.gate.fc2.bias.device))
+            model.gate.fc2.bias.copy_(
+                torch.tensor([-1000.0, 1000.0, -1000.0], device=model.gate.fc2.bias.device)
+            )
         else:
-            model.gate.fc2.bias.copy_(torch.tensor([-1000.0, -1000.0, 1000.0], device=model.gate.fc2.bias.device))
+            model.gate.fc2.bias.copy_(
+                torch.tensor([-1000.0, -1000.0, 1000.0], device=model.gate.fc2.bias.device)
+            )
 
 
 def benchmark_decode_step():
@@ -67,8 +74,13 @@ def benchmark_decode_step():
     ap.add_argument("--iters", type=int, default=32)
     ap.add_argument("--warmup", type=int, default=8)
     ap.add_argument("--csv", type=str, default=None)
-    ap.add_argument("--branch_force_mode", type=str, default="bias", choices=["bias", "env"],
-                    help="How to force single-branch benches: 'bias' (modify gate biases) or 'env' (set NSA_FORCE_BRANCH)")
+    ap.add_argument(
+        "--branch_force_mode",
+        type=str,
+        default="bias",
+        choices=["bias", "env"],
+        help="How to force single-branch benches: 'bias' (modify gate biases) or 'env' (set NSA_FORCE_BRANCH)",
+    )
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -77,17 +89,32 @@ def benchmark_decode_step():
         torch.manual_seed(0)
     except Exception:
         pass
-    nsa = NSAAttention(dim=args.dim, n_heads=args.heads, n_kv_groups=args.groups, d_k=args.dk, d_v=args.dv,
-                       l=args.l, d=args.d, l_sel=args.l_sel, n_sel=args.n_sel, w=args.w).to(device)
+    nsa = NSAAttention(
+        dim=args.dim,
+        n_heads=args.heads,
+        n_kv_groups=args.groups,
+        d_k=args.dk,
+        d_v=args.dv,
+        l=args.l,
+        d=args.d,
+        l_sel=args.l_sel,
+        n_sel=args.n_sel,
+        w=args.w,
+    ).to(device)
 
     S_values = [int(x) for x in args.S_list.split(",")]
+
     def run_all(writer):
-        print(f"\n{'Context':<10} {'Total(ms)':<12} {'cmp(ms)':<10} {'sel(ms)':<10} {'win(ms)':<10} {'Reads(dec)':<14} {'Reads(tot)':<14}")
+        print(
+            f"\n{'Context':<10} {'Total(ms)':<12} {'cmp(ms)':<10} {'sel(ms)':<10} {'win(ms)':<10} {'Reads(dec)':<14} {'Reads(tot)':<14}"
+        )
         print("-" * 96)
 
         for S_ctx in S_values:
             x_ctx = torch.randn(args.B, S_ctx, args.dim, device=device)
-            meta = build_block_meta(S_ctx + args.w, nsa.l, nsa.d, nsa.l_sel, n_sel=nsa.n_sel, w=nsa.w)
+            meta = build_block_meta(
+                S_ctx + args.w, nsa.l, nsa.d, nsa.l_sel, n_sel=nsa.n_sel, w=nsa.w
+            )
             kv = create_empty_kv(args.B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, meta)
             with torch.no_grad():
                 _, kv = nsa(x_ctx, kv, prefill=True)
@@ -106,12 +133,16 @@ def benchmark_decode_step():
                         torch.cuda.synchronize()
                     times.append(time.perf_counter() - t0)
                     kv_state = kv_new
-                return float(np.mean(times[args.warmup:]) * 1000), kv_state
+                return float(np.mean(times[args.warmup :]) * 1000), kv_state
 
             # total
             model_total = nsa
             ms_total, kv_after_total = run_decode(model_total, kv)
-            reads_after = kv_after_total.reads_act_total[-1].item() if kv_after_total.reads_act_total.numel() else reads_before
+            reads_after = (
+                kv_after_total.reads_act_total[-1].item()
+                if kv_after_total.reads_act_total.numel()
+                else reads_before
+            )
             reads_actual_total = int(reads_after)
             reads_actual_decode = int(max(0, reads_after - reads_before))
 
@@ -128,49 +159,104 @@ def benchmark_decode_step():
                         else:
                             os.environ["NSA_FORCE_BRANCH"] = prev
                     return t
+
                 ms_cmp = timed_force("cmp")
                 ms_sel = timed_force("sel")
                 ms_win = timed_force("win")
             else:
                 # Bias forcing (legacy)
-                model_cmp = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+                model_cmp = NSAAttention(
+                    args.dim,
+                    args.heads,
+                    args.groups,
+                    args.dk,
+                    args.dv,
+                    args.l,
+                    args.d,
+                    args.l_sel,
+                    args.n_sel,
+                    args.w,
+                ).to(device)
                 model_cmp.load_state_dict(nsa.state_dict(), strict=False)
                 _force_branch(model_cmp, "cmp")
                 ms_cmp, _ = run_decode(model_cmp, kv)
 
-                model_sel = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+                model_sel = NSAAttention(
+                    args.dim,
+                    args.heads,
+                    args.groups,
+                    args.dk,
+                    args.dv,
+                    args.l,
+                    args.d,
+                    args.l_sel,
+                    args.n_sel,
+                    args.w,
+                ).to(device)
                 model_sel.load_state_dict(nsa.state_dict(), strict=False)
                 _force_branch(model_sel, "sel")
                 ms_sel, _ = run_decode(model_sel, kv)
 
-                model_win = NSAAttention(args.dim, args.heads, args.groups, args.dk, args.dv, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+                model_win = NSAAttention(
+                    args.dim,
+                    args.heads,
+                    args.groups,
+                    args.dk,
+                    args.dv,
+                    args.l,
+                    args.d,
+                    args.l_sel,
+                    args.n_sel,
+                    args.w,
+                ).to(device)
                 model_win.load_state_dict(nsa.state_dict(), strict=False)
                 _force_branch(model_win, "win")
                 ms_win, _ = run_decode(model_win, kv)
 
             S_current = S_ctx + args.iters
-            expected_total = compute_expected_reads(S_current, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w)
-            expected_before = compute_expected_reads(S_ctx, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w)
+            expected_total = compute_expected_reads(
+                S_current, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w
+            )
+            expected_before = compute_expected_reads(
+                S_ctx, nsa.l, nsa.d, nsa.n_sel, nsa.l_sel, nsa.w
+            )
             expected_decode = max(0, expected_total - expected_before)
 
-            print(f"{S_ctx:<10} {ms_total:<12.2f} {ms_cmp:<10.2f} {ms_sel:<10.2f} {ms_win:<10.2f} {reads_actual_decode}/{expected_decode:<7} {reads_actual_total}/{expected_total}")
+            print(
+                f"{S_ctx:<10} {ms_total:<12.2f} {ms_cmp:<10.2f} {ms_sel:<10.2f} {ms_win:<10.2f} {reads_actual_decode}/{expected_decode:<7} {reads_actual_total}/{expected_total}"
+            )
             if writer:
                 # Write legacy columns plus decode-only read counts for accurate analysis
-                writer.writerow([
-                    S_ctx,
-                    f"{ms_total:.3f}", f"{ms_cmp:.3f}", f"{ms_sel:.3f}", f"{ms_win:.3f}",
-                    int(reads_actual_total), int(expected_total),
-                    int(reads_actual_decode), int(expected_decode),
-                ])
+                writer.writerow(
+                    [
+                        S_ctx,
+                        f"{ms_total:.3f}",
+                        f"{ms_cmp:.3f}",
+                        f"{ms_sel:.3f}",
+                        f"{ms_win:.3f}",
+                        int(reads_actual_total),
+                        int(expected_total),
+                        int(reads_actual_decode),
+                        int(expected_decode),
+                    ]
+                )
 
     if args.csv:
         with open(args.csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "S", "ms_total", "ms_cmp", "ms_sel", "ms_win",
-                "reads_actual", "reads_expected",
-                "reads_actual_decode", "reads_expected_decode",
-            ])
+            writer.writerow(
+                [
+                    "S",
+                    "ms_total",
+                    "ms_cmp",
+                    "ms_sel",
+                    "ms_win",
+                    "reads_actual",
+                    "reads_expected",
+                    "reads_actual_decode",
+                    "reads_expected_decode",
+                ]
+            )
             run_all(writer)
     else:
         run_all(None)

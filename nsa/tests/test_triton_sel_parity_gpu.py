@@ -1,12 +1,14 @@
 import os
+
 import pytest
 import torch
-
 
 RUN_TRITON_SEL = os.getenv("NSA_TEST_TRITON_SEL", "0").lower() in ("1", "true", "yes")
 
 
-@pytest.mark.skipif(not RUN_TRITON_SEL, reason="Triton selection tests are opt-in; set NSA_TEST_TRITON_SEL=1")
+@pytest.mark.skipif(
+    not RUN_TRITON_SEL, reason="Triton selection tests are opt-in; set NSA_TEST_TRITON_SEL=1"
+)
 def test_triton_wrapper_parity_multirange_small_gpu():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for Triton")
@@ -34,11 +36,10 @@ def test_triton_wrapper_parity_multirange_small_gpu():
         ranges[b, 0, 0, 2, 0] = 120
         ranges[b, 0, 0, 2, 1] = 120 + 40
 
-    from nsa.kernels.triton_sel_kernel import selection_attention_triton
     from nsa.core.attention_kernels import grouped_selection_attention_packed
+    from nsa.kernels.triton_sel_kernel import selection_attention_triton
+
     O_ref = grouped_selection_attention_packed(Q, K, V, ranges).float()
     O_tri = selection_attention_triton(Q, K, V, ranges).float()
     mae = (O_tri - O_ref).abs().mean().item()
     assert mae < 1e-3
-
-

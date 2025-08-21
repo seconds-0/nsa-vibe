@@ -1,4 +1,3 @@
-import math
 
 
 def num_cmp(S: int, l: int, d: int) -> int:
@@ -19,5 +18,3 @@ def test_decode_reads_formula_early_and_normal():
             assert num_cmp(S, l, d) == 0
         if S < w:
             assert expected == num_cmp(S, l, d) + n * l_sel + S
-
-

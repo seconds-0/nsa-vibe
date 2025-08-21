@@ -1,7 +1,7 @@
 import torch
 
 from nsa.core.block_index import build_block_meta
-from nsa.core.selection_scorer import compute_pcmp, map_pcmp_to_pslc, group_reduce_pslc
+from nsa.core.selection_scorer import group_reduce_pslc, map_pcmp_to_pslc
 
 
 def test_group_reduce_identical_across_heads():
@@ -20,5 +20,3 @@ def test_group_reduce_identical_across_heads():
     # sanity: sum of slc per group equals h times single head mapping (up to float error)
     single = map_pcmp_to_pslc(p_base, meta).squeeze(2)
     assert torch.allclose(p_grp, single * h, atol=1e-5)
-
-

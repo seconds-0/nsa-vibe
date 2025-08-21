@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -38,7 +37,9 @@ class NSA_KV:
             self.K_win = self.K_win[:, :, -w:, :]
             self.V_win = self.V_win[:, :, -w:, :]
 
-    def update_compressed(self, K_raw_cmp: torch.Tensor, V_raw_cmp: torch.Tensor, l: int, d: int) -> None:
+    def update_compressed(
+        self, K_raw_cmp: torch.Tensor, V_raw_cmp: torch.Tensor, l: int, d: int
+    ) -> None:
         # M0 prefill path: rebuild fully using avg-pool ϕ handled upstream
         self.K_cmp = K_raw_cmp
         self.V_cmp = V_raw_cmp
@@ -53,12 +54,12 @@ class NSA_KV:
 
     def append_reads_actual(self, total: int, sel: int, cmp: int, win: int) -> None:
         dev = self.K_sel.device
+
         def cat_or_set(t: torch.Tensor, val: int) -> torch.Tensor:
             v = torch.tensor([val], dtype=torch.int64, device=dev)
             return torch.cat([t, v], dim=0) if t.numel() else v
+
         self.reads_act_total = cat_or_set(self.reads_act_total, total)
         self.reads_act_sel = cat_or_set(self.reads_act_sel, sel)
         self.reads_act_cmp = cat_or_set(self.reads_act_cmp, cmp)
         self.reads_act_win = cat_or_set(self.reads_act_win, win)
-
-

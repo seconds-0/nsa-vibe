@@ -1,6 +1,7 @@
 import os
-import torch
 from typing import Optional
+
+import torch
 
 
 def env_true(name: str, default: bool = False) -> bool:
@@ -32,6 +33,7 @@ def is_sm89(device: Optional[torch.device] = None) -> bool:
 def torch_triton_version_pairing_ok() -> bool:
     try:
         import triton  # noqa: F401
+
         tv = triton.__version__
     except ImportError:
         tv = "<none>"
@@ -67,6 +69,7 @@ def execution_routing_summary() -> dict:
     }
     try:
         import triton
+
         info["triton"] = triton.__version__
     except Exception:
         info["triton"] = "<none>"
