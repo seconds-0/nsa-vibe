@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-import os
 import json
-import sys
+import os
+
 import torch
 
-from nsa.core.flags import execution_routing_summary
-from nsa.model.llama_block_nsa import LlamaBlockNSA
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.flags import execution_routing_summary
+from nsa.model.llama_block_nsa import LlamaBlockNSA
 
 
 def make_empty_kv(B: int, G: int, d_k: int, d_v: int, meta) -> NSA_KV:
@@ -47,8 +47,18 @@ def main():
     n_heads, n_kv_groups, d_k, d_v = 4, 2, 16, 16
     l, d, l_sel, n_sel, w = 8, 4, 16, 4, 8
 
-    block = LlamaBlockNSA(dim=dim, n_heads=n_heads, n_kv_groups=n_kv_groups,
-                          d_k=d_k, d_v=d_v, l=l, d=d, l_sel=l_sel, n_sel=n_sel, w=w).to(device)
+    block = LlamaBlockNSA(
+        dim=dim,
+        n_heads=n_heads,
+        n_kv_groups=n_kv_groups,
+        d_k=d_k,
+        d_v=d_v,
+        l=l,
+        d=d,
+        l_sel=l_sel,
+        n_sel=n_sel,
+        w=w,
+    ).to(device)
     x = torch.randn(B, S, dim, device=device)
     # Prefill path
     out = block(x)
@@ -58,7 +68,7 @@ def main():
     meta = build_block_meta(seq_len=S + w, l=l, d=d, l_sel=l_sel, n_sel=n_sel, w=w)
     kv = make_empty_kv(B, n_kv_groups, d_k, d_v, meta)
     with torch.no_grad():
-        from nsa.core.nsa_attention import NSAAttention
+
         attn = block.attn
         _, kv = attn(x, kv, prefill=True)
         for fb in ("cmp", "sel", "win"):
@@ -80,4 +90,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

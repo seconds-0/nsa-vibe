@@ -66,3 +66,23 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json.prime_pod_id
+
+# Repo artifacts and generated outputs (keep human-readable reports tracked)
+artifacts/
+!artifacts/tracked/**
+artifacts-*/
+decode_*.csv
+decode_*.txt
+dense_final*.csv
+varlen_results.csv
+fa2_*.txt
+triton_*.txt
+sanity.out
+
+# Local bundles
+*.tar.gz
+
+# Node tooling (kept out of repo)
+tools/**/node_modules/
+tools/**/.pnpm-store/
+tools/**/dist/

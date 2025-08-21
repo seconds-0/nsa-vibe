@@ -1,4 +1,5 @@
 import os
+
 import torch
 
 
@@ -17,8 +18,8 @@ def test_autograd_wrapper_fallback_grads_cpu():
         ],
         dtype=torch.int64,
     )
-    from nsa.kernels.triton_sel_kernel import selection_attention_triton
     from nsa.core.attention_kernels import grouped_selection_attention_packed
+    from nsa.kernels.triton_sel_kernel import selection_attention_triton
 
     out_tri = selection_attention_triton(Q, K, V, ranges)
     loss_tri = out_tri.square().sum()
@@ -37,5 +38,3 @@ def test_autograd_wrapper_fallback_grads_cpu():
     assert torch.allclose(gQ_tri, gQ_ref, atol=1e-5, rtol=1e-5)
     assert torch.allclose(gK_tri, gK_ref, atol=1e-5, rtol=1e-5)
     assert torch.allclose(gV_tri, gV_ref, atol=1e-5, rtol=1e-5)
-
-

@@ -1,4 +1,5 @@
-from typing import Tuple, Optional
+
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -30,11 +31,9 @@ def avg_pool_phi_rope_kv(
     # Unfold over time with stride d and kernel l (causal pooling over past)
     Kf = K_rope.reshape(B * G, S, Dk).transpose(1, 2).unsqueeze(3)  # [B*G, Dk, S, 1]
     Vf = V_rope.reshape(B * G, S, -1).transpose(1, 2).unsqueeze(3)
-    Kp = F.avg_pool2d(Kf[:, :, : S, :], kernel_size=(l, 1), stride=(d, 1))  # [B*G, Dk, S_cmp, 1]
-    Vp = F.avg_pool2d(Vf[:, :, : S, :], kernel_size=(l, 1), stride=(d, 1))
+    Kp = F.avg_pool2d(Kf[:, :, :S, :], kernel_size=(l, 1), stride=(d, 1))  # [B*G, Dk, S_cmp, 1]
+    Vp = F.avg_pool2d(Vf[:, :, :S, :], kernel_size=(l, 1), stride=(d, 1))
     S_cmp = Kp.shape[2]
     K_cmp = Kp.squeeze(3).transpose(1, 2).reshape(B, G, S_cmp, Dk)
     V_cmp = Vp.squeeze(3).transpose(1, 2).reshape(B, G, S_cmp, V_rope.shape[-1])
     return K_cmp, V_cmp
-
-

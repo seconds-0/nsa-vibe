@@ -1,6 +1,16 @@
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E","F","I","UP"]
+ignore = [
+    "E741",  # Ambiguous variable name (allows mathematical 'l' parameter from NSA paper)
+    "E501",  # Line too long (allows longer print statements in benchmarks)
+    "UP006", # Use `tuple` instead of `Tuple` (maintain 3.9 compatibility)
+    "UP035", # `typing.Dict` is deprecated (maintain 3.9 compatibility)
+    "UP045", # Use `X | None` instead of `Optional[X]` (maintain 3.9 compatibility)
+    "F401",  # Unused import (may be needed for compatibility)
+]
 
 [tool.mypy]
 python_version = "3.10"

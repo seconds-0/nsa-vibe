@@ -1,9 +1,10 @@
 import os
+
 import pytest
 import torch
 
-from nsa.kernels.cuda_sel_kernel import selection_attention_cuda
 from nsa.core.attention_kernels import grouped_selection_attention_packed
+from nsa.kernels.cuda_sel_kernel import selection_attention_cuda
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -26,4 +27,3 @@ def test_sel_cuda_gpu_small_shapes():
     O_ref = grouped_selection_attention_packed(Q, K, V, ranges)
     mae = (O_cuda - O_ref).abs().mean().item()
     assert mae < 1e-3
-

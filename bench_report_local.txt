@@ -1,0 +1,37 @@
+NSA Bench Summary
+repo:    nsa-vibe
+branch:  feat/decode-bench-guards
+commit:  224091b5 — Oneshot accuracy: include decode-only read counts in bench CSV; increase verbosity for Triton tests to capture skip reasons
+python:  3.9.6
+torch:   2.3.1
+cuda:    False
+
+tests:
+  small_s_equiv:        PASS
+  group_consistency:    PASS
+  decode_counters:      PASS
+  causal_masks:         PASS
+  needle_cpu_4k: PASS (0.96s)
+  needle_cuda_64k: SKIP (no CUDA)
+
+decode_bench:
+
+Context    Total(ms)    cmp(ms)    sel(ms)    win(ms)    Reads(dec)     Reads(tot)    
+------------------------------------------------------------------------------------------------
+8          0.85         0.76       0.75       1.15       36/5       36/46
+16         0.79         0.77       0.95       0.76       36/1       36/52
+
+=== /tmp/nsa_bench.RitswB.csv ===
+     S  ms_total       cmp       sel       win         reads       exp
+     8     0.853     0.759     0.753     1.147            36        46
+    16     0.793     0.765     0.954     0.755            36        52
+avg ms_total: 0.823
+csv_head:
+S,ms_total,ms_cmp,ms_sel,ms_win,reads_actual,reads_expected,reads_actual_decode,reads_expected_decode
+8,0.853,0.759,0.753,1.147,36,46,36,5
+
+artifacts:
+     S     total    cmp%    sel%    win%      reads(dec)      reads(tot)
+   512      5.82    89.7    87.3    88.1          1091/4       1091/1571
+  1024      6.35    98.3    92.6    85.3          1091/4       1091/1603
+  2048      5.78    99.1    98.1   100.9          1091/4       1091/1667

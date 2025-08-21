@@ -16,5 +16,3 @@ def test_causal_sdpa_ref():
         v_t = v[:, :, : t + 1]
         attn_t = F.scaled_dot_product_attention(q_t, k_t, v_t, is_causal=False)
         assert attn_t.shape == out[:, :, t : t + 1].shape
-
-

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-import os
-import math
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -13,12 +12,34 @@ from nsa.model.llama_block_nsa import LlamaBlockNSA
 
 
 class TinyLM(nn.Module):
-    def __init__(self, vocab: int, dim: int, n_heads: int, n_kv_groups: int, d_k: int, d_v: int,
-                 l: int, d: int, l_sel: int, n_sel: int, w: int):
+    def __init__(
+        self,
+        vocab: int,
+        dim: int,
+        n_heads: int,
+        n_kv_groups: int,
+        d_k: int,
+        d_v: int,
+        l: int,
+        d: int,
+        l_sel: int,
+        n_sel: int,
+        w: int,
+    ):
         super().__init__()
         self.embed = nn.Embedding(vocab, dim)
-        self.block = LlamaBlockNSA(dim=dim, n_heads=n_heads, n_kv_groups=n_kv_groups,
-                                   d_k=d_k, d_v=d_v, l=l, d=d, l_sel=l_sel, n_sel=n_sel, w=w)
+        self.block = LlamaBlockNSA(
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_groups=n_kv_groups,
+            d_k=d_k,
+            d_v=d_v,
+            l=l,
+            d=d,
+            l_sel=l_sel,
+            n_sel=n_sel,
+            w=w,
+        )
         self.lm_head = nn.Linear(dim, vocab, bias=False)
 
     def forward(self, x_tok: torch.Tensor) -> torch.Tensor:
@@ -29,7 +50,9 @@ class TinyLM(nn.Module):
 
 def set_seed(seed: int):
     import random
+
     import numpy as np
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -43,7 +66,11 @@ def main():
 
     set_seed(int(cfg.train.seed))
     device = (
-        torch.device("cuda") if (cfg.runtime.device == "cuda" or (cfg.runtime.device == "auto" and torch.cuda.is_available()))
+        torch.device("cuda")
+        if (
+            cfg.runtime.device == "cuda"
+            or (cfg.runtime.device == "auto" and torch.cuda.is_available())
+        )
         else torch.device("cpu")
     )
     dtype = torch.float32
@@ -115,4 +142,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

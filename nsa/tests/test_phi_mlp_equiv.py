@@ -1,12 +1,23 @@
 import torch
-import torch.nn as nn
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
-def _empty_kv(B: int, G: int, d_k: int, d_v: int, S: int, l: int, d: int, l_sel: int, n_sel: int, w: int, device):
+def _empty_kv(
+    B: int,
+    G: int,
+    d_k: int,
+    d_v: int,
+    S: int,
+    l: int,
+    d: int,
+    l_sel: int,
+    n_sel: int,
+    w: int,
+    device,
+):
     meta = build_block_meta(S, l, d, l_sel, n_sel=n_sel, w=w)
     return NSA_KV(
         K_sel=torch.zeros((B, G, 0, d_k), device=device),
@@ -33,7 +44,7 @@ def test_phi_mlp_matches_avg_prefill():
     device = torch.device("cpu")
     B, S = 2, 16
     dim, n_heads, G = 256, 8, 4
-    h = n_heads // G
+    n_heads // G
     d_k, d_v = 64, 64
     l, d, l_sel, n_sel, w = 4, 2, 8, 4, 16
 
@@ -60,7 +71,7 @@ def test_phi_mlp_matches_avg_decode():
     device = torch.device("cpu")
     B, S = 1, 8
     dim, n_heads, G = 128, 4, 2
-    h = n_heads // G
+    n_heads // G
     d_k, d_v = 32, 32
     l, d, l_sel, n_sel, w = 4, 2, 8, 4, 8
     nsa_avg = NSAAttention(dim, n_heads, G, d_k, d_v, l, d, l_sel, n_sel, w, phi="avg").to(device)
@@ -79,4 +90,3 @@ def test_phi_mlp_matches_avg_decode():
         y_mlp, kv_mlp = nsa_mlp(x_t, kv_mlp, prefill=False)
         mae = (y_avg - y_mlp).abs().mean().item()
         assert mae < 1e-5
-

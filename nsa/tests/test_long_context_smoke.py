@@ -1,7 +1,8 @@
 import torch
-from nsa.core.nsa_attention import NSAAttention
+
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
 def _kv(B, G, d_k, d_v, S_ctx, w, device):
@@ -30,7 +31,18 @@ def test_long_context_smoke_scaled():
     device = torch.device("cpu")
     B, dim, heads, groups, d_k, d_v, w = 1, 64, 4, 2, 16, 16, 128
     S_ctx = 2048
-    nsa = NSAAttention(dim=dim, n_heads=heads, n_kv_groups=groups, d_k=d_k, d_v=d_v, l=32, d=16, l_sel=64, n_sel=8, w=w).to(device)
+    nsa = NSAAttention(
+        dim=dim,
+        n_heads=heads,
+        n_kv_groups=groups,
+        d_k=d_k,
+        d_v=d_v,
+        l=32,
+        d=16,
+        l_sel=64,
+        n_sel=8,
+        w=w,
+    ).to(device)
     kv = _kv(B, groups, d_k, d_v, S_ctx + w, w, device)
     x_ctx = torch.randn(B, S_ctx, dim, device=device)
     with torch.no_grad():
@@ -44,4 +56,3 @@ def test_long_context_smoke_scaled():
         now = int(kv.reads_act_total[-1].item())
         assert now >= prev
         prev = now
-

@@ -1,18 +1,15 @@
 import os
+
 import pytest
 import torch
 
 from nsa.core.attention_kernels import (
-    sliding_window_attention_masked,
-    batched_causal_attention_compressed_masked,
-    sliding_window_attention_fa2,
     compressed_attention_fa2,
-    sliding_window_attention_fa2_decode,
     compressed_attention_fa2_decode,
+    sliding_window_attention_fa2,
+    sliding_window_attention_fa2_decode,
 )
-from nsa.kernels.flash_wrappers import is_flash_available, fa2_supported
-from nsa.kernels.flash_wrappers import attention_bgh
-
+from nsa.kernels.flash_wrappers import attention_bgh, fa2_supported, is_flash_available
 
 RUN_FA2 = os.getenv("NSA_TEST_FA2", "0").lower() in ("1", "true", "yes")
 
@@ -102,7 +99,11 @@ def test_decode_paths_dense_bucket():
     V_cmp = torch.stack([V_raw[:, :, i * d : i * d + l].mean(dim=2) for i in range(S_cmp)], dim=2)
     for t in range(1, S + 1):
         L = 0 if t < l else min(((t - l) // d) + 1, S_cmp)
-        out_ref = attention_bgh(Q[:, t - 1], K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True) if L > 0 else torch.zeros(B, G, h, Dv)
+        out_ref = (
+            attention_bgh(Q[:, t - 1], K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
+            if L > 0
+            else torch.zeros(B, G, h, Dv)
+        )
         out = compressed_attention_fa2_decode(Q[:, t - 1], K_cmp, V_cmp, L)
         assert (out - out_ref).abs().max().item() < 1e-6
 
@@ -113,5 +114,3 @@ def test_head_dim_constraint_xfail():
     if device.type == "cpu":
         pytest.skip("CPU: no FA-2 support")
     assert not fa2_supported(device, torch.float16, head_dim=7)
-
-

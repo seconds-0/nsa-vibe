@@ -92,7 +92,11 @@ python scripts/summarize_bench.py "$CSV"
 echo "csv_head:"
 head -n 2 "$CSV"
 
-if [ -f artifacts-accuracy-224091b/decode_summary.txt ]; then
+if [ -f artifacts/tracked/artifacts-accuracy-224091b/decode_summary.txt ]; then
+  echo
+  echo "artifacts:"
+  sed -n '1,4p' artifacts/tracked/artifacts-accuracy-224091b/decode_summary.txt || true
+elif [ -f artifacts-accuracy-224091b/decode_summary.txt ]; then
   echo
   echo "artifacts:"
   sed -n '1,4p' artifacts-accuracy-224091b/decode_summary.txt || true

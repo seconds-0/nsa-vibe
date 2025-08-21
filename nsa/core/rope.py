@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 
-def build_inv_freq(dim: int, base: float = 10000.0, device: Optional[torch.device] = None) -> torch.Tensor:
+def build_inv_freq(
+    dim: int, base: float = 10000.0, device: torch.device | None = None
+) -> torch.Tensor:
     assert dim % 2 == 0, "RoPE requires even dimension"
     half = dim // 2
     idx = torch.arange(half, device=device, dtype=torch.float32)
@@ -37,5 +37,3 @@ def apply_rope(x: torch.Tensor, pos: torch.Tensor, base: float = 10000.0) -> tor
     y1 = x0 * sin + x1 * cos
     y = torch.stack((y0, y1), dim=-1).view_as(x)
     return y
-
-

@@ -1,20 +1,22 @@
 import os
 import time
+
 import torch
 import torch.nn.functional as F
+
 from nsa.core.debug import log
+from nsa.core.packing import (
+    build_cu_seqlens_for_buckets,
+    build_length_buckets,
+    compute_compressed_lengths,
+    compute_sliding_lengths,
+)
 from nsa.kernels.flash_wrappers import (
     attention_bgh,
-    fa2_supported,
-    is_flash_varlen_available,
     attention_fa2_dense_batch,
     attention_fa2_varlen,
-)
-from nsa.core.packing import (
-    compute_sliding_lengths,
-    compute_compressed_lengths,
-    build_length_buckets,
-    build_cu_seqlens_for_buckets,
+    fa2_supported,
+    is_flash_varlen_available,
 )
 
 # Simple grow-on-demand workspaces for varlen packing to avoid frequent allocations
@@ -80,7 +82,7 @@ def batched_causal_attention_compressed(
     num_cmp = torch.where(tpos + 1 < l, 0, ((tpos + 1 - l) // d) + 1).clamp(max=S_cmp)
     col = torch.arange(S_cmp, device=device).view(1, S_cmp)
     # disallowed mask: True means masked
-    disallowed = col >= num_cmp.view(S, 1)  # [S,S_cmp]
+    col >= num_cmp.view(S, 1)  # [S,S_cmp]
     # Enforce token-level causality as well: no compressed tokens emitted from future blocks beyond t
     # When l=d=1, S_cmp == S and this reduces to standard causal
 
@@ -123,14 +125,13 @@ def sliding_window_attention(
 
 
 def grouped_selection_attention(
-    Q: torch.Tensor,      # [B,S,G,h,Dk]
-    K: torch.Tensor,      # [B,G,S_kv,Dk]
-    V: torch.Tensor,      # [B,G,S_kv,Dv]
-    ranges: torch.Tensor, # [B,S,G,n,2]
-) -> torch.Tensor:       # [B,S,G,h,Dv]
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K: torch.Tensor,  # [B,G,S_kv,Dk]
+    V: torch.Tensor,  # [B,G,S_kv,Dv]
+    ranges: torch.Tensor,  # [B,S,G,n,2]
+) -> torch.Tensor:  # [B,S,G,h,Dv]
     B, S, G, h, Dk = Q.shape
-    S_kv = K.shape[2]
-    device = Q.device
+    K.shape[2]
 
     # Path 1: exact sequential-equivalence gather per (b,t,g)
     out = torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=V.device)
@@ -148,12 +149,18 @@ def grouped_selection_attention(
                     idx = torch.cat(idxs)
                     k = K[b, g, idx]  # [L,Dk]
                     v = V[b, g, idx]  # [L,Dv]
-                    q = Q[b, t, g]    # [h,Dk]
+                    q = Q[b, t, g]  # [h,Dk]
                     # Expand per-head kv and add query-length dim for SDPA
-                    q_btgh = q.unsqueeze(0).unsqueeze(2)                 # [1,h,1,Dk]
-                    k_btgh = k.unsqueeze(0).unsqueeze(0).expand(1, q.shape[0], k.shape[0], k.shape[1])  # [1,h,L,Dk]
-                    v_btgh = v.unsqueeze(0).unsqueeze(0).expand(1, q.shape[0], v.shape[0], v.shape[1])  # [1,h,L,Dv]
-                    attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)  # [1,h,1,Dv]
+                    q_btgh = q.unsqueeze(0).unsqueeze(2)  # [1,h,1,Dk]
+                    k_btgh = (
+                        k.unsqueeze(0).unsqueeze(0).expand(1, q.shape[0], k.shape[0], k.shape[1])
+                    )  # [1,h,L,Dk]
+                    v_btgh = (
+                        v.unsqueeze(0).unsqueeze(0).expand(1, q.shape[0], v.shape[0], v.shape[1])
+                    )  # [1,h,L,Dv]
+                    attn = F.scaled_dot_product_attention(
+                        q_btgh, k_btgh, v_btgh, is_causal=True
+                    )  # [1,h,1,Dv]
                     out[b, t, g] = attn.squeeze(0).squeeze(1)  # [h,Dv]
                     log("sel.step", b=int(b), t=int(t), g=int(g), L=int(k.shape[0]))
                 else:
@@ -191,7 +198,9 @@ def sliding_window_attention_masked(
     A[torch.arange(S, device=device), start] = True
     zeros = torch.zeros((), dtype=Qrf.dtype, device=device)
     neg_inf = torch.full((), float("-inf"), dtype=Qrf.dtype, device=device)
-    Mf = torch.where(A.unsqueeze(0).expand(BGH, S, S).reshape(BGH * S, S), zeros, neg_inf).unsqueeze(1)
+    Mf = torch.where(
+        A.unsqueeze(0).expand(BGH, S, S).reshape(BGH * S, S), zeros, neg_inf
+    ).unsqueeze(1)
     Of = F.scaled_dot_product_attention(Qrf, Krf, Vrf, attn_mask=Mf)
     Of = Of.reshape(BGH, S, V.shape[-1]).reshape(B, G, h, S, V.shape[-1]).permute(0, 3, 1, 2, 4)
     Of = torch.nan_to_num(Of, nan=0.0)
@@ -215,7 +224,9 @@ def batched_causal_attention_compressed_masked(
     BGH = B * G * h
     Qfg = Q.permute(0, 2, 3, 1, 4).reshape(BGH, S, Dk)  # [BGH,S,Dk]
     Kfg = K_cmp.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(BGH, S_cmp, Dk)  # [BGH,S_cmp,Dk]
-    Vfg = V_cmp.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(BGH, S_cmp, V_cmp.shape[-1])  # [BGH,S_cmp,Dv]
+    Vfg = (
+        V_cmp.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(BGH, S_cmp, V_cmp.shape[-1])
+    )  # [BGH,S_cmp,Dv]
     Qrf = Qfg.reshape(BGH * S, 1, Dk)  # [BGH*S,1,Dk]
     Krf = Kfg.repeat_interleave(S, dim=0)  # [BGH*S,S_cmp,Dk]
     Vrf = Vfg.repeat_interleave(S, dim=0)  # [BGH*S,S_cmp,Dv]
@@ -226,25 +237,32 @@ def batched_causal_attention_compressed_masked(
     A[num_cmp > 0, 0] = True
     zeros = torch.zeros((), dtype=Qrf.dtype, device=device)
     neg_inf = torch.full((), float("-inf"), dtype=Qrf.dtype, device=device)
-    Mf = torch.where(A.unsqueeze(0).expand(BGH, S, S_cmp).reshape(BGH * S, S_cmp), zeros, neg_inf).unsqueeze(1)
+    Mf = torch.where(
+        A.unsqueeze(0).expand(BGH, S, S_cmp).reshape(BGH * S, S_cmp), zeros, neg_inf
+    ).unsqueeze(1)
     Of = F.scaled_dot_product_attention(Qrf, Krf, Vrf, attn_mask=Mf)
-    Of = Of.reshape(BGH, S, V_cmp.shape[-1]).reshape(B, G, h, S, V_cmp.shape[-1]).permute(0, 3, 1, 2, 4)
+    Of = (
+        Of.reshape(BGH, S, V_cmp.shape[-1])
+        .reshape(B, G, h, S, V_cmp.shape[-1])
+        .permute(0, 3, 1, 2, 4)
+    )
     Of = torch.nan_to_num(Of, nan=0.0)
     return Of
 
+
 def grouped_selection_attention_packed(
-    Q: torch.Tensor,      # [B,S,G,h,Dk]
-    K: torch.Tensor,      # [B,G,S_kv,Dk]
-    V: torch.Tensor,      # [B,G,S_kv,Dv]
-    ranges: torch.Tensor, # [B,S,G,n,2]
-) -> torch.Tensor:       # [B,S,G,h,Dv]
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K: torch.Tensor,  # [B,G,S_kv,Dk]
+    V: torch.Tensor,  # [B,G,S_kv,Dv]
+    ranges: torch.Tensor,  # [B,S,G,n,2]
+) -> torch.Tensor:  # [B,S,G,h,Dv]
     """
     Bucketed varlen packing by row length L with parity to gather path.
     For each (b,t,g), build its flat index list from ranges, bucket rows
     by identical L, and run one SDPA per bucket.
     """
     B, S, G, h, Dk = Q.shape
-    S_kv = K.shape[2]
+    K.shape[2]
     device = Q.device
     # Initialize output
     out = torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=device)
@@ -281,7 +299,9 @@ def grouped_selection_attention_packed(
         # Workspace-backed Q, K, V batches to reduce allocations
         ws_key = (str(device), Q.dtype, K.dtype, V.dtype, h, Dk, V.shape[-1])
         ws = _SEL_PACK_WS.get(ws_key)
-        need_new = ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
+        need_new = (
+            ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
+        )
         if need_new:
             Qb = torch.empty((N, h, Dk), dtype=Q.dtype, device=device)
             Kb = torch.empty((N, L, Dk), dtype=K.dtype, device=device)
@@ -294,13 +314,13 @@ def grouped_selection_attention_packed(
         map_rows = []
         for j, ridx in enumerate(bucket_idx):
             b, t, g, idx = rows[ridx]
-            Qb[j] = Q[b, t, g]                     # [h,Dk]
-            Kb[j] = K[b, g, idx]                   # [L,Dk]
-            Vb[j] = V[b, g, idx]                   # [L,Dv]
+            Qb[j] = Q[b, t, g]  # [h,Dk]
+            Kb[j] = K[b, g, idx]  # [L,Dk]
+            Vb[j] = V[b, g, idx]  # [L,Dv]
             map_rows.append((b, t, g))
         # SDPA per bucket: expand per-head
-        q_btgh = Qb.unsqueeze(1)                   # [N,1,h,Dk]
-        q_btgh = q_btgh.permute(0, 2, 1, 3)       # [N,h,1,Dk]
+        q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
+        q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
         k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
         v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
         attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)  # [N,h,1,Dv]
@@ -312,11 +332,11 @@ def grouped_selection_attention_packed(
 
 
 def grouped_selection_attention_masked(
-    Q: torch.Tensor,      # [B,S,G,h,Dk]
-    K: torch.Tensor,      # [B,G,S_kv,Dk]
-    V: torch.Tensor,      # [B,G,S_kv,Dv]
-    ranges: torch.Tensor, # [B,S,G,n,2]
-) -> torch.Tensor:       # [B,S,G,h,Dv]
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K: torch.Tensor,  # [B,G,S_kv,Dk]
+    V: torch.Tensor,  # [B,G,S_kv,Dv]
+    ranges: torch.Tensor,  # [B,S,G,n,2]
+) -> torch.Tensor:  # [B,S,G,h,Dv]
     """
     Fully batched selection attention using an additive -inf mask.
     Constructs an allowed mask from ranges for each (B,S,G) and runs a single
@@ -344,15 +364,23 @@ def grouped_selection_attention_masked(
     Vf = V.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(B, G * h, S_kv, V.shape[-1])
     zeros = torch.zeros((B, G * h, S, S_kv), dtype=Qf.dtype, device=device)
     neg_inf = torch.full((B, G * h, S, S_kv), float("-inf"), dtype=Qf.dtype, device=device)
-    Mf = torch.where(allowed.reshape(B, S, G, S_kv).transpose(1, 2).reshape(B, G, S, S_kv)
-                     .unsqueeze(2).expand(-1, -1, h, -1, -1)
-                     .reshape(B, G * h, S, S_kv), zeros, neg_inf)
+    Mf = torch.where(
+        allowed.reshape(B, S, G, S_kv)
+        .transpose(1, 2)
+        .reshape(B, G, S, S_kv)
+        .unsqueeze(2)
+        .expand(-1, -1, h, -1, -1)
+        .reshape(B, G * h, S, S_kv),
+        zeros,
+        neg_inf,
+    )
 
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     return Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
 
 
 # ===== FA-2 integration scaffolding (M1) =====
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name, "1" if default else "0").lower()
@@ -424,7 +452,7 @@ def sliding_window_attention_fa2(
             uniq, counts = torch.unique(lengths, return_counts=True)
             log("fa2.win.hist", uniq=uniq.tolist(), counts=counts.tolist())
         # Try a single varlen call across all rows
-        if ((is_flash_varlen_available() and not force_dense) or force_varlen):
+        if (is_flash_varlen_available() and not force_dense) or force_varlen:
             rows = []
             len_rows = []
             for t in range(S):
@@ -436,7 +464,9 @@ def sliding_window_attention_fa2(
             N = len(rows)
             if N > 0 and max_len >= 1:
                 total_k = int(sum(len_rows))
-                ws = _get_varlen_workspace(Q.device, Q.dtype, K.dtype, V.dtype, h, Dk, Dv, N, total_k)
+                ws = _get_varlen_workspace(
+                    Q.device, Q.dtype, K.dtype, V.dtype, h, Dk, Dv, N, total_k
+                )
                 q_pack = ws["q"][:N]
                 k_pack = ws["k"][:total_k]
                 v_pack = ws["v"][:total_k]
@@ -454,19 +484,23 @@ def sliding_window_attention_fa2(
                         end = t + 1
                         seg_k = K[b, g, start:end]  # [L,Dk]
                         seg_v = V[b, g, start:end]  # [L,Dv]
-                        k_pack[write_pos:write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
-                        v_pack[write_pos:write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
+                        k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
+                        v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
                         write_pos += L
                 if use_timing:
                     t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
-                    q_pack, k_pack, v_pack,
-                    cuq, cuk,
-                    max_seqlen_q=1, max_seqlen_k=max_len,
+                    q_pack,
+                    k_pack,
+                    v_pack,
+                    cuq,
+                    cuk,
+                    max_seqlen_q=1,
+                    max_seqlen_k=max_len,
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
-                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+                    return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.varlen_all", N=int(N), total_k=int(total_k), ms=dt)
@@ -510,13 +544,17 @@ def sliding_window_attention_fa2(
                 if use_timing:
                     t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
-                    q_pack, k_pack, v_pack,
-                    cuq, cuk,
-                    max_seqlen_q=1, max_seqlen_k=L,
+                    q_pack,
+                    k_pack,
+                    v_pack,
+                    cuq,
+                    cuk,
+                    max_seqlen_q=1,
+                    max_seqlen_k=L,
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
-                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
+                    return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.bucket", path="varlen", L=L, N=int(N), ms=dt)
@@ -527,7 +565,9 @@ def sliding_window_attention_fa2(
                 v_rows = Vb.unsqueeze(2).expand(N, L, h, Dv)
                 if use_timing:
                     t0 = time.perf_counter()
-                Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)  # [N,h,Dv]
+                Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(
+                    1
+                )  # [N,h,Dv]
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.bucket", path="dense", L=L, N=int(N), ms=dt)
@@ -597,7 +637,9 @@ def compressed_attention_fa2(
             N = len(rows)
             if N > 0:
                 total_k = int(sum(len_rows))
-                ws = _get_varlen_workspace(Q.device, Q.dtype, K_cmp.dtype, V_cmp.dtype, h, Dk, Dv, N, total_k)
+                ws = _get_varlen_workspace(
+                    Q.device, Q.dtype, K_cmp.dtype, V_cmp.dtype, h, Dk, Dv, N, total_k
+                )
                 q_pack = ws["q"][:N]
                 k_pack = ws["k"][:total_k]
                 v_pack = ws["v"][:total_k]
@@ -611,15 +653,19 @@ def compressed_attention_fa2(
                     q_pack[i] = Q[b, t, g]
                     seg_k = K_cmp[b, g, :L]
                     seg_v = V_cmp[b, g, :L]
-                    k_pack[write_pos:write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
-                    v_pack[write_pos:write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
+                    k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
+                    v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
                     write_pos += L
                 if use_timing:
                     t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
-                    q_pack, k_pack, v_pack,
-                    cuq, cuk,
-                    max_seqlen_q=1, max_seqlen_k=max_len,
+                    q_pack,
+                    k_pack,
+                    v_pack,
+                    cuq,
+                    cuk,
+                    max_seqlen_q=1,
+                    max_seqlen_k=max_len,
                     causal=True,
                 )  # [N,h,Dv]
                 if use_timing:
@@ -662,9 +708,13 @@ def compressed_attention_fa2(
                 if use_timing:
                     t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
-                    q_pack, k_pack, v_pack,
-                    cuq, cuk,
-                    max_seqlen_q=1, max_seqlen_k=L,
+                    q_pack,
+                    k_pack,
+                    v_pack,
+                    cuq,
+                    cuk,
+                    max_seqlen_q=1,
+                    max_seqlen_k=L,
                     causal=True,
                 )  # [N,h,Dv]
                 if use_timing:
@@ -690,7 +740,9 @@ def compressed_attention_fa2(
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
 
 
-def sliding_window_attention_fa2_decode(q_t: torch.Tensor, K_win: torch.Tensor, V_win: torch.Tensor, w: int) -> torch.Tensor:
+def sliding_window_attention_fa2_decode(
+    q_t: torch.Tensor, K_win: torch.Tensor, V_win: torch.Tensor, w: int
+) -> torch.Tensor:
     B, G, h, Dk = q_t.shape
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(q_t.device) and not _fa2_forced():
@@ -733,7 +785,9 @@ def sliding_window_attention_fa2_decode(q_t: torch.Tensor, K_win: torch.Tensor, 
         return attention_bgh(q_t, k, v, causal=True)
 
 
-def compressed_attention_fa2_decode(q_t: torch.Tensor, K_cmp: torch.Tensor, V_cmp: torch.Tensor, L: int) -> torch.Tensor:
+def compressed_attention_fa2_decode(
+    q_t: torch.Tensor, K_cmp: torch.Tensor, V_cmp: torch.Tensor, L: int
+) -> torch.Tensor:
     if L <= 0:
         B, G, h, _ = q_t.shape
         return torch.zeros((B, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)

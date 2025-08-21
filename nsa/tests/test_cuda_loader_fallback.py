@@ -1,6 +1,5 @@
-import os
 import importlib
-import types
+
 import torch
 
 
@@ -24,11 +23,11 @@ def test_selection_cuda_fallback_on_forward_error(monkeypatch):
 
     # Tiny CPU tensors
     B, S, G, h, Dk, Dv = 1, 2, 1, 2, 4, 4
-    S_kv, n = 8, 2
+    S_kv, _n = 8, 2
     Q = torch.randn(B, S, G, h, Dk)
     K = torch.randn(B, G, S_kv, Dk)
     V = torch.randn(B, G, S_kv, Dv)
-    ranges = torch.tensor([[[[[0, 3],[4, 6]]],[[[1, 4],[5, 7]]]]], dtype=torch.int32)
+    ranges = torch.tensor([[[[[0, 3], [4, 6]]], [[[1, 4], [5, 7]]]]], dtype=torch.int32)
 
     # Fallback reference
     ref_mod = importlib.import_module("nsa.core.attention_kernels")
@@ -37,4 +36,3 @@ def test_selection_cuda_fallback_on_forward_error(monkeypatch):
     # Under failure, wrapper should fall back and match ref path shape and dtype
     O = mod.selection_attention_cuda(Q, K, V, ranges)
     assert O.shape == O_ref.shape and O.dtype == O_ref.dtype
-

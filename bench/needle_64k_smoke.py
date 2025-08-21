@@ -10,8 +10,8 @@ Usage examples:
   PYTHONPATH=. python bench/needle_64k_smoke.py --S 65536 --G 4 --h 4 --D 64 --Dv 64
   CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python bench/needle_64k_smoke.py --device cuda --S 65536
 """
+
 import argparse
-import math
 import time
 
 import torch
@@ -62,11 +62,16 @@ def main() -> None:
     O_mean = O[:, 0].mean(dim=2)  # [B,G,Dv]
     cos = torch.nn.functional.cosine_similarity(O_mean.flatten(1), needle_v.flatten(1))
     mae = (O_mean - needle_v).abs().mean()
-    print({
-        "S": S, "pos": pos, "cos": float(cos.mean().item()), "mae": float(mae.item()), "time_ms": dt_ms,
-    })
+    print(
+        {
+            "S": S,
+            "pos": pos,
+            "cos": float(cos.mean().item()),
+            "mae": float(mae.item()),
+            "time_ms": dt_ms,
+        }
+    )
 
 
 if __name__ == "__main__":
     main()
-

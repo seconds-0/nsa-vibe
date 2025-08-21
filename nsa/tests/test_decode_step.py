@@ -1,10 +1,10 @@
 import torch
 import torch.nn.functional as F
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
 from nsa.core.compress_pool import avg_pool_phi_rope_kv
+from nsa.core.nsa_attention import NSAAttention
 
 
 def num_cmp(S: int, l: int, d: int) -> int:
@@ -18,7 +18,9 @@ def reads(S: int, l: int, d: int, n: int, l_sel: int, w: int) -> int:
 def test_decode_step_reads_small():
     torch.manual_seed(0)
     B, dim = 1, 64
-    nsa = NSAAttention(dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=8)
+    nsa = NSAAttention(
+        dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=8
+    )
     G, d_k, d_v = nsa.n_kv_groups, nsa.d_k, nsa.d_v
     device = torch.device("cpu")
     kv = NSA_KV(
@@ -60,7 +62,9 @@ def test_decode_group_consistency_and_causality_decode():
     B, dim = 1, 64
     # Multiple heads per group to exercise group-consistency
     n_heads, G, d_k, d_v = 4, 2, 16, 16
-    nsa = NSAAttention(dim=dim, n_heads=n_heads, n_kv_groups=G, d_k=d_k, d_v=d_v, l=4, d=2, l_sel=4, n_sel=4, w=6)
+    nsa = NSAAttention(
+        dim=dim, n_heads=n_heads, n_kv_groups=G, d_k=d_k, d_v=d_v, l=4, d=2, l_sel=4, n_sel=4, w=6
+    )
     device = torch.device("cpu")
     kv = NSA_KV(
         K_sel=torch.zeros((B, G, 0, d_k), device=device),
@@ -147,6 +151,7 @@ def test_decode_smallS_equivalence_sliding_only():
         t_abs = kv.K_win.shape[2] - 1  # current last index
         pos = torch.arange(t_abs, t_abs + 1)
         from nsa.core.rope import apply_rope as rope_apply
+
         Qh = rope_apply(Qh, pos)
         # Expand cached K/V per head from group caches
         Kh = kv.K_win.repeat_interleave(h_per_group, dim=1)  # [B,H,S,Dk]
@@ -165,7 +170,18 @@ def test_decode_selection_only_equivalence_full_sel():
     # Configure selection to cover all tokens: l=d=l_sel=1; n_sel large; w small
     l, d, l_sel, n, w = 1, 1, 1, 64, 0
     device = torch.device("cpu")
-    nsa = NSAAttention(dim=dim, n_heads=n_heads, n_kv_groups=G, d_k=d_k, d_v=d_v, l=l, d=d, l_sel=l_sel, n_sel=n, w=w)
+    nsa = NSAAttention(
+        dim=dim,
+        n_heads=n_heads,
+        n_kv_groups=G,
+        d_k=d_k,
+        d_v=d_v,
+        l=l,
+        d=d,
+        l_sel=l_sel,
+        n_sel=n,
+        w=w,
+    )
     # Force gates to selection branch only
     nsa.gate.fc2.bias.data = torch.tensor([-1000.0, 1000.0, -1000.0])
     # Prefill a short context
@@ -198,8 +214,6 @@ def test_decode_selection_only_equivalence_full_sel():
         # Build full-attn reference using selection projections (covers all 0..t)
         H = n_heads
         W_Q = nsa.W_Q
-        W_K = nsa.W_K_sel
-        W_V = nsa.W_V_sel
         Qh = W_Q(x_tok).view(B, 1, H, d_k).permute(0, 2, 1, 3)
         Kh = kv.K_sel.repeat_interleave(nsa.h_per_group, dim=1)  # [B,H,S,Dk]
         Vh = kv.V_sel.repeat_interleave(nsa.h_per_group, dim=1)  # [B,H,S,Dv]
@@ -216,7 +230,18 @@ def test_cmp_decode_emission_parity_prefill_vs_decode():
     l, d, l_sel, n, w = 4, 2, 4, 4, 8
     device = torch.device("cpu")
     x = torch.randn(B, S, dim, device=device)
-    nsa = NSAAttention(dim=dim, n_heads=n_heads, n_kv_groups=G, d_k=d_k, d_v=d_v, l=l, d=d, l_sel=l_sel, n_sel=n, w=w)
+    nsa = NSAAttention(
+        dim=dim,
+        n_heads=n_heads,
+        n_kv_groups=G,
+        d_k=d_k,
+        d_v=d_v,
+        l=l,
+        d=d,
+        l_sel=l_sel,
+        n_sel=n,
+        w=w,
+    )
     # Build raw cmp K/V by projecting and shaping
     with torch.no_grad():
         K_raw = nsa._shape_kv(nsa.W_K_cmp(x), B, S)
@@ -251,5 +276,3 @@ def test_cmp_decode_emission_parity_prefill_vs_decode():
     assert kv.V_cmp.shape == V_cmp_full.shape
     assert torch.allclose(kv.K_cmp, K_cmp_full, atol=1e-6)
     assert torch.allclose(kv.V_cmp, V_cmp_full, atol=1e-6)
-
-

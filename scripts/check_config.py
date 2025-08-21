@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import sys
+
 from omegaconf import OmegaConf
 
 
@@ -25,7 +26,11 @@ def main():
         sys.exit(2)
 
     out = {
-        "l": l, "d": d, "l_sel": l_sel, "n_sel": n_sel, "w": w,
+        "l": l,
+        "d": d,
+        "l_sel": l_sel,
+        "n_sel": n_sel,
+        "w": w,
         "reads@S": {S: reads(S, l, d, n_sel, l_sel, w) for S in [0, 64, 128, 256, 512, 1024, 4096]},
     }
     print(json.dumps(out, indent=2))
@@ -33,4 +38,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

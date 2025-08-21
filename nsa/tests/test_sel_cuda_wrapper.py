@@ -1,11 +1,11 @@
 import os
+
 import torch
 
-from nsa.core.block_index import build_block_meta
 from nsa.cache.kv_cache import NSA_KV
-from nsa.core.nsa_attention import NSAAttention
-from nsa.kernels.cuda_sel_kernel import selection_attention_cuda
 from nsa.core.attention_kernels import grouped_selection_attention_packed
+from nsa.core.block_index import build_block_meta
+from nsa.kernels.cuda_sel_kernel import selection_attention_cuda
 
 
 def _empty_kv(B, G, d_k, d_v, device):
@@ -47,4 +47,3 @@ def test_sel_cuda_wrapper_fallback_parity():
     O_ref = grouped_selection_attention_packed(Q, K, V, ranges)
     mae = (O_cuda - O_ref).abs().mean().item()
     assert mae < 1e-6
-

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import time
+
 import torch
 
-from nsa.kernels.cuda_sel_kernel import selection_attention_cuda
 from nsa.core.attention_kernels import grouped_selection_attention_packed
+from nsa.kernels.cuda_sel_kernel import selection_attention_cuda
 
 
 def make_data(N, H, D, Dv, L, device):
@@ -45,13 +46,24 @@ def main():
     device = torch.device(args.device)
     for L in [int(x) for x in args.L_list.split(",")]:
         Q, K, V, ranges = make_data(args.N, args.H, args.D, args.Dv, L, device)
-        dt_cuda, O_cuda = bench_once(selection_attention_cuda, Q, K, V, ranges, iters=args.iters, warmup=args.warmup)
-        dt_ref, O_ref = bench_once(grouped_selection_attention_packed, Q, K, V, ranges, iters=args.iters, warmup=args.warmup)
+        dt_cuda, O_cuda = bench_once(
+            selection_attention_cuda, Q, K, V, ranges, iters=args.iters, warmup=args.warmup
+        )
+        dt_ref, O_ref = bench_once(
+            grouped_selection_attention_packed,
+            Q,
+            K,
+            V,
+            ranges,
+            iters=args.iters,
+            warmup=args.warmup,
+        )
         mae = (O_cuda - O_ref).abs().mean().item()
         speedup = dt_ref / max(1e-9, dt_cuda)
-        print(f"cuda,N={args.N},H={args.H},D={args.D},Dv={args.Dv},L={L},iters={args.iters},cuda_ms={dt_cuda:.3f},ref_ms={dt_ref:.3f},speedup={speedup:.3f}x,mae={mae:.3e}")
+        print(
+            f"cuda,N={args.N},H={args.H},D={args.D},Dv={args.Dv},L={L},iters={args.iters},cuda_ms={dt_cuda:.3f},ref_ms={dt_ref:.3f},speedup={speedup:.3f}x,mae={mae:.3e}"
+        )
 
 
 if __name__ == "__main__":
     main()
-

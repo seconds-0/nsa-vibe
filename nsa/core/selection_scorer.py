@@ -1,4 +1,3 @@
-from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -115,7 +114,11 @@ def select_topn_ranges(
         last_block = torch.clamp((torch.tensor(t_token, device=device) // meta.l_sel), min=0)
         for i in range(force_local):
             forced_list.append(torch.clamp(last_block - i, min=0).expand(B, G))
-    forced_idx = torch.stack(forced_list, dim=-1) if forced_list else torch.empty((B, G, 0), device=device, dtype=torch.int64)
+    forced_idx = (
+        torch.stack(forced_list, dim=-1)
+        if forced_list
+        else torch.empty((B, G, 0), device=device, dtype=torch.int64)
+    )
     # Exclude forced from top-k candidates by setting their scores to -inf
     if forced_idx.numel() > 0:
         forced_mask = torch.zeros_like(masked, dtype=torch.bool)
@@ -146,7 +149,7 @@ def select_topn_ranges(
                 continue
             cur_s = int(blocks[0].item())
             cur_e = cur_s + meta.l_sel
-            merged: list[Tuple[int, int]] = []
+            merged: list[tuple[int, int]] = []
             for x in blocks[1:].tolist():
                 if x == cur_e:  # adjacent
                     cur_e += meta.l_sel
@@ -166,6 +169,7 @@ def select_topn_ranges(
 
 
 # ===== Batched selection (prefill fast path) =====
+
 
 def select_topn_ranges_batched(
     p_grp_all: torch.Tensor,  # [B,S,G,S_sel]
@@ -205,7 +209,8 @@ def select_topn_ranges_batched(
             forced_list.append(idx)
     forced = (
         torch.cat(forced_list, dim=-1).unique(sorted=True, dim=-1)
-        if forced_list else torch.empty((B, S, G, 0), dtype=torch.long, device=device)
+        if forced_list
+        else torch.empty((B, S, G, 0), dtype=torch.long, device=device)
     )
 
     if forced.numel() > 0:
@@ -291,4 +296,3 @@ def convert_indices_to_ranges_batched(
                     out[b, t, g, i, 1] = e0
                 idx += 1
     return out
-

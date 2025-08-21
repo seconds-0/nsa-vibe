@@ -11,14 +11,14 @@ Output:
   - Optional markdown report via --out
   - Optional config update via --config
 """
+
 import argparse
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
-def load_csv(path: Optional[str]) -> List[Dict]:
-    rows: List[Dict] = []
+def load_csv(path: str | None) -> list[dict]:
+    rows: list[dict] = []
     if not path:
         return rows
     p = Path(path)
@@ -28,7 +28,7 @@ def load_csv(path: Optional[str]) -> List[Dict]:
         r = csv.DictReader(f)
         for row in r:
             # Normalize types
-            clean: Dict[str, object] = {k: v for k, v in row.items()}
+            clean: dict[str, object] = {k: v for k, v in row.items()}
             for k in ("N", "H", "D", "Dv", "L", "nspans", "streams"):
                 if k in clean and clean[k] != "":
                     try:
@@ -45,7 +45,9 @@ def load_csv(path: Optional[str]) -> List[Dict]:
     return rows
 
 
-def choose_threshold(rows_dense: List[Dict], rows_varlen: List[Dict], margin: float = 1.2) -> Optional[int]:
+def choose_threshold(
+    rows_dense: list[dict], rows_varlen: list[dict], margin: float = 1.2
+) -> int | None:
     """Return minimal L where all rows for that L meet speedup >= margin across provided CSVs."""
     Ls = set()
     for r in rows_dense:
@@ -59,13 +61,17 @@ def choose_threshold(rows_dense: List[Dict], rows_varlen: List[Dict], margin: fl
     for L in sorted(Ls):
         ok = True
         # dense rows
-        for r in [x for x in rows_dense if int(x.get("L", -1)) == L and int(x.get("streams", 1)) == 1]:
+        for r in [
+            x for x in rows_dense if int(x.get("L", -1)) == L and int(x.get("streams", 1)) == 1
+        ]:
             if float(r.get("speedup", 0.0)) < margin:
                 ok = False
                 break
         # varlen rows
         if ok:
-            for r in [x for x in rows_varlen if int(x.get("L", -1)) == L and int(x.get("streams", 1)) == 1]:
+            for r in [
+                x for x in rows_varlen if int(x.get("L", -1)) == L and int(x.get("streams", 1)) == 1
+            ]:
                 if float(r.get("speedup", 0.0)) < margin:
                     ok = False
                     break
@@ -74,12 +80,15 @@ def choose_threshold(rows_dense: List[Dict], rows_varlen: List[Dict], margin: fl
     return None
 
 
-def write_report(path: Path, dense: List[Dict], varlen: List[Dict], thr: Optional[int], margin: float) -> None:
+def write_report(
+    path: Path, dense: list[dict], varlen: list[dict], thr: int | None, margin: float
+) -> None:
     with path.open("w") as f:
         f.write("# Selection Triton Threshold Report\n\n")
         f.write(f"Margin: {margin:.2f}x\n\n")
         f.write(f"Recommended sel_triton_min_L: {thr if thr is not None else 'N/A'}\n\n")
-        def dump(title: str, rows: List[Dict], cols: List[str]):
+
+        def dump(title: str, rows: list[dict], cols: list[str]):
             f.write(f"## {title}\n\n")
             f.write("| " + " | ".join(cols) + " |\n")
             f.write("|" + "---|" * len(cols) + "\n")
@@ -89,11 +98,20 @@ def write_report(path: Path, dense: List[Dict], varlen: List[Dict], thr: Optiona
                     vals.append(str(r.get(c, "")))
                 f.write("| " + " | ".join(vals) + " |\n")
             f.write("\n")
-        dump("Dense (few)", dense, ["N","H","D","Dv","L","streams","tri_ms","ref_ms","speedup","mae"])
-        dump("Varlen (many)", varlen, ["N","H","D","Dv","L","nspans","streams","tri_ms","ref_ms","speedup","mae"])
+
+        dump(
+            "Dense (few)",
+            dense,
+            ["N", "H", "D", "Dv", "L", "streams", "tri_ms", "ref_ms", "speedup", "mae"],
+        )
+        dump(
+            "Varlen (many)",
+            varlen,
+            ["N", "H", "D", "Dv", "L", "nspans", "streams", "tri_ms", "ref_ms", "speedup", "mae"],
+        )
 
 
-def maybe_update_config(config_path: Optional[str], thr: Optional[int]) -> None:
+def maybe_update_config(config_path: str | None, thr: int | None) -> None:
     if not config_path or thr is None:
         return
     try:
@@ -116,7 +134,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dense", required=True, help="Path to dense CSV (few)")
     ap.add_argument("--varlen", required=True, help="Path to varlen CSV (many)")
-    ap.add_argument("--margin", type=float, default=1.2, help="Minimum speedup to accept (default 1.2x)")
+    ap.add_argument(
+        "--margin", type=float, default=1.2, help="Minimum speedup to accept (default 1.2x)"
+    )
     ap.add_argument("--out", help="Markdown report path")
     ap.add_argument("--config", help="Path to configs/base.yaml to update")
     args = ap.parse_args()
@@ -124,7 +144,9 @@ def main() -> int:
     dense = load_csv(args.dense)
     varlen = load_csv(args.varlen)
     thr = choose_threshold(dense, varlen, margin=args.margin)
-    print(f"Recommended sel_triton_min_L: {thr if thr is not None else 'N/A'} (margin {args.margin:.2f}x)")
+    print(
+        f"Recommended sel_triton_min_L: {thr if thr is not None else 'N/A'} (margin {args.margin:.2f}x)"
+    )
     if args.out:
         write_report(Path(args.out), dense, varlen, thr, args.margin)
         print(f"Report written to {args.out}")
@@ -135,4 +157,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

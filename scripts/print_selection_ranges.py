@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import argparse
 import json
+
 import torch
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.core.block_index import build_block_meta
-from nsa.core.rope import apply_rope
 from nsa.core.compress_pool import avg_pool_phi_rope_kv
+from nsa.core.nsa_attention import NSAAttention
+from nsa.core.rope import apply_rope
 from nsa.core.selection_scorer import (
     compute_pcmp_all,
     map_pcmp_to_pslc_batched,
@@ -59,10 +60,12 @@ def main():
     K_cmp_raw = nsa._shape_kv(nsa.W_K_cmp(x), B, S)
     V_cmp_raw = nsa._shape_kv(nsa.W_V_cmp(x), B, S)
     # Build compressed via avg pool ϕ with RoPE on K
-    K_cmp, V_cmp = avg_pool_phi_rope_kv(K_cmp_raw, V_cmp_raw, nsa.l, nsa.d, pos=torch.arange(S, device=device))
+    K_cmp, V_cmp = avg_pool_phi_rope_kv(
+        K_cmp_raw, V_cmp_raw, nsa.l, nsa.d, pos=torch.arange(S, device=device)
+    )
     meta = build_block_meta(seq_len=S, l=nsa.l, d=nsa.d, l_sel=nsa.l_sel, n_sel=nsa.n_sel, w=nsa.w)
 
-    scale = 1.0 / (nsa.d_k ** 0.5)
+    scale = 1.0 / (nsa.d_k**0.5)
     p_cmp_all = compute_pcmp_all(Q, K_cmp, scale)
     p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all, meta)
     p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
@@ -86,4 +89,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

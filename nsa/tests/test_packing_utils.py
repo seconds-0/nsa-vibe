@@ -1,4 +1,5 @@
 import torch
+
 from nsa.core.packing import (
     build_cu_seqlens_for_buckets,
     pack_batch_by_lengths,
@@ -32,4 +33,3 @@ def test_pack_unpack_roundtrip():
     assert mask[0, :3].all() and not mask[0, 3:].any()
     assert not mask[1].any()
     assert mask[2, :5].all() and not mask[2, 5:].any()
-

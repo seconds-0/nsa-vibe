@@ -1,4 +1,5 @@
 import os
+
 import torch
 
 from nsa.core.nsa_attention import GateMLP
@@ -40,4 +41,3 @@ def test_force_branch_env_win():
         assert torch.all(idx == 2)
     finally:
         os.environ.pop("NSA_FORCE_BRANCH", None)
-

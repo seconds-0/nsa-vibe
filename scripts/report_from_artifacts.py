@@ -5,9 +5,10 @@ Generate a compact Markdown report from a one-shot artifacts directory.
 Usage:
   python scripts/report_from_artifacts.py artifacts/runner/<commit> > report.md
 """
+
 import argparse
-from pathlib import Path
 import json
+from pathlib import Path
 
 
 def read_text(p: Path) -> str:
@@ -25,7 +26,7 @@ def main():
     env = read_text(base / "env.txt")
     routing = read_text(base / "routing.json")
     sanity = read_text(base / "sanity.out")
-    dec_csv = read_text(base / "decode_gpu_final.csv")
+    read_text(base / "decode_gpu_final.csv")
     dec_sum = read_text(base / "decode_summary.txt")
     tfwd = read_text(base / "triton_fwd.txt")
     tbwd = read_text(base / "triton_bwd.txt")
@@ -60,4 +61,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

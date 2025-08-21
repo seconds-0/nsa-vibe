@@ -1,8 +1,9 @@
 import os
 import random
+
 import numpy as np
-import torch
 import pytest
+import torch
 
 from nsa.kernels.flash_wrappers import fa2_supported, is_flash_varlen_available
 
@@ -26,7 +27,9 @@ def pytest_collection_modifyitems(config, items):
     fa2_ok = False
     if torch.cuda.is_available():
         # Probe a typical head dim (64) with fp16
-        fa2_ok = is_flash_varlen_available() or fa2_supported(torch.device("cuda"), torch.float16, 64)
+        fa2_ok = is_flash_varlen_available() or fa2_supported(
+            torch.device("cuda"), torch.float16, 64
+        )
     for item in items:
         name = item.nodeid.lower()
         # Skip Triton selection GPU tests on 4090 unless forced

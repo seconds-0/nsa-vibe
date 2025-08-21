@@ -1,15 +1,18 @@
 import os
+
 import torch
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
 def main():
     torch.manual_seed(0)
     B, dim = 1, 64
-    nsa = NSAAttention(dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=8)
+    nsa = NSAAttention(
+        dim=dim, n_heads=4, n_kv_groups=1, d_k=16, d_v=16, l=4, d=2, l_sel=4, n_sel=4, w=8
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     nsa = nsa.to(device)
     kv = NSA_KV(
@@ -38,10 +41,10 @@ def main():
     for step in range(4):
         x_tok = torch.randn(B, 1, dim, device=device)
         y, kv = nsa(x_tok, kv, prefill=False)
-        print(f"step={step} y_norm={(y.norm().item()):.4f} reads={int(kv.reads_act_total[-1].item())}")
+        print(
+            f"step={step} y_norm={(y.norm().item()):.4f} reads={int(kv.reads_act_total[-1].item())}"
+        )
 
 
 if __name__ == "__main__":
     main()
-
-

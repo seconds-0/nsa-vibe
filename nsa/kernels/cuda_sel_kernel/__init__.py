@@ -1,10 +1,10 @@
 import os
-from typing import Tuple, Optional
+from typing import Optional
 
 import torch
 from torch.utils.cpp_extension import load as _load_ext
-from nsa.core.debug import log as _log
 
+from nsa.core.debug import log as _log
 from nsa.core.flags import env_true as _env_true
 
 _EXT: Optional[object] = None
@@ -45,11 +45,11 @@ def cuda_sel_available() -> bool:
 
 
 def selection_attention_cuda(
-    Q: torch.Tensor,      # [B,S,G,h,Dk]
-    K: torch.Tensor,      # [B,G,S_kv,Dk]
-    V: torch.Tensor,      # [B,G,S_kv,Dv]
-    ranges: torch.Tensor, # [B,S,G,n,2]
-) -> torch.Tensor:        # [B,S,G,h,Dv]
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K: torch.Tensor,  # [B,G,S_kv,Dk]
+    V: torch.Tensor,  # [B,G,S_kv,Dv]
+    ranges: torch.Tensor,  # [B,S,G,n,2]
+) -> torch.Tensor:  # [B,S,G,h,Dv]
     """
     Experimental CUDA selection wrapper. For now, this is a strict fallback to the
     packed SDPA reference path. When the CUDA kernel is implemented, this function
@@ -64,4 +64,5 @@ def selection_attention_cuda(
             _log("sel.cuda.forward_failed", err=str(e))
             # fall through to fallback
     from nsa.core.attention_kernels import grouped_selection_attention_packed
+
     return grouped_selection_attention_packed(Q, K, V, ranges)

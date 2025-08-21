@@ -1,8 +1,13 @@
 import os
+
 import pytest
 import torch
 
-from nsa.core.attention_kernels import grouped_selection_attention, grouped_selection_attention_packed, grouped_selection_attention_masked
+from nsa.core.attention_kernels import (
+    grouped_selection_attention,
+    grouped_selection_attention_masked,
+    grouped_selection_attention_packed,
+)
 
 RUN_PACKED = os.getenv("NSA_TEST_SEL_PACK", "0").lower() in ("1", "true", "yes")
 RUN_MASK = os.getenv("NSA_TEST_SEL_MASK", "0").lower() in ("1", "true", "yes")
@@ -20,7 +25,9 @@ def _random_ranges(B, S, G, n, S_kv):
     return ranges
 
 
-@pytest.mark.skipif(not RUN_PACKED, reason="Selection packing parity scaffold; enable with NSA_TEST_SEL_PACK=1")
+@pytest.mark.skipif(
+    not RUN_PACKED, reason="Selection packing parity scaffold; enable with NSA_TEST_SEL_PACK=1"
+)
 def test_selection_packed_parity_scaffold():
     torch.manual_seed(0)
     B, S, G, h, Dk, Dv = 1, 8, 2, 2, 8, 8
@@ -38,7 +45,9 @@ def test_selection_packed_parity_scaffold():
     assert mae < 1e-8
 
 
-@pytest.mark.skipif(not RUN_MASK, reason="Masked selection parity is opt-in; enable with NSA_TEST_SEL_MASK=1")
+@pytest.mark.skipif(
+    not RUN_MASK, reason="Masked selection parity is opt-in; enable with NSA_TEST_SEL_MASK=1"
+)
 def test_selection_masked_parity():
     torch.manual_seed(1)
     B, S, G, h, Dk, Dv = 1, 8, 2, 2, 8, 8
