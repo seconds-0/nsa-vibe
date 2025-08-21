@@ -123,6 +123,15 @@ class NSAAttention(nn.Module):
         self.w = w
         self.gate_temp = gate_temp
         self.phi_type = (phi or "avg").lower()
+        # RoPE scaling and prefill tiling for long-context demos (env-overridable)
+        try:
+            self.rope_scale = float(os.getenv("NSA_ROPE_SCALE", "1.0"))
+        except Exception:
+            self.rope_scale = 1.0
+        try:
+            self.prefill_tile = int(os.getenv("NSA_PREFILL_TILE", "0"))
+        except Exception:
+            self.prefill_tile = 0
         # Projections
         self.W_Q = nn.Linear(dim, n_heads * d_k, bias=False)
         self.W_K_sel = nn.Linear(dim, n_kv_groups * d_k, bias=False)
@@ -186,6 +195,13 @@ class NSAAttention(nn.Module):
         assert x.dim() == 3, "x must be [B,S,dim]"
         assert self.n_heads % self.n_kv_groups == 0, "n_heads must be divisible by n_kv_groups"
         if prefill:
+            # Optional: route prefill via single-token decode steps to support very long contexts safely.
+            if getattr(self, "prefill_tile", 0) and self.prefill_tile > 0:
+                outs = []
+                for t in range(S):
+                    out_t, kv = self.forward(x[:, t : t + 1], kv, prefill=False)
+                    outs.append(out_t)
+                return torch.cat(outs, dim=1), kv
             use_batched = os.getenv("NSA_PREFILL_BATCHED", "0").lower() in ("1", "true", "yes")
             if use_batched:
                 return self._forward_prefill_batched(x, kv)
@@ -199,7 +215,9 @@ class NSAAttention(nn.Module):
             # Apply RoPE to Q with absolute positions (decode)
             pos = torch.arange(t_prev, t_prev + S, device=x.device)
             Q = apply_rope(
-                Q_lin.view(B, S, self.n_heads, self.d_k).reshape(B, S, self.n_heads * self.d_k), pos
+                Q_lin.view(B, S, self.n_heads, self.d_k).reshape(B, S, self.n_heads * self.d_k),
+                pos,
+                scale=getattr(self, "rope_scale", 1.0),
             )
             Q = Q.view(B, S, self.n_heads, self.d_k)
             G = self.n_kv_groups
@@ -216,8 +234,8 @@ class NSAAttention(nn.Module):
             # Determine current token index before appending to caches
             t_prev = kv.K_sel.shape[2] if hasattr(kv, "K_sel") else 0
             pos_k = torch.arange(t_prev, t_prev + S, device=x.device)
-            K_sel = apply_rope(K_sel, pos_k)
-            K_win = apply_rope(K_win, pos_k)
+            K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
+            K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
 
             # decode step: append raw tokens and window, emit compressed every d after warmup l
             kv.update_selection_raw(K_sel, V_sel)
@@ -437,7 +455,9 @@ class NSAAttention(nn.Module):
         # Apply RoPE to Q
         pos = torch.arange(S, device=x.device)
         Q = apply_rope(
-            Q_lin.view(B, S, self.n_heads, self.d_k).reshape(B, S, self.n_heads * self.d_k), pos
+            Q_lin.view(B, S, self.n_heads, self.d_k).reshape(B, S, self.n_heads * self.d_k),
+            pos,
+            scale=getattr(self, "rope_scale", 1.0),
         )
         Q = Q.view(B, S, self.n_heads, self.d_k).view(
             B, S, self.n_kv_groups, self.h_per_group, self.d_k
@@ -456,8 +476,8 @@ class NSAAttention(nn.Module):
 
         # Align RoPE application across branches for batched path (Q already RoPE'd)
         pos_k = torch.arange(S, device=x.device)
-        K_sel = apply_rope(K_sel, pos_k)
-        K_win = apply_rope(K_win, pos_k)
+        K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
+        K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
 
         # Update caches (prefill uses full sequence projections)
         kv.update_selection_raw(K_sel, V_sel)
@@ -642,7 +662,9 @@ class NSAAttention(nn.Module):
         Q_lin = self._shape_q(self.W_Q(x), B, S)  # [B,S,G,h,Dk]
         pos = torch.arange(S, device=x.device)
         Q = apply_rope(
-            Q_lin.view(B, S, self.n_heads, self.d_k).reshape(B, S, self.n_heads * self.d_k), pos
+            Q_lin.view(B, S, self.n_heads, self.d_k).reshape(B, S, self.n_heads * self.d_k),
+            pos,
+            scale=getattr(self, "rope_scale", 1.0),
         )
         Q = Q.view(B, S, self.n_heads, self.d_k).view(
             B, S, self.n_kv_groups, self.h_per_group, self.d_k
@@ -723,7 +745,7 @@ class NSAAttention(nn.Module):
         assert self.phi_k_conv is not None and self.phi_v_conv is not None
         B, G, S, Dk = K_raw.shape
         Dv = V_raw.shape[-1]
-        K_rope = apply_rope(K_raw, pos)
+        K_rope = apply_rope(K_raw, pos, scale=getattr(self, "rope_scale", 1.0))
         Kx = K_rope.permute(0, 1, 3, 2).reshape(B * G, Dk, S)
         Vx = V_raw.permute(0, 1, 3, 2).reshape(B * G, Dv, S)
         Kc = self.phi_k_conv(Kx)
@@ -743,7 +765,7 @@ class NSAAttention(nn.Module):
         B, G, lwin, Dk = K_last.shape
         Dv = V_last.shape[-1]
         assert lwin == self.l, "decode emission expects exactly l tokens"
-        K_rope = apply_rope(K_last, pos_last)
+        K_rope = apply_rope(K_last, pos_last, scale=getattr(self, "rope_scale", 1.0))
         Kx = K_rope.permute(0, 1, 3, 2).reshape(B * G, Dk, lwin)
         Vx = V_last.permute(0, 1, 3, 2).reshape(B * G, Dv, lwin)
         Kc = self.phi_k_conv(Kx)
