@@ -41,6 +41,20 @@ def _normalize_ranges_tensor(ranges: torch.Tensor, S_kv: int) -> torch.Tensor:
 _PACK_CACHE: dict[int, dict[str, torch.Tensor]] = {}
 _DEVICE_LOGGED: bool = False
 _PACK_CACHE_MAX_ENTRIES: int = 4
+_PACK_CACHE_MAX_MB: int = int(os.getenv("NSA_SEL_TRITON_PACK_CACHE_MAX_MB", "512"))  # soft cap
+
+
+def _pack_cache_total_bytes() -> int:
+    total = 0
+    for entry in _PACK_CACHE.values():
+        for k in ("K", "V"):
+            t = entry.get(k)
+            if t is not None:
+                total += t.numel() * t.element_size()
+        cu = entry.get("cu")
+        if cu is not None:
+            total += cu.numel() * cu.element_size()
+    return total
 
 
 def _get_pack_buffers(device: torch.device, total_L: int, D: int, Dv: int, N: int, dtype_k: torch.dtype, dtype_v: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -59,6 +73,16 @@ def _get_pack_buffers(device: torch.device, total_L: int, D: int, Dv: int, N: in
         if len(_PACK_CACHE) >= _PACK_CACHE_MAX_ENTRIES:
             _PACK_CACHE.clear()
         _PACK_CACHE[key] = {"K": Kb, "V": Vb, "cu": cu}
+        # Soft memory pressure guard: evict all if exceeding cap
+        try:
+            max_bytes = _PACK_CACHE_MAX_MB * 1024 * 1024
+            if _pack_cache_total_bytes() > max_bytes:
+                from nsa.core.debug import log
+                log("sel.triton.pack_cache_evict", reason="over_cap", cap_mb=_PACK_CACHE_MAX_MB)
+                _PACK_CACHE.clear()
+                _PACK_CACHE[key] = {"K": Kb, "V": Vb, "cu": cu}
+        except Exception:
+            pass
     else:
         Kb = _PACK_CACHE[key]["K"][:total_L]
         Vb = _PACK_CACHE[key]["V"][:total_L]

@@ -4,13 +4,21 @@ set -euo pipefail
 # Runner one-shot script: captures a full validation sweep and gathers artifacts
 # Usage: bash scripts/runner_oneshot.sh [out_dir]
 
-OUT=${1:-artifacts/runner}
-mkdir -p "$OUT"
+# Sanitize output directory argument
+RAW_OUT=${1:-artifacts/runner}
+SAFE_RE='^[A-Za-z0-9_./-]+$'
+if [[ "$RAW_OUT" =~ $SAFE_RE ]]; then
+  OUT="$RAW_OUT"
+else
+  echo "[oneshot] invalid output dir '$RAW_OUT', defaulting to artifacts/runner" >&2
+  OUT="artifacts/runner"
+fi
+mkdir -p -- "$OUT"
 
 echo "[oneshot] recording git commit" >&2
 COMMIT=$(git rev-parse --short HEAD || echo unknown)
 RUN_DIR="$OUT/$COMMIT"
-mkdir -p "$RUN_DIR"
+mkdir -p -- "$RUN_DIR"
 
 echo "[oneshot] versions and routing" >&2
 (
@@ -74,4 +82,3 @@ echo "[oneshot] training showcase (short)" >&2
 CONFIG=configs/train_showcase.yaml python scripts/train_showcase.py | tee "$RUN_DIR/train_showcase.txt" || true
 
 echo "[oneshot] done -> $RUN_DIR" >&2
-

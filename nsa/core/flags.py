@@ -33,17 +33,20 @@ def torch_triton_version_pairing_ok() -> bool:
     try:
         import triton  # noqa: F401
         tv = triton.__version__
-    except Exception:
+    except ImportError:
         tv = "<none>"
+    except Exception:
+        tv = "<unknown>"
     try:
         tt = torch.__version__
     except Exception:
-        tt = "<none>"
+        tt = "<unknown>"
     # Basic heuristic: 2.2.x ↔ triton 2.2.x; 2.3.x ↔ 2.3.x; 2.4+ ↔ 3.x
     try:
-        major_minor = ".".join(tt.split("+")[0].split(".")[:2])
-        t_major = int(major_minor.split(".")[0])
-        t_minor = int(major_minor.split(".")[1])
+        major_minor = ".".join((tt or "").split("+")[0].split(".")[:2])
+        parts = major_minor.split(".")
+        t_major = int(parts[0])
+        t_minor = int(parts[1])
         if t_major != 2:
             return True  # do not gate non-2.x
         if t_minor in (2, 3):
@@ -51,7 +54,7 @@ def torch_triton_version_pairing_ok() -> bool:
         if t_minor >= 4:
             return tv.startswith("3.")
         return True
-    except Exception:
+    except (ValueError, IndexError):
         return True
 
 

@@ -270,6 +270,15 @@ class NSAAttention(nn.Module):
             p_cmp_all = compute_pcmp_all(Q, K_cmp_full, scale)
             # Per-token outputs (S should be 1 in decode)
             outs = []
+            # Parse env toggles once per decode call (avoid hot-path string parsing)
+            force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
+            use_sel_pack_env = os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes")
+            use_triton_sel_env = os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes") or self.use_triton_sel
+            use_cuda_sel_env = os.getenv("NSA_SEL_CUDA", "0").lower() in ("1", "true", "yes")
+            fa2_all_env = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes")
+            fa2_win_env = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
+            fa2_cmp_env = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
+
             for t in range(S):
                 p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all[:, t : t + 1], kv.meta)
                 p_grp = p_slc_all.sum(dim=3).squeeze(1)  # [B,G,S_sel]
@@ -294,12 +303,9 @@ class NSAAttention(nn.Module):
                 K_sel_t = kv.K_sel
                 V_sel_t = kv.V_sel
                 # Selection attention: prefer Triton if enabled; else packed; fallback to gather
-                force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
-                use_sel_pack = os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes") and not force_parity
-                use_triton_sel = (
-                    os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes") or self.use_triton_sel
-                ) and not force_parity
-                use_cuda_sel = os.getenv("NSA_SEL_CUDA", "0").lower() in ("1", "true", "yes") and not force_parity
+                use_sel_pack = use_sel_pack_env and not force_parity
+                use_triton_sel = use_triton_sel_env and not force_parity
+                use_cuda_sel = use_cuda_sel_env and not force_parity
                 if use_triton_sel:
                     from nsa.kernels.triton_sel_kernel import selection_attention_triton
                     O_sel_bt = selection_attention_triton(Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1))
@@ -319,16 +325,13 @@ class NSAAttention(nn.Module):
                 win_len = min(self.w, kv.K_win.shape[2])
                 K_w = kv.K_win[:, :, kv.K_win.shape[2] - win_len : kv.K_win.shape[2], :]
                 V_w = kv.V_win[:, :, kv.V_win.shape[2] - win_len : kv.V_win.shape[2], :]
-                fa2_all = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes")
-                fa2_win = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
-                fa2_cmp = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
-                use_flash = (fa2_all or fa2_win or fa2_cmp) and not force_parity
-                if use_flash and (fa2_all or fa2_win):
+                use_flash = (fa2_all_env or fa2_win_env or fa2_cmp_env) and not force_parity
+                if use_flash and (fa2_all_env or fa2_win_env):
                     O_win = sliding_window_attention_fa2_decode(Q_t, kv.K_win, kv.V_win, self.w)
                 else:
                     O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
                 S_cmp_t = kv.K_cmp.shape[2]
-                if use_flash and (fa2_all or fa2_cmp):
+                if use_flash and (fa2_all_env or fa2_cmp_env):
                     O_cmp = compressed_attention_fa2_decode(Q_t, kv.K_cmp, kv.V_cmp, S_cmp_t)
                 else:
                     O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)
