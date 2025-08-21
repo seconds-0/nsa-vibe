@@ -25,7 +25,7 @@ Scope: Verify NSA correctness gates and training harness readiness to start M7C 
 
 ### 1) NSA correctness (CPU-safe)
 - Command:
-  - `PYTHONPATH=. pytest -q -k "test_equiv_small or test_block_math or test_masks or test_group_consistency or test_decode_counters or test_selection_packed"`
+  - `PYTHONPATH=. pytest -q -k "test_equiv_small or test_block_math or test_masks or test_group_consistency or test_decode_counters or test_selection_packed" > artifacts/test-reports/cpu-correctness.txt`
 - Expectation:
   - All selected tests PASS.
   - No GPU required; skips are acceptable where marked.
@@ -36,11 +36,12 @@ Scope: Verify NSA correctness gates and training harness readiness to start M7C 
 - Commands:
   - Routing snapshot: `PYTHONPATH=. python scripts/print_routing.py > artifacts/test-reports/routing.json`
   - Triton selection forward parity (opt-in; force on 4090):
-    - `NSA_USE_TRITON_SEL=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_parity_gpu.py`
+    - `NSA_TEST_TRITON_SEL=1 NSA_USE_TRITON_SEL=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_parity_gpu.py > artifacts/test-reports/triton_fwd.txt`
   - Triton selection backward parity (opt-in):
-    - `NSA_USE_TRITON_SEL=1 NSA_SEL_TRITON_ALLOW_GRAD=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_backward_gpu.py`
-  - FA‑2 availability probe: `python - << 'PY'\nfrom nsa.kernels.flash_wrappers import is_flash_varlen_available; print('fa2_varlen_available', is_flash_varlen_available())\nPY`
-  - FA‑2 varlen parity (if available): `NSA_TEST_FA2=1 NSA_USE_FA2=1 PYTHONPATH=. pytest -q -k fa2_gpu_varlen`
+    - `NSA_USE_TRITON_SEL=1 NSA_SEL_TRITON_ALLOW_GRAD=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_backward_gpu.py > artifacts/test-reports/triton_bwd.txt`
+  - FA‑2 availability probe:
+    - `python - << 'PY' > artifacts/test-reports/fa2_probe.txt\nfrom nsa.kernels.flash_wrappers import is_flash_varlen_available; print('fa2_varlen_available', is_flash_varlen_available())\nPY`
+  - FA‑2 varlen parity (if available): `NSA_TEST_FA2=1 NSA_USE_FA2=1 PYTHONPATH=. pytest -q -k fa2_gpu_varlen > artifacts/test-reports/fa2_varlen.txt`
 - Expectations:
   - Routing JSON reflects CUDA available; Triton version aligned with Torch if installed.
   - Parity tests PASS when enabled; otherwise cleanly SKIP.
@@ -52,7 +53,7 @@ Scope: Verify NSA correctness gates and training harness readiness to start M7C 
   - 64k demo (tile prefill):
     - `PYTHONPATH=. python scripts/demo_64k.py --S 65536 --prefill_tile 4096 --rope_scale 8.0 --use_fa2 0 > artifacts/test-reports/demo_64k.txt`
   - Needle test:
-    - `PYTHONPATH=. pytest -q nsa/tests/test_long_context_needle.py -k needle`
+    - `PYTHONPATH=. pytest -q nsa/tests/test_long_context_needle.py -k needle > artifacts/test-reports/needle_64k.txt`
 - Expectations:
   - Demo prints summary with device, timing, and read counters; no exceptions.
   - Needle test PASS on at least one GPU runner (SKIP acceptable on CPU-only).
@@ -98,4 +99,4 @@ Appendix: Quick Setup
 - CPU: `python -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements-cpu.txt`
 - GPU: `python -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements-gpu-cu121-torch24.txt`
 - Extras for data/tokenizer: `pip install transformers datasets`
-
+ - If `transformers` is not installed, omit `--dataset fineweb_edu` when running DDP training to use synthetic data.

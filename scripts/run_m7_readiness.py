@@ -127,6 +127,7 @@ def main():
     if args.enable_triton and gpu:
         env_tri = env_base.copy()
         env_tri["NSA_USE_TRITON_SEL"] = "1"
+        env_tri["NSA_TEST_TRITON_SEL"] = "1"
         if is_sm89():
             env_tri["NSA_TRITON_SEL_FORCE"] = "1"
         step = {"name": "triton-fwd"}
@@ -194,12 +195,12 @@ def main():
         env_ddp["CONFIG"] = "configs/m7c_125m.yaml"
         # Prefer torchrun; fallback to python -m torch.distributed.run
         cmd = ["torchrun", "--nproc_per_node=2", "scripts/train_showcase.py"]
-        if has_module("datasets"):
+        if has_module("datasets") and has_module("transformers"):
             cmd += ["--dataset", "fineweb_edu"]
         rc, dt = run_cmd(cmd, train_dir / "m7c_ddp.txt", env=env_ddp)
         if rc != 0:
             cmd = [sys.executable, "-m", "torch.distributed.run", "--nproc_per_node=2", "scripts/train_showcase.py"]
-            if has_module("datasets"):
+            if has_module("datasets") and has_module("transformers"):
                 cmd += ["--dataset", "fineweb_edu"]
             rc, dt = run_cmd(cmd, train_dir / "m7c_ddp.txt", env=env_ddp)
         step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
@@ -232,4 +233,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
