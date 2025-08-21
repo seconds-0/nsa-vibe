@@ -45,6 +45,14 @@ class GateMLP(nn.Module):
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, q_group_pooled: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
+        fb = os.getenv("NSA_FORCE_BRANCH")
+        if fb:
+            fb = fb.strip().lower()
+            if fb in ("cmp", "sel", "win"):
+                idx = 0 if fb == "cmp" else (1 if fb == "sel" else 2)
+                one = torch.zeros((*q_group_pooled.shape[:-1], 3), device=q_group_pooled.device, dtype=q_group_pooled.dtype)
+                one[..., idx] = 1.0
+                return one
         x = F.silu(self.fc1(q_group_pooled))
         g = self.fc2(x) / max(tau, 1e-6)
         p = F.softmax(g, dim=-1)
@@ -130,6 +138,9 @@ class NSAAttention(nn.Module):
         self.use_flash_default = use_flash
         # Selection Triton toggle (M4)
         self.use_triton_sel = use_triton_sel
+        # Optional: cache env flags statically for production if NSA_ENV_STATIC=1
+        self._env_static = os.getenv("NSA_ENV_STATIC", "0").lower() in ("1", "true", "yes")
+        self._env_cache: Optional[dict] = None
         # Optional learnable ϕ via depthwise Conv1d over time with kernel l and stride d
         # Initialize to average pooling for parity with M0
         self.phi_k_conv: Optional[nn.Conv1d]
@@ -262,6 +273,22 @@ class NSAAttention(nn.Module):
             p_cmp_all = compute_pcmp_all(Q, K_cmp_full, scale)
             # Per-token outputs (S should be 1 in decode)
             outs = []
+            # Parse env toggles once per decode call, or reuse a static snapshot if NSA_ENV_STATIC=1
+            if self._env_static and self._env_cache is not None:
+                env = self._env_cache
+            else:
+                env = {
+                    "force_parity": os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes"),
+                    "use_sel_pack": os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes"),
+                    "use_triton_sel": (os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes")) or self.use_triton_sel,
+                    "use_cuda_sel": os.getenv("NSA_SEL_CUDA", "0").lower() in ("1", "true", "yes"),
+                    "fa2_all": os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes"),
+                    "fa2_win": os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes"),
+                    "fa2_cmp": os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes"),
+                }
+                if self._env_static:
+                    self._env_cache = env
+
             for t in range(S):
                 p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all[:, t : t + 1], kv.meta)
                 p_grp = p_slc_all.sum(dim=3).squeeze(1)  # [B,G,S_sel]
@@ -286,12 +313,10 @@ class NSAAttention(nn.Module):
                 K_sel_t = kv.K_sel
                 V_sel_t = kv.V_sel
                 # Selection attention: prefer Triton if enabled; else packed; fallback to gather
-                force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
-                use_sel_pack = os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes") and not force_parity
-                use_triton_sel = (
-                    os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes") or self.use_triton_sel
-                ) and not force_parity
-                use_cuda_sel = os.getenv("NSA_SEL_CUDA", "0").lower() in ("1", "true", "yes") and not force_parity
+                force_parity = env["force_parity"]
+                use_sel_pack = env["use_sel_pack"] and not force_parity
+                use_triton_sel = env["use_triton_sel"] and not force_parity
+                use_cuda_sel = env["use_cuda_sel"] and not force_parity
                 if use_triton_sel:
                     from nsa.kernels.triton_sel_kernel import selection_attention_triton
                     O_sel_bt = selection_attention_triton(Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1))
@@ -311,16 +336,13 @@ class NSAAttention(nn.Module):
                 win_len = min(self.w, kv.K_win.shape[2])
                 K_w = kv.K_win[:, :, kv.K_win.shape[2] - win_len : kv.K_win.shape[2], :]
                 V_w = kv.V_win[:, :, kv.V_win.shape[2] - win_len : kv.V_win.shape[2], :]
-                fa2_all = os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes")
-                fa2_win = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
-                fa2_cmp = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
-                use_flash = (fa2_all or fa2_win or fa2_cmp) and not force_parity
-                if use_flash and (fa2_all or fa2_win):
+                use_flash = (env["fa2_all"] or env["fa2_win"] or env["fa2_cmp"]) and not force_parity
+                if use_flash and (env["fa2_all"] or env["fa2_win"]):
                     O_win = sliding_window_attention_fa2_decode(Q_t, kv.K_win, kv.V_win, self.w)
                 else:
                     O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
                 S_cmp_t = kv.K_cmp.shape[2]
-                if use_flash and (fa2_all or fa2_cmp):
+                if use_flash and (env["fa2_all"] or env["fa2_cmp"]):
                     O_cmp = compressed_attention_fa2_decode(Q_t, kv.K_cmp, kv.V_cmp, S_cmp_t)
                 else:
                     O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)
@@ -335,7 +357,10 @@ class NSAAttention(nn.Module):
                     )
                 except Exception:
                     pass
-                O = gates[..., 0:1] * O_cmp + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win
+                w_cmp = gates[..., 0:1].unsqueeze(-1)
+                w_sel = gates[..., 1:2].unsqueeze(-1)
+                w_win = gates[..., 2:3].unsqueeze(-1)
+                O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
                 O_heads = O.reshape(B, self.n_heads, self.d_v)
                 out_t = self.out(O_heads.reshape(B, 1, -1))
                 outs.append(out_t)
@@ -469,12 +494,11 @@ class NSAAttention(nn.Module):
         # Gates and combine
         q_gp = Q.mean(dim=3)  # [B,S,G,Dk]
         gates = self.gate(q_gp.reshape(B * S * self.n_kv_groups, self.d_k), tau=self.gate_temp)
-        gates = gates.view(B, S, self.n_kv_groups, 3).unsqueeze(3)  # [B,S,G,1,3]
-        O = (
-            gates[..., 0:1] * O_cmp +
-            gates[..., 1:2] * O_sel +
-            gates[..., 2:3] * O_win
-        )  # [B,S,G,h,Dv]
+        gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
+        w_cmp = gates[..., 0:1].unsqueeze(3)
+        w_sel = gates[..., 1:2].unsqueeze(3)
+        w_win = gates[..., 2:3].unsqueeze(3)
+        O = (w_cmp * O_cmp + w_sel * O_sel + w_win * O_win)  # [B,S,G,h,Dv]
 
         # Output projection
         O_heads = O.reshape(B, S, self.n_kv_groups * self.h_per_group, self.d_v)
@@ -510,7 +534,10 @@ class NSAAttention(nn.Module):
                 print(f"NSA-DBG win_mae={win_mae:.6e}")
 
                 # Final output recompute using seq per-branch
-                O_seq = gates[..., 0:1] * O_cmp_seq + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win_seq
+                w_cmp_dbg = gates[..., 0:1].unsqueeze(-1)
+                w_sel_dbg = gates[..., 1:2].unsqueeze(-1)
+                w_win_dbg = gates[..., 2:3].unsqueeze(-1)
+                O_seq = w_cmp_dbg * O_cmp_seq + w_sel_dbg * O_sel + w_win_dbg * O_win_seq
                 O_heads_seq = O_seq.reshape(B, S, self.n_kv_groups * self.h_per_group, self.d_v)
                 out_seq = self.out(O_heads_seq.reshape(B, S, -1))
                 out_mae = (out - out_seq).abs().mean().item()
@@ -567,7 +594,10 @@ class NSAAttention(nn.Module):
             O_cmp = attention_bgh(Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True)
             q_gp = Q_t.mean(dim=2)
             gates = self.gate(q_gp, tau=self.gate_temp)
-            O = gates[..., 0:1] * O_cmp + gates[..., 1:2] * O_sel + gates[..., 2:3] * O_win
+            w_cmp = gates[..., 0:1].unsqueeze(-1)
+            w_sel = gates[..., 1:2].unsqueeze(-1)
+            w_win = gates[..., 2:3].unsqueeze(-1)
+            O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
             O_heads = O.reshape(B, self.n_heads, self.d_v)
             out_t = self.out(O_heads.reshape(B, 1, -1))
             outs.append(out_t)

@@ -198,6 +198,35 @@ class NSA_KV:
     # Caches are owned per layer; no sharing across layers.
 
 6.3 Block Metadata
+
+7) Milestones
+
+- M0–M6: As previously defined (steel thread → FA‑2 integration → trainability → full decode caches → Triton selection exploration → varlen/perf hardening).
+
+- M7 — Training Showcase (new)
+  - Goal: Demonstrate end‑to‑end training of a tiny decoder‑only model using NSAAttention, producing convergent loss and qualitative text samples. This serves as a public-facing proof that NSA is trainable and usable.
+  - Model: “Smallest useful” LLM‑style char/byte model.
+    - Params: ~0.5–5M (configurable); depth 4–8; dim 128–512; heads 4–8; GQA groups 1–4.
+    - Context: 256–512 tokens; vocab: byte‑level or char‑level.
+    - Attention: NSAAttention (cmp/sel/win) with default PRD hyperparams; enable FA‑2 if available; Triton optional and off by default on RTX 4090.
+  - Data: Tiny Shakespeare (≈1MB) or similar small corpus (byte‑level fallback if tokenizer absent).
+  - Training: single‑GPU 4090/A100 or CPU fallback (very slow); BF16/FP32; fixed seed for determinism in tests.
+  - Scripts/Configs: Reuse `scripts/train_toy.py` with `configs/train_showcase.yaml` (to be added) or extend existing base config.
+  - Metrics & Artifacts:
+    - Train/val loss curves (CSV/PNG), final perplexity target on Tiny Shakespeare char‑level (e.g., PPL < 3.0 for ~1–3M params, 1–2 hours on 4090).
+    - Checkpoint (`.pt`) with model + optimizer state; sample generations (seeded) before/after training.
+    - Logs: gate statistics (mean/std), per‑branch reads, decode counters sanity during evaluation.
+  - Acceptance Criteria:
+    - A1: Loss decreases smoothly without NaNs; training completes within a fixed time budget on a single GPU (e.g., ≤2 hours on 4090 at 1–3M params).
+    - A2: Validation PPL improves by ≥30% from initialization and meets the configured target (e.g., <3.0 for char‑level Tiny Shakespeare for 1–3M params). Targets scale with model size.
+    - A3: Reproducibility: fixed seeds yield ±5% loss variation across runs; configs and environment versions pinned in the report.
+    - A4: Observability: gate stats finite; counters monotonic; no causality or group‑consistency violations in eval tests.
+  - Risks & Mitigations:
+    - R1: FA‑2 or Triton instability on 4090 → default to SDPA or FA‑2 thresholds; train path remains functional.
+    - R2: Overfit tiny data → use val split, early‑stopping, and weight decay; report both train/val.
+    - R3: Throughput variance → fix seeds and batch shapes; report wall‑clock with hardware details.
+  - Reporting:
+    - “M7 Training Showcase Report” with environment, config, curves, samples, final metrics, and a short discussion.
 @dataclass
 class BlockMeta:
     l:int; d:int; l_sel:int; n_sel:int; w:int

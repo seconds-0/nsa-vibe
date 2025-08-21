@@ -1,0 +1,35 @@
+name: GPU Remote Validation (RunPod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu:
+        description: "GPU type (e.g., A100, H100, L4)"
+        required: true
+        default: "A100"
+
+jobs:
+  remote-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install deps (Torch 2.4 wheels)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip wheel setuptools
+          pip install --index-url https://download.pytorch.org/whl/cu121 -r requirements-gpu-cu121-torch24.txt
+      - name: Dry-run remote bench (RunPod)
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          . .venv/bin/activate
+          python bench/run_automated_bench.py --provider runpod --gpu "${{ inputs.gpu }}" --output remote_results.json || true
+      - name: Upload (dry-run) results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-results
+          path: remote_results.json

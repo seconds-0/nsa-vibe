@@ -465,6 +465,8 @@ def sliding_window_attention_fa2(
                     max_seqlen_q=1, max_seqlen_k=max_len,
                     causal=True,
                 )  # [N,h,Dv]
+                if not torch.isfinite(o_pack).all():
+                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.varlen_all", N=int(N), total_k=int(total_k), ms=dt)
@@ -513,6 +515,8 @@ def sliding_window_attention_fa2(
                     max_seqlen_q=1, max_seqlen_k=L,
                     causal=True,
                 )  # [N,h,Dv]
+                if not torch.isfinite(o_pack).all():
+                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.bucket", path="varlen", L=L, N=int(N), ms=dt)
@@ -674,6 +678,8 @@ def compressed_attention_fa2(
                 if use_timing:
                     t0 = time.perf_counter()
                 Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)
+                if not torch.isfinite(Ob).all():
+                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.cmp.bucket", path="dense", L=L, N=int(N), ms=dt)
@@ -719,7 +725,10 @@ def sliding_window_attention_fa2_decode(q_t: torch.Tensor, K_win: torch.Tensor, 
     v_rows = v.reshape(N, win_len, v.shape[-1]).unsqueeze(2).expand(N, win_len, h, v.shape[-1])
     try:
         o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True)  # [N,1,h,Dv]
-        return o.squeeze(1).reshape(B, G, h, -1)
+        o = o.squeeze(1).reshape(B, G, h, -1)
+        if not torch.isfinite(o).all():
+            return attention_bgh(q_t, k, v, causal=True)
+        return o
     except Exception:
         return attention_bgh(q_t, k, v, causal=True)
 
@@ -748,6 +757,9 @@ def compressed_attention_fa2_decode(q_t: torch.Tensor, K_cmp: torch.Tensor, V_cm
     v_rows = v.reshape(N, L, v.shape[-1]).unsqueeze(2).expand(N, L, h, v.shape[-1])
     try:
         o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True)
-        return o.squeeze(1).reshape(B, G, h, -1)
+        o = o.squeeze(1).reshape(B, G, h, -1)
+        if not torch.isfinite(o).all():
+            return attention_bgh(q_t, k, v, causal=True)
+        return o
     except Exception:
         return attention_bgh(q_t, k, v, causal=True)

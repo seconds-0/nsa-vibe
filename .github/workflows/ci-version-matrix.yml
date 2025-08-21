@@ -1,0 +1,37 @@
+name: CI Version Matrix (CPU)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cpu-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install deps (CPU)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip wheel setuptools
+          pip install -r requirements-cpu.txt
+          pip install pytest
+      - name: Lint and type check
+        run: |
+          . .venv/bin/activate
+          ruff check .
+          mypy nsa || true
+      - name: Run CPU tests (subset)
+        run: |
+          . .venv/bin/activate
+          PYTHONPATH=. pytest -q nsa/tests/test_masks.py nsa/tests/test_block_math.py nsa/tests/test_equiv_small.py nsa/tests/test_group_consistency.py nsa/tests/test_decode_counters.py nsa/tests/test_packing_utils.py
+      - name: Print routing summary (for diagnostics)
+        run: |
+          . .venv/bin/activate
+          python scripts/print_routing.py || true

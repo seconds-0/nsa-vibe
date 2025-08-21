@@ -1,0 +1,27 @@
+model:
+  dim: 128
+  n_heads: 8
+  n_kv_groups: 2
+  d_k: 16
+  d_v: 16
+nsa:
+  l: 16
+  d: 8
+  l_sel: 32
+  n_sel: 8
+  w: 64
+  phi: "avg"
+runtime:
+  device: "auto"  # auto|cpu|cuda
+  precision: "fp32"  # fp32|bf16|fp16
+  use_flash: false
+  use_triton_sel: false
+train:
+  steps: 200
+  seq_len: 128
+  batch_size: 8
+  lr: 3.0e-4
+  seed: 1337
+  log_every: 20
+  out_dir: "artifacts/train_showcase"
+

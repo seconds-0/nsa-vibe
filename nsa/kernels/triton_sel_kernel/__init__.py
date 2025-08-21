@@ -13,9 +13,48 @@ def triton_sel_available() -> bool:
     return torch.cuda.is_available()
 
 
+def _normalize_ranges_tensor(ranges: torch.Tensor, S_kv: int) -> torch.Tensor:
+    """Normalize selection ranges to shape [B,S,G,n,2] and clamp to [0, S_kv].
+    Accepts extra singleton dimensions (over-nesting) and squeezes them safely.
+    If 4D is provided (missing batch), unsqueezes batch at dim 0.
+    """
+    t = ranges
+    # Squeeze any extra singleton dimensions until <= 5D
+    while t.dim() > 5:
+        squeezed = False
+        for d in range(t.dim()):
+            if t.size(d) == 1:
+                t = t.squeeze(d)
+                squeezed = True
+                break
+        if not squeezed:
+            break
+    if t.dim() == 4:
+        t = t.unsqueeze(0)
+    if t.dim() != 5:
+        raise ValueError(f"ranges must be 5D [B,S,G,n,2] after normalization, got {t.shape}")
+    if t.shape[-1] != 2:
+        raise ValueError(f"ranges last dim must be 2 (start,end), got {t.shape}")
+    return t.clamp(min=0, max=S_kv)
+
+
 _PACK_CACHE: dict[int, dict[str, torch.Tensor]] = {}
 _DEVICE_LOGGED: bool = False
-_PACK_CACHE_MAX_ENTRIES: int = 4
+_PACK_CACHE_MAX_ENTRIES: int = int(os.getenv("NSA_SEL_TRITON_PACK_CACHE_MAX_ENTRIES", "4"))
+_PACK_CACHE_MAX_MB: int = int(os.getenv("NSA_SEL_TRITON_PACK_CACHE_MAX_MB", "512"))  # soft cap
+
+
+def _pack_cache_total_bytes() -> int:
+    total = 0
+    for entry in _PACK_CACHE.values():
+        for k in ("K", "V"):
+            t = entry.get(k)
+            if t is not None:
+                total += t.numel() * t.element_size()
+        cu = entry.get("cu")
+        if cu is not None:
+            total += cu.numel() * cu.element_size()
+    return total
 
 
 def _get_pack_buffers(device: torch.device, total_L: int, D: int, Dv: int, N: int, dtype_k: torch.dtype, dtype_v: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -34,6 +73,16 @@ def _get_pack_buffers(device: torch.device, total_L: int, D: int, Dv: int, N: in
         if len(_PACK_CACHE) >= _PACK_CACHE_MAX_ENTRIES:
             _PACK_CACHE.clear()
         _PACK_CACHE[key] = {"K": Kb, "V": Vb, "cu": cu}
+        # Soft memory pressure guard: evict all if exceeding cap
+        try:
+            max_bytes = _PACK_CACHE_MAX_MB * 1024 * 1024
+            if _pack_cache_total_bytes() > max_bytes:
+                from nsa.core.debug import log
+                log("sel.triton.pack_cache_evict", reason="over_cap", cap_mb=_PACK_CACHE_MAX_MB)
+                _PACK_CACHE.clear()
+                _PACK_CACHE[key] = {"K": Kb, "V": Vb, "cu": cu}
+        except Exception:
+            pass
     else:
         Kb = _PACK_CACHE[key]["K"][:total_L]
         Vb = _PACK_CACHE[key]["V"][:total_L]
@@ -64,19 +113,116 @@ def _log_device_once() -> None:
 class _SelAttnTritonFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, ranges: torch.Tensor) -> torch.Tensor:
+        # Normalize ranges to 5D and clamp to valid [0, S_kv]
+        S_kv = K.shape[2]
+        ranges = _normalize_ranges_tensor(ranges, S_kv)
         ctx.save_for_backward(Q, K, V, ranges)
-        return selection_attention_triton(Q, K, V, ranges)
+        # Call underlying implementation but mark we’re inside wrapper to avoid re-wrapping
+        return selection_attention_triton(Q, K, V, ranges, _inside_wrapper=True)
 
     @staticmethod
     def backward(ctx, dO: torch.Tensor):
         Q, K, V, ranges = ctx.saved_tensors
-        Q_r = Q.detach().requires_grad_(True)
-        K_r = K.detach().requires_grad_(True)
-        V_r = V.detach().requires_grad_(True)
-        from nsa.core.attention_kernels import grouped_selection_attention_packed
-        O_ref = grouped_selection_attention_packed(Q_r, K_r, V_r, ranges)
-        O_ref.backward(dO)
-        return Q_r.grad, K_r.grad, V_r.grad, None
+        # Use the reference analytical backward to compute gradients directly
+        dQ, dK, dV = _selection_attention_backward(Q, K, V, ranges, dO)
+        return dQ, dK, dV, None
+
+
+def _build_row_indices_from_ranges(ranges_row: torch.Tensor, S_kv: int, device: torch.device) -> torch.Tensor:
+    # ranges_row: [n,2] (int), clamp to [0, S_kv]
+    n = ranges_row.shape[0]
+    idx_parts = []
+    for i in range(n):
+        s0 = int(ranges_row[i, 0].item())
+        e0 = int(ranges_row[i, 1].item())
+        s0 = max(0, min(s0, S_kv))
+        e0 = max(s0, min(e0, S_kv))
+        if e0 > s0:
+            idx_parts.append(torch.arange(s0, e0, device=device, dtype=torch.long))
+    if not idx_parts:
+        return torch.empty((0,), device=device, dtype=torch.long)
+    return torch.cat(idx_parts, dim=0)
+
+
+def _selection_attention_backward(
+    Q: torch.Tensor,      # [B,S,G,h,D]
+    K: torch.Tensor,      # [B,G,S_kv,D]
+    V: torch.Tensor,      # [B,G,S_kv,Dv]
+    ranges: torch.Tensor, # [B,S,G,n,2]
+    dO: torch.Tensor,     # [B,S,G,h,Dv]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Analytic grads matching packed SDPA semantics (q_len=1 causal => only first key allowed)
+    assert Q.ndim == 5 and K.ndim == 4 and V.ndim == 4 and dO.ndim == 5
+    B, S, G, h, D = Q.shape
+    Dv = V.shape[-1]
+    S_kv = K.shape[2]
+    device = Q.device
+    dQ = torch.zeros_like(Q)
+    dK = torch.zeros_like(K)
+    dV = torch.zeros_like(V)
+    rows = []
+    lengths = []
+    for b in range(B):
+        for t in range(S):
+            for g_ in range(G):
+                idx = _build_row_indices_from_ranges(ranges[b, t, g_], S_kv, device)
+                rows.append((b, t, g_, idx))
+                lengths.append(int(idx.numel()))
+    if not rows:
+        return dQ, dK, dV
+    lengths_t = torch.tensor(lengths, device=device)
+    unique_L = torch.unique(lengths_t)
+    scale = 1.0 / (D ** 0.5)
+    for Lval in unique_L.tolist():
+        L = int(Lval)
+        bucket_idx = [i for i, Lx in enumerate(lengths) if Lx == L]
+        if len(bucket_idx) == 0:
+            continue
+        if L == 0:
+            continue
+        N = len(bucket_idx)
+        Qb = torch.empty((N, h, D), device=device, dtype=Q.dtype)
+        Kb = torch.empty((N, L, D), device=device, dtype=K.dtype)
+        Vb = torch.empty((N, L, Dv), device=device, dtype=V.dtype)
+        dOb = torch.empty((N, h, Dv), device=device, dtype=dO.dtype)
+        tgt = []
+        for j, ridx in enumerate(bucket_idx):
+            b, t, g_, idx = rows[ridx]
+            Qb[j] = Q[b, t, g_]
+            Kb[j] = K[b, g_, idx]
+            Vb[j] = V[b, g_, idx]
+            dOb[j] = dO[b, t, g_]
+            tgt.append((b, t, g_, idx))
+        Qf = Qb.to(torch.float32)
+        Kf = Kb.to(torch.float32)
+        Vf = Vb.to(torch.float32)
+        dOf = dOb.to(torch.float32)
+        logits = torch.matmul(Qf, Kf.transpose(1, 2)) * scale
+        # Mirror packed path (q_len=1 causal): only first key contributes
+        if logits.shape[-1] > 1:
+            logits[..., 1:] = float("-inf")
+        P = torch.softmax(logits, dim=-1)
+        dVb = torch.einsum('nhl,nhv->nlv', P, dOf)
+        dP = torch.matmul(dOf, Vf.transpose(1, 2))
+        dp_dot_p = (dP * P).sum(dim=-1, keepdim=True)
+        dS = (dP - dp_dot_p) * P
+        dQb = torch.matmul(dS, Kf) * scale
+        dKb = torch.einsum('nhl,nhd->nld', dS, Qf) * scale
+        for j, (b, t, g_, idx) in enumerate(tgt):
+            dQ[b, t, g_] = dQ[b, t, g_] + dQb[j].to(dQ.dtype)
+            dV[b, g_, idx] = dV[b, g_, idx] + dVb[j].to(dV.dtype)
+            dK[b, g_, idx] = dK[b, g_, idx] + dKb[j].to(dK.dtype)
+    return dQ, dK, dV
+
+
+def selection_attention_backward_reference(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    ranges: torch.Tensor,
+    dO: torch.Tensor,
+):
+    return _selection_attention_backward(Q, K, V, ranges, dO)
 
 
 def selection_attention_triton(
@@ -86,9 +232,17 @@ def selection_attention_triton(
     ranges: torch.Tensor, # [B,S,G,n,2]
     *,
     use_packed_fallback: bool = True,
+    _inside_wrapper: bool = False,
 ) -> torch.Tensor:
+    # If gradients are enabled and allowed, route through autograd wrapper (avoid recursion)
+    if (not _inside_wrapper) and torch.is_grad_enabled() and (Q.requires_grad or K.requires_grad or V.requires_grad):
+        if _env_true("NSA_SEL_TRITON_ALLOW_GRAD", False):
+            return _SelAttnTritonFn.apply(Q, K, V, ranges)
+        else:
+            from nsa.core.attention_kernels import grouped_selection_attention_packed
+            return grouped_selection_attention_packed(Q, K, V, ranges)
     S_kv = K.shape[2]
-    ranges = ranges.clamp(min=0, max=S_kv)
+    ranges = _normalize_ranges_tensor(ranges, S_kv)
     if not (_env_true("NSA_USE_TRITON_SEL", False) and triton_sel_available()):
         from nsa.core.attention_kernels import (
             grouped_selection_attention_packed,
@@ -104,12 +258,7 @@ def selection_attention_triton(
         assert K.is_contiguous(), "K must be contiguous"
         assert V.is_contiguous(), "V must be contiguous"
 
-    if torch.is_grad_enabled() and (Q.requires_grad or K.requires_grad or V.requires_grad):
-        if _env_true("NSA_SEL_TRITON_ALLOW_GRAD", False):
-            return _SelAttnTritonFn.apply(Q, K, V, ranges)
-        else:
-            from nsa.core.attention_kernels import grouped_selection_attention_packed
-            return grouped_selection_attention_packed(Q, K, V, ranges)
+    # Past this point, either no grad or we're already inside wrapper
     allowed_dtypes = {torch.float16, torch.bfloat16}
     if Q.dtype not in allowed_dtypes or K.dtype not in allowed_dtypes or V.dtype not in allowed_dtypes:
         from nsa.core.attention_kernels import grouped_selection_attention_packed
@@ -175,8 +324,8 @@ def selection_attention_triton(
     O = torch.zeros((B, S, G, h, Dv), device=Q.device, dtype=V.dtype)
     try:
         from .sel_fwd import sel_attn_fwd_dense, sel_attn_fwd_varlen
-    force = os.getenv("NSA_SEL_TRITON_FORCE_PATH", "auto").lower()
-    for L_i, items in buckets.items():
+        force = os.getenv("NSA_SEL_TRITON_FORCE_PATH", "auto").lower()
+        for L_i, items in buckets.items():
             if L_i == 0:
                 continue
             N = len(items)
