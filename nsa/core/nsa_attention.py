@@ -125,12 +125,18 @@ class NSAAttention(nn.Module):
         self.phi_type = (phi or "avg").lower()
         # RoPE scaling and prefill tiling for long-context demos (env-overridable)
         try:
-            self.rope_scale = float(os.getenv("NSA_ROPE_SCALE", "1.0"))
-        except Exception:
+            rs = float(os.getenv("NSA_ROPE_SCALE", "1.0"))
+            if not (rs > 0.0) or rs != rs:  # require positive finite
+                rs = 1.0
+            self.rope_scale = rs
+        except ValueError:
             self.rope_scale = 1.0
         try:
-            self.prefill_tile = int(os.getenv("NSA_PREFILL_TILE", "0"))
-        except Exception:
+            pt = int(os.getenv("NSA_PREFILL_TILE", "0"))
+            if pt < 0:
+                pt = 0
+            self.prefill_tile = pt
+        except ValueError:
             self.prefill_tile = 0
         # Projections
         self.W_Q = nn.Linear(dim, n_heads * d_k, bias=False)
@@ -197,11 +203,7 @@ class NSAAttention(nn.Module):
         if prefill:
             # Optional: route prefill via single-token decode steps to support very long contexts safely.
             if getattr(self, "prefill_tile", 0) and self.prefill_tile > 0:
-                outs = []
-                for t in range(S):
-                    out_t, kv = self.forward(x[:, t : t + 1], kv, prefill=False)
-                    outs.append(out_t)
-                return torch.cat(outs, dim=1), kv
+                return self._forward_prefill_via_decode(x, kv)
             use_batched = os.getenv("NSA_PREFILL_BATCHED", "0").lower() in ("1", "true", "yes")
             if use_batched:
                 return self._forward_prefill_batched(x, kv)
@@ -357,8 +359,8 @@ class NSAAttention(nn.Module):
                         mean_dist=float(dist.float().mean().item()) if dist.numel() else 0.0,
                         max_dist=int(dist.max().item()) if dist.numel() else 0,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    log("warn.decode.select_log_fail", error=str(e))
                 Q_t = Q[:, t]
                 K_sel_t = kv.K_sel
                 V_sel_t = kv.V_sel
@@ -426,8 +428,8 @@ class NSAAttention(nn.Module):
                         if gates.dim() >= 2
                         else gates.std().item(),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    log("warn.decode.gate_log_fail", error=str(e))
                 w_cmp = gates[..., 0:1].unsqueeze(-1)
                 w_sel = gates[..., 1:2].unsqueeze(-1)
                 w_win = gates[..., 2:3].unsqueeze(-1)
@@ -650,6 +652,18 @@ class NSAAttention(nn.Module):
                 out_mae = (out - out_seq).abs().mean().item()
                 print(f"NSA-DBG out_mae={out_mae:.6e}")
         return out, kv
+
+    def _forward_prefill_via_decode(self, x: torch.Tensor, kv: NSA_KV) -> tuple[torch.Tensor, NSA_KV]:
+        """Prefill by stepping decode one token at a time.
+
+        This path avoids recursion back into prefill and guarantees progress.
+        """
+        B, S, _ = x.shape
+        outs = []
+        for t in range(S):
+            out_t, kv = self.forward(x[:, t : t + 1], kv, prefill=False)
+            outs.append(out_t)
+        return torch.cat(outs, dim=1), kv
 
     def _forward_prefill_sequential(
         self, x: torch.Tensor, kv: NSA_KV

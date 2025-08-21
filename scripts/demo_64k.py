@@ -75,6 +75,10 @@ def main():
     ).to(device)
 
     # Synthetic input (replace with tokenized real text for a fuller demo)
+    # Memory estimate and warning
+    bytes_est = args.B * args.S * args.dim * 4  # float32
+    if bytes_est > 3 * (1024**3):  # >3GB for input alone
+        print(f"[warn] Large allocation: ~{bytes_est/1024**3:.1f} GB for x_ctx; consider reducing B/S/dim")
     x_ctx = torch.randn(args.B, args.S, args.dim, device=device)
     meta = build_block_meta(args.S + args.w, args.l, args.d, args.l_sel, n_sel=args.n_sel, w=args.w)
     kv = create_empty_kv(args.B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, meta)
@@ -98,4 +102,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
