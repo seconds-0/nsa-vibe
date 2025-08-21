@@ -40,7 +40,7 @@ def _normalize_ranges_tensor(ranges: torch.Tensor, S_kv: int) -> torch.Tensor:
 
 _PACK_CACHE: dict[int, dict[str, torch.Tensor]] = {}
 _DEVICE_LOGGED: bool = False
-_PACK_CACHE_MAX_ENTRIES: int = 4
+_PACK_CACHE_MAX_ENTRIES: int = int(os.getenv("NSA_SEL_TRITON_PACK_CACHE_MAX_ENTRIES", "4"))
 _PACK_CACHE_MAX_MB: int = int(os.getenv("NSA_SEL_TRITON_PACK_CACHE_MAX_MB", "512"))  # soft cap
 
 
