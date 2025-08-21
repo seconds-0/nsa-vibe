@@ -5,6 +5,7 @@ triton>=2.3,<3.1 ; platform_system == "Linux"
 # Common tools
 numpy
 hydra-core
+omegaconf
 pydantic
 pytest
 hypothesis
