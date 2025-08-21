@@ -49,10 +49,13 @@ PY
 import time; print(time.time())
 PY
 )
-  dur=$(python - <<PY
-print(f"{float(${end}) - float(${start}):.2f}s")
-PY
-)
+  # Use safe calculation with argument passing
+  dur=$(python3 -c "
+import sys
+start_time = float('$start')
+end_time = float('$end')
+print(f'{end_time - start_time:.2f}s')
+")
   if [[ $rc -eq 0 ]]; then echo "  ${label}: PASS (${dur})"; else echo "  ${label}: FAIL"; fi
 }
 
@@ -73,6 +76,13 @@ echo
 echo "decode_bench:"
 TMP=$(mktemp /tmp/nsa_bench.XXXXXX)
 CSV="${TMP}.csv"
+
+# Set up cleanup trap
+cleanup() {
+    rm -f "$TMP" "$CSV"
+}
+trap cleanup EXIT
+
 PYTHONPATH=. python bench/bench_decode.py \
   --B 1 --dim 32 --heads 2 --groups 1 --dk 16 --dv 16 \
   --l 8 --d 4 --l_sel 8 --n_sel 4 --w 16 \
