@@ -8,6 +8,7 @@ hydra-core
 pydantic
 pytest
 hypothesis
+tomli
 ruff
 mypy
 
