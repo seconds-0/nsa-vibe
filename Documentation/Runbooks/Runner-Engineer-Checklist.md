@@ -3,14 +3,14 @@ Runner Engineer Checklist
 Scope: Execute GPU validation and benches while devs iterate locally. This checklist consolidates exact commands, env toggles, and deliverables.
 
 Environment
-- Python: 3.10+
+- Python: 3.11+ (3.12 on GPU pods)
 - OS: Linux with CUDA (nvidia-smi works)
 - GPU: RTX 4090/A100/H100
 - Versions: torch 2.3.*, triton 2.3.* (flash-attn 2.x on Linux)
 
 Setup
 - git clone <repo> && cd nsa-vibe
-- python3.10 -m venv .venv && . .venv/bin/activate
+- python3.11 -m venv .venv && . .venv/bin/activate
 - pip install -U pip wheel setuptools
 - Option A (Torch 2.3 baseline, CPU-safe): pip install -r requirements-cpu.txt
 - Option B (Torch 2.4 wheels, CUDA 12.1 Linux):

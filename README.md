@@ -11,7 +11,7 @@ Highlights
 ## Quick Start
 
 Setup (CPU or GPU)
-- Python 3.10 recommended
+- Python 3.11 recommended (3.12 on CUDA GPU pods)
 - CPU: `python -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements-cpu.txt`
 - GPU (CUDA 12.1 + Torch 2.4): `python -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements-gpu-cu121-torch24.txt`
 

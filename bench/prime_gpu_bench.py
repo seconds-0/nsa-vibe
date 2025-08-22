@@ -419,7 +419,7 @@ class PrimeIntellectBenchmark:
             # Clone repository
             "git clone https://github.com/seconds-0/nsa-vibe.git /workspace/nsa-vibe",
             # Setup Python environment
-            "cd /workspace/nsa-vibe && /root/.cargo/bin/uv venv -p 3.10 .venv",
+            "cd /workspace/nsa-vibe && /root/.cargo/bin/uv venv -p 3.11 .venv",
             "cd /workspace/nsa-vibe && /root/.cargo/bin/uv pip sync -r requirements.txt",
             # Try to install flash-attn
             "cd /workspace/nsa-vibe && ./.venv/bin/pip install flash-attn --no-build-isolation || true",

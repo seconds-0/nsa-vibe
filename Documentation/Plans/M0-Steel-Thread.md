@@ -128,7 +128,7 @@ Deliver a working NSA module that can replace full attention in a LLaMA-style bl
 ---
 
 ### Execution Commands (M0)
-- Env: `uv venv -p 3.10 .venv && uv pip sync -r requirements.txt`
+- Env: `uv venv -p 3.11 .venv && uv pip sync -r requirements.txt`
 - Fast tests: `uv run -q pytest`
 - Counters (long-context smoke): `uv run -q pytest -k decode_counters`
 - Optional demo: `uv run python cli/demo_infer.py --config configs/base.yaml`

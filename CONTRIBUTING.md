@@ -3,7 +3,7 @@ Contributing to NSA‑Vibe
 Thank you for your interest in contributing! This repo aims to be small, clear, and reproducible.
 
 Environment
-- Python 3.10
+- Python 3.11+ (3.12 on GPU pods)
 - Create venv: `python -m venv .venv && . .venv/bin/activate`
 - CPU dev: `pip install -r requirements-cpu.txt`
 - GPU dev (CUDA 12.1 + Torch 2.4): `pip install -r requirements-gpu-cu121-torch24.txt`
@@ -35,4 +35,3 @@ Style & scope
 - Avoid introducing Triton in M0 paths; follow PRD/ADR for defaults and flags.
 
 Thank you for helping improve NSA‑Vibe!
-

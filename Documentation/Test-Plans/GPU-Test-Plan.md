@@ -8,7 +8,7 @@ Scope
 Target Environment
 - OS: Linux with CUDA (e.g., Ubuntu 22.04).
 - GPU: Any CUDA‑capable device. Notes for RTX 4090 (SM 8.9) below.
-- Python: 3.10+ recommended.
+- Python: 3.11+ recommended (3.12 on GPU pods).
 - Toolchain: gcc/g++, build‑essentials, recent NVIDIA driver.
 
 Prerequisites
@@ -34,7 +34,7 @@ Repo Setup
    - `git rev-parse --short HEAD`  # record commit
 
 2) Create venv and install deps
-   - `python3.10 -m venv .venv && . .venv/bin/activate`
+   - `python3.11 -m venv .venv && . .venv/bin/activate`
    - `pip install -U pip wheel setuptools`
    - Option A (Torch 2.3 baseline, CPU-safe): `pip install -r requirements-cpu.txt`
    - Option B (Torch 2.4 wheels, CUDA 12.1 Linux):

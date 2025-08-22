@@ -20,7 +20,7 @@ if [ ! -d .venv ]; then
   . .venv/bin/activate
   pip install -U pip wheel setuptools
   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-  pip install triton packaging ninja flash-attn --no-build-isolation
+  pip install triton packaging ninja
   pip install transformers datasets tensorboard
   pip install numpy hydra-core omegaconf pydantic pytest hypothesis ruff mypy
   echo "🐍 Environment created successfully"

@@ -487,13 +487,14 @@ def main():
                         xv = torch.tensor(sub, dtype=torch.long, device=device)
                     else:
                         xv = torch.tensor(batch, dtype=torch.long, device=device)
-                    yv = xv.clone()
+                    yv = xv[:, 1:].contiguous()
                 else:
                     xv = torch.randint(low=0, high=vocab, size=(B_local, S), device=device)
-                    yv = xv.clone()
+                    yv = xv[:, 1:].contiguous()
                 with torch.no_grad():
                     out = model(xv)
-                    lv = loss_fn(out.view(B_local * S, -1), yv.view(B_local * S))
+                    out_trim = out[:, :-1, :].contiguous()
+                    lv = loss_fn(out_trim.view(B_local * (S - 1), -1), yv.view(B_local * (S - 1)))
                 val_losses.append(float(lv.item()))
             val_loss = sum(val_losses) / max(1, len(val_losses))
             if ddp and world_size > 1:
@@ -526,13 +527,13 @@ def main():
                     x = torch.tensor(sub, dtype=torch.long, device=device)
                 else:
                     x = torch.tensor(batch, dtype=torch.long, device=device)
-                y = x.clone()
+                y = x[:, 1:].contiguous()
             except StopIteration:
                 x = torch.randint(low=0, high=vocab, size=(B_local, S), device=device)
-                y = x.clone()
+                y = x[:, 1:].contiguous()
         else:
             x = torch.randint(low=0, high=vocab, size=(B_local, S), device=device)
-            y = x.clone()
+            y = x[:, 1:].contiguous()
 
         # CRITICAL: Validate input tensor shape before model forward pass
         expected_shape = (B_local, S)
@@ -543,7 +544,8 @@ def main():
             print(f"[debug] step {step}: input shape {x.shape}, seq_len {S}", flush=True)
 
         logits = model(x)
-        loss = loss_fn(logits.view(B_local * S, vocab), y.view(B_local * S)) / max(1, accum)
+        logits_trim = logits[:, :-1, :].contiguous()
+        loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1))) / max(1, accum)
 
         loss.backward()
         grad_accum += 1
@@ -555,8 +557,8 @@ def main():
             grad_accum = 0
 
         losses.append(loss.detach().float().item())
-        # Throughput accounting (global tokens)
-        tokens_total += (B_local * S)
+        # Throughput accounting (effective tokens for next-token loss = S-1)
+        tokens_total += (B_local * max(0, S - 1))
         if step % int(cfg.train.log_every) == 0 or step == 1:
             cur_loss = float(loss.item() * max(1, accum))
             log_loss = cur_loss
@@ -570,11 +572,31 @@ def main():
             toks_per_s_local = toks / dt
             toks_per_s_global = toks_per_s_local * (world_size if ddp else 1)
             if rank == 0:
+                # Optional grad-norm logging (enable with NSA_LOG_GRAD_NORM=1)
+                gn_val = None
+                try:
+                    if os.getenv("NSA_LOG_GRAD_NORM", "0").lower() in ("1", "true", "yes"):
+                        total = 0.0
+                        for p in (model.module.parameters() if hasattr(model, "module") else model.parameters()):
+                            if p.grad is not None:
+                                # use detach to avoid autograd overhead
+                                g = p.grad.detach()
+                                total += float(g.norm().item())
+                        gn_val = total
+                except Exception:
+                    gn_val = None
                 print(
-                    f"step {step:04d} | loss {log_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e} | toks/s {toks_per_s_global:.0f}",
+                    (
+                        f"step {step:04d} | loss {log_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e} | "
+                        f"toks/s {toks_per_s_global:.0f}"
+                        + (f" | grad_norm {gn_val:.2f}" if gn_val is not None else "")
+                    ),
                     flush=True,
                 )
-                hb.write(step, "progress", {"loss": log_loss, "toks_per_s": toks_per_s_global})
+                hb_extra = {"loss": log_loss, "toks_per_s": toks_per_s_global}
+                if gn_val is not None:
+                    hb_extra["grad_norm"] = gn_val
+                hb.write(step, "progress", hb_extra)
                 (Path(cfg.train.out_dir) / "training.csv").parent.mkdir(parents=True, exist_ok=True)
                 with open(Path(cfg.train.out_dir) / "training.csv", "a") as tf:
                     tf.write(f"{step},{log_loss:.6f},{scheduler.get_last_lr()[0]:.6e},{toks_per_s_global:.0f}\n")

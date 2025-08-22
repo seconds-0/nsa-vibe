@@ -9,7 +9,15 @@ fi
 cd nsa-vibe
 git fetch origin && git checkout test-plan/m7-training-readiness && git pull origin test-plan/m7-training-readiness
 if [ ! -d .venv ]; then
-  bash scripts/prime_bootstrap.sh
+  echo "🔧 Creating Python environment..."
+  python3 -m venv .venv
+  . .venv/bin/activate
+  pip install -U pip wheel setuptools
+  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+  pip install triton packaging ninja
+  pip install transformers datasets tensorboard
+  pip install numpy hydra-core omegaconf pydantic pytest hypothesis ruff mypy
+  echo "🐍 Environment created successfully"
 fi
 echo "🧪 Testing data loader..."
 PYTHONPATH=. .venv/bin/python scripts/datasets/check_fwe_stream.py

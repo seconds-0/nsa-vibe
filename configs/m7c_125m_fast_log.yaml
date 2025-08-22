@@ -1,0 +1,36 @@
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_groups: 2
+  d_k: 64
+  d_v: 64
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: "avg"
+data:
+  tokenizer: "gpt2"
+runtime:
+  device: "cuda"
+  precision: "fp32"  # Avoid dtype issues
+  use_flash: false
+  use_triton_sel: false
+train:
+  steps: 50000        # LONG training (many hours)
+  seq_len: 1024       # Smaller sequence length to fit in GPU memory
+  batch_size: 1       # Smaller batch size
+  lr: 2.0e-4
+  lr_schedule: "cosine"
+  warmup_steps: 2000
+  weight_decay: 0.01
+  grad_clip: 1.0
+  accumulate_grad_batches: 16  # Higher accumulation to maintain effective batch size
+  log_every: 5        # Log every 5 steps (faster updates!)
+  eval_every: 500
+  save_every: 5000
+  seed: 1337
+  out_dir: "artifacts/m7c_125m"

@@ -21,7 +21,7 @@ Closeout for M0–M6: decode bench fix, routing/doc polish, runner one-shot, FA�
 - Docs: Start-Here, FA‑2 install guide, routing, runner checklist
 
 ## Validation
-- CPU tests green (3.10/3.11)
+- CPU tests green (3.11/3.12)
 - GPU sanity via `scripts/gpu_sanity.py`
 - Triton FWD/BWD parity on 4090 with force flags
 - Decode bench CSV + summary produced on GPU
@@ -41,4 +41,3 @@ else
   echo "Title: $TITLE" >&2
   echo "Body file prepared at $BODY_FILE" >&2
 fi
-
