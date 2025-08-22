@@ -810,16 +810,28 @@ class NSAAttention(nn.Module):
         B, G, h, Dk = Q.shape
         Dv = V.shape[-1]
         outs = []
+        S_kv = K.shape[2]
         for b in range(B):
             row = []
             for g in range(G):
-                r = ranges[b, g]  # [n,2]
-                idxs = []
-                for s, e in r.tolist():
-                    if e > s:
-                        idxs.append(torch.arange(s, e, device=K.device))
-                if idxs:
-                    idx = torch.cat(idxs, dim=0)
+                # Clamp and validate ranges to avoid invalid or oversized indices
+                r = ranges[b, g].to(dtype=torch.int64, device=K.device)  # [n,2]
+                if r.numel() == 0:
+                    valid_pairs = torch.empty((0, 2), dtype=torch.int64, device=K.device)
+                else:
+                    s = r[:, 0].clamp_(0, S_kv)
+                    e = r[:, 1].clamp_(0, S_kv)
+                    valid = e > s
+                    valid_pairs = torch.stack([s[valid], e[valid]], dim=-1)
+                # Build a boolean mask over S_kv to gather selected tokens (limits worst-case size)
+                if valid_pairs.numel() > 0:
+                    m = torch.zeros((S_kv,), dtype=torch.bool, device=K.device)
+                    for s_e in valid_pairs:
+                        s_i = int(s_e[0].item())
+                        e_i = int(s_e[1].item())
+                        if e_i > s_i:
+                            m[s_i:e_i] = True
+                    idx = m.nonzero(as_tuple=False).squeeze(-1)
                 else:
                     idx = torch.empty((0,), dtype=torch.int64, device=K.device)
                 k = K[b, g, idx] if idx.numel() > 0 else torch.zeros((1, Dk), device=K.device)

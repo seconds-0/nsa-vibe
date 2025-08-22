@@ -125,6 +125,72 @@ PYTHONPATH=. uv run -q python bench/bench_sel_cuda.py --N 1024 --H 8 --D 128 --D
 uv run python cli/demo_infer.py --config configs/base.yaml
 ```
 
+## M7 Training Debug Runbook
+
+These commands help diagnose training hangs and dataset streaming issues introduced in M7C.
+
+### Dependencies
+```bash
+pip install -U datasets transformers  # transformers only if tokenizer=gpt2
+```
+
+### Unbuffered Training with Diagnostics
+```bash
+export CONFIG=configs/m7c_125m_fast_log.yaml
+export PYTHONUNBUFFERED=1
+
+# Optional: tune loader verbosity and timeout
+#   --fwe-report-docs 500     prints loader progress every 500 docs
+#   --loader-timeout 120      waits up to 120s for first batch
+#   --synthetic-on-fail       falls back to synthetic data on loader stall
+
+python -u scripts/train_showcase.py \
+  --dataset fineweb_edu --ddp 0 \
+  --fwe-report-docs 500 --loader-timeout 120 \
+  2>&1 | tee training.log
+
+# Artifacts written to: artifacts/train_showcase/
+# - env.json                            environment snapshot
+# - heartbeat_rank0.jsonl               JSONL with loss/toks_per_s/GPU mem
+# - stackdump_*.txt                     on SIGUSR1 or SIGTERM
+# - watchdog_stackdump_*.txt            on >180s heartbeat stall
+```
+
+### Trigger a Live Stack Dump
+```bash
+kill -USR1 <TRAINING_PID>
+# Inspect artifacts/train_showcase/stackdump_*.txt
+```
+
+### Loader-Only Smoke Test
+```bash
+# Byte tokenizer
+python scripts/automation/fwe_smoke.py --seq-len 1024 --batch 1 --timeout 60 --report-docs 500 --tokenizer byte
+
+# GPT-2 tokenizer
+python scripts/automation/fwe_smoke.py --seq-len 1024 --batch 1 --timeout 60 --report-docs 500 --tokenizer gpt2
+```
+
+### HF Streaming Sanity (direct)
+```bash
+python - <<'PY'
+from datasets import load_dataset
+s=load_dataset('HuggingFaceFW/fineweb-edu', split='train', streaming=True)
+print('ok, first text head:', next(iter(s))['text'][:80])
+PY
+```
+
+### Local Fallback (offline JSONL/Text)
+```bash
+# Prepare /data/local.jsonl with {"text": "..."} per line or a .txt file with raw lines
+python -u scripts/train_showcase.py --dataset fineweb_edu_local --local-path /data/local.jsonl --ddp 0
+```
+
+### Synthetic Sanity (rule out training loop issues)
+```bash
+python -u scripts/train_showcase.py --dataset synthetic --ddp 0
+```
+
 ## Architecture & Code Structure
 
 ### Core Components

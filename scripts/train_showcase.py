@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import os
-import argparse
+import signal
+import sys
+import threading
 import time
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from omegaconf import OmegaConf
+
 try:
     from torch.utils.tensorboard import SummaryWriter  # type: ignore
 except Exception:
@@ -81,16 +87,117 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+def _dump_env_info(out_dir: Path, extra: dict | None = None) -> None:
+    try:
+        info = {
+            "time": datetime.utcnow().isoformat() + "Z",
+            "python": sys.version,
+            "torch": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count(),
+            "env": {k: v for k, v in os.environ.items() if k.startswith("NSA_") or k in ("WORLD_SIZE", "RANK", "LOCAL_RANK", "CONFIG")},
+        }
+        if torch.cuda.is_available():
+            try:
+                info["gpu_name"] = torch.cuda.get_device_name(0)
+                info["cuda_capability"] = torch.cuda.get_device_capability(0)
+            except Exception:
+                pass
+        if extra:
+            info.update(extra)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "env.json", "w") as f:
+            json.dump(info, f, indent=2)
+    except Exception:
+        pass
+
+
+class Heartbeat:
+    def __init__(self, out_dir: Path, rank: int) -> None:
+        self.out_dir = out_dir
+        self.rank = rank
+        self.path = out_dir / f"heartbeat_rank{rank}.jsonl"
+        self._lock = threading.Lock()
+        self._last_ts = time.time()
+
+    def write(self, step: int, msg: str, extra: dict | None = None) -> None:
+        payload = {
+            "ts": time.time(),
+            "iso": datetime.utcnow().isoformat() + "Z",
+            "pid": os.getpid(),
+            "rank": self.rank,
+            "step": step,
+            "msg": msg,
+        }
+        if torch.cuda.is_available():
+            try:
+                payload.update(
+                    {
+                        "gpu_mem_alloc": int(torch.cuda.memory_allocated() // (1024 * 1024)),
+                        "gpu_mem_reserved": int(torch.cuda.memory_reserved() // (1024 * 1024)),
+                    }
+                )
+            except Exception:
+                pass
+        if extra:
+            payload.update(extra)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            with open(self.path, "a") as f:
+                f.write(json.dumps(payload) + "\n")
+            self._last_ts = payload["ts"]
+
+    @property
+    def last_ts(self) -> float:
+        with self._lock:
+            return self._last_ts
+
+
+def _register_signal_dump(out_dir: Path) -> None:
+    def dump_stack(signum, frame):
+        try:
+            dump_path = out_dir / f"stackdump_{int(time.time())}.txt"
+            with open(dump_path, "w") as f:
+                f.write(f"Signal {signum} at {datetime.utcnow().isoformat()}Z\n")
+                for th in threading.enumerate():
+                    f.write(f"\n--- Thread: {th.name} ({getattr(th, 'ident', None)}) ---\n")
+                    stack = sys._current_frames().get(getattr(th, "ident", None))
+                    if stack:
+                        f.write("".join(traceback.format_stack(stack)))
+        except Exception:
+            pass
+    try:
+        signal.signal(signal.SIGUSR1, dump_stack)
+        signal.signal(signal.SIGTERM, dump_stack)
+    except Exception:
+        # Signals may not be supported on some platforms
+        pass
+
+
 def main():
     cli = argparse.ArgumentParser()
-    cli.add_argument("--dataset", type=str, default="synthetic", choices=["synthetic", "fineweb_edu"], help="Training data source")
+    cli.add_argument(
+        "--dataset",
+        type=str,
+        default="synthetic",
+        choices=["synthetic", "fineweb_edu", "fineweb_edu_local"],
+        help="Training data source",
+    )
     cli.add_argument("--save", type=str, default="artifacts/train_showcase/model.pt", help="Path to save final weights+config (torch.save)")
     cli.add_argument("--ddp", type=int, default=-1, help="Force DDP (1) or single process (0); -1=auto by WORLD_SIZE")
     cli.add_argument("--resume", type=str, default="", help="Checkpoint path to resume from (optional)")
+    cli.add_argument("--loader-timeout", type=float, default=60.0, help="Timeout seconds for initial dataset batch fetch")
+    cli.add_argument("--fwe-report-docs", type=int, default=1000, help="FineWeb‑Edu progress print frequency (docs)")
+    cli.add_argument("--synthetic-on-fail", action="store_true", help="Fallback to synthetic if FineWeb‑Edu stalls")
+    cli.add_argument("--local-path", type=str, default="", help="Path for --dataset fineweb_edu_local (text or JSONL)")
     cli_args, _ = cli.parse_known_args()
     cfg_path = os.environ.get("CONFIG", "configs/train_showcase.yaml")
+    print(f"[boot] loading config {cfg_path}", flush=True)
     cfg = OmegaConf.load(cfg_path)
     os.makedirs(cfg.train.out_dir, exist_ok=True)
+    out_dir = Path(cfg.train.out_dir)
+    _dump_env_info(out_dir)
+    _register_signal_dump(out_dir)
 
     set_seed(int(cfg.train.seed))
 
@@ -130,7 +237,7 @@ def main():
             use_bpe = True
         except Exception as e:
             raise RuntimeError("GPT-2 tokenizer requested but transformers not available. Install transformers or switch tokenizer to 'byte'.") from e
-    print(f"[train] dataset={cli_args.dataset} tokenizer={'gpt2' if use_bpe else 'byte'}")
+    print(f"[train] dataset={cli_args.dataset} tokenizer={'gpt2' if use_bpe else 'byte'}", flush=True)
 
     model = TinyLM(
         vocab=vocab,
@@ -157,7 +264,7 @@ def main():
             tb_dir = Path(cfg.train.out_dir) / "tb"
             tb_dir.mkdir(parents=True, exist_ok=True)
             tb_writer = SummaryWriter(log_dir=str(tb_dir))  # type: ignore
-            print(f"[train] tensorboard logdir: {tb_dir}")
+            print(f"[train] tensorboard logdir: {tb_dir}", flush=True)
         except Exception as e:
             print(f"[train] tensorboard init failed: {e}")
     if ddp and world_size > 1:
@@ -187,12 +294,17 @@ def main():
         import math
         progress = float(step - warmup) / float(max(1, total_steps - warmup))
         progress = min(1.0, max(0.0, progress))
-        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
+        # Correct cosine schedule without floor
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
     scheduler = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     loss_fn = nn.CrossEntropyLoss()
 
     # Optional dataset wiring
     use_fwe = (str(cli_args.dataset).lower() == "fineweb_edu")
+    use_fwe_local = (str(cli_args.dataset).lower() == "fineweb_edu_local")
+    hb = Heartbeat(out_dir, rank)
+    hb.write(0, "boot", {"phase": "start"})
+
     if use_fwe:
         try:
             from scripts.datasets.fineweb_edu_loader import iter_fineweb_edu_batches  # type: ignore
@@ -202,11 +314,19 @@ def main():
             from transformers import GPT2Tokenizer  # type: ignore
             tok = GPT2Tokenizer.from_pretrained("gpt2")
             def encode_bytes(s: str):
-                return tok.encode(s)
+                # CRITICAL: Truncate at tokenizer level to prevent warnings and ensure seq_len compliance
+                tokens = tok.encode(s)
+                if len(tokens) > S - 1:  # Leave room for potential special tokens
+                    tokens = tokens[:S-1]
+                return tokens
         else:
             def encode_bytes(s: str):
-                return list(s.encode("utf-8", errors="ignore"))
-        print("[train] streaming FineWeb‑Edu via datasets (sharded per rank)")
+                tokens = list(s.encode("utf-8", errors="ignore"))
+                if len(tokens) > S - 1:
+                    tokens = tokens[:S-1]
+                return tokens
+        os.environ["NSA_FWE_REPORT_DOCS"] = str(int(cli_args.fwe_report_docs))
+        print("[train] streaming FineWeb‑Edu via datasets (sharded per rank)", flush=True)
         if world_size > 1:
             fwe_train = iter_fineweb_edu_batches(
                 encode=encode_bytes, seq_len=S, batch_size=B_global, split_mod=world_size, split_rem=rank
@@ -217,6 +337,97 @@ def main():
         else:
             fwe_train = iter_fineweb_edu_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, split_mod=100, split_rem=1)
             fwe_val = iter_fineweb_edu_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, split_mod=100, split_rem=0)
+
+        # Smoke test: try to fetch one batch with timeout to detect stalls early
+        def _pull_one_batch(result_box: dict) -> None:
+            try:
+                t0 = time.time()
+                result_box["batch"] = next(fwe_train)
+                result_box["dt"] = time.time() - t0
+                result_box["ok"] = True
+            except StopIteration:
+                result_box["ok"] = False
+                result_box["err"] = "StopIteration"
+            except Exception as e:
+                result_box["ok"] = False
+                result_box["err"] = f"{type(e).__name__}: {e}"
+
+        box: dict = {}
+        t = threading.Thread(target=_pull_one_batch, args=(box,), daemon=True)
+        t.start()
+        t.join(timeout=float(cli_args.loader_timeout))
+        if not box.get("ok", False):
+            msg = box.get("err", f"timeout waiting for first FineWeb‑Edu batch (≥{cli_args.loader_timeout:.0f}s)")
+            print(f"[error] FineWeb‑Edu loader failed: {msg}", flush=True)
+            hb.write(0, "fineweb_loader_error", {"error": msg})
+            if cli_args.synthetic_on_fail:
+                print("[warn] Falling back to synthetic dataset due to loader failure", flush=True)
+                use_fwe = False
+            else:
+                raise RuntimeError(f"FineWeb‑Edu loader stall: {msg}")
+        else:
+            print(f"[train] first FineWeb‑Edu batch fetched in {box.get('dt', 0.0):.2f}s", flush=True)
+            hb.write(0, "fineweb_loader_ready", {"dt": box.get("dt", 0.0)})
+            # Put back the consumed batch for training by prepending
+            # Re-create an iterator that yields the consumed batch first, then the original iterator
+            first_batch = box["batch"]
+            def _chain_batches(first, iterator):
+                yield first
+                yield from iterator
+            fwe_train = _chain_batches(first_batch, fwe_train)
+
+    elif use_fwe_local:
+        pth = cli_args.local_path
+        if not pth:
+            raise RuntimeError("--local-path is required when --dataset fineweb_edu_local")
+        print(f"[train] reading local dataset: {pth}", flush=True)
+        # Build encoder (same semantics as above)
+        if use_bpe:
+            from transformers import GPT2Tokenizer  # type: ignore
+            tok = GPT2Tokenizer.from_pretrained("gpt2")
+            def encode_bytes(s: str):
+                tokens = tok.encode(s)
+                if len(tokens) > S - 1:
+                    tokens = tokens[:S-1]
+                return tokens
+        else:
+            def encode_bytes(s: str):
+                tokens = list(s.encode("utf-8", errors="ignore"))
+                if len(tokens) > S - 1:
+                    tokens = tokens[:S-1]
+                return tokens
+        # Simple local iterator (text or JSONL with {'text': ...})
+        def _iter_local_batches(path: str, batch_size: int):
+            import json as _json
+            buf: list[int] = []
+            batch: list[list[int]] = []
+            is_jsonl = path.endswith(".jsonl")
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    text = line
+                    if is_jsonl:
+                        try:
+                            obj = _json.loads(line)
+                            if isinstance(obj, dict) and isinstance(obj.get("text"), str):
+                                text = obj["text"]
+                        except Exception:
+                            pass
+                    toks = encode_bytes(text)
+                    if not toks:
+                        continue
+                    buf.extend(toks)
+                    while len(buf) >= S:
+                        seq = buf[:S]
+                        buf = buf[S:]
+                        batch.append(seq)
+                        if len(batch) >= batch_size:
+                            yield batch[:batch_size]
+                            batch = batch[batch_size:]
+        fwe_train = _iter_local_batches(pth, B_global)
+        fwe_val = _iter_local_batches(pth, B_global)
 
     # Optional resume
     if cli_args.resume:
@@ -239,6 +450,26 @@ def main():
     tokens_total = 0
     last_log_time = t0
     last_log_tokens = 0
+
+    # Watchdog to dump stacks if heartbeat stalls > 180s
+    def _watchdog():
+        while True:
+            time.sleep(30.0)
+            last = hb.last_ts
+            if time.time() - last > 180.0:
+                dump_path = out_dir / f"watchdog_stackdump_{int(time.time())}.txt"
+                try:
+                    with open(dump_path, "w") as f:
+                        f.write(f"Watchdog at {datetime.utcnow().isoformat()}Z; last_heartbeat={last}\n")
+                        for th in threading.enumerate():
+                            f.write(f"\n--- Thread: {th.name} ({getattr(th, 'ident', None)}) ---\n")
+                            stack = sys._current_frames().get(getattr(th, "ident", None))
+                            if stack:
+                                f.write("".join(traceback.format_stack(stack)))
+                except Exception:
+                    pass
+                hb.write(0, "watchdog_dump", {"path": str(dump_path)})
+    threading.Thread(target=_watchdog, daemon=True).start()
 
     # Eval helper
     def maybe_eval(step_idx: int):
@@ -303,6 +534,14 @@ def main():
             x = torch.randint(low=0, high=vocab, size=(B_local, S), device=device)
             y = x.clone()
 
+        # CRITICAL: Validate input tensor shape before model forward pass
+        expected_shape = (B_local, S)
+        if x.shape != expected_shape:
+            raise ValueError(f"Input tensor shape mismatch: got {x.shape}, expected {expected_shape}")
+        
+        if rank == 0 and step <= 5:  # Log first few steps for debugging
+            print(f"[debug] step {step}: input shape {x.shape}, seq_len {S}", flush=True)
+
         logits = model(x)
         loss = loss_fn(logits.view(B_local * S, vocab), y.view(B_local * S)) / max(1, accum)
 
@@ -332,8 +571,10 @@ def main():
             toks_per_s_global = toks_per_s_local * (world_size if ddp else 1)
             if rank == 0:
                 print(
-                    f"step {step:04d} | loss {log_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e} | toks/s {toks_per_s_global:.0f}"
+                    f"step {step:04d} | loss {log_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e} | toks/s {toks_per_s_global:.0f}",
+                    flush=True,
                 )
+                hb.write(step, "progress", {"loss": log_loss, "toks_per_s": toks_per_s_global})
                 (Path(cfg.train.out_dir) / "training.csv").parent.mkdir(parents=True, exist_ok=True)
                 with open(Path(cfg.train.out_dir) / "training.csv", "a") as tf:
                     tf.write(f"{step},{log_loss:.6f},{scheduler.get_last_lr()[0]:.6e},{toks_per_s_global:.0f}\n")
@@ -384,7 +625,7 @@ def main():
             torch.save(state, str(out_path))
         except Exception:
             pass
-        print(json.dumps(meta, indent=2))
+        print(json.dumps(meta, indent=2), flush=True)
         try:
             if tb_writer is not None:
                 tb_writer.flush()

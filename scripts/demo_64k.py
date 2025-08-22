@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import time
-import argparse
+
 import torch
 
-from nsa.core.nsa_attention import NSAAttention
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
+from nsa.core.nsa_attention import NSAAttention
 
 
 def create_empty_kv(B: int, G: int, d_k: int, d_v: int, meta) -> NSA_KV:

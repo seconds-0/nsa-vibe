@@ -105,6 +105,24 @@ Guidance for coding agents (Codex CLI, Cursor, Claude Code) contributing to this
   - GPU training tests: `NSA_TEST_TRAIN=1 uv run -q pytest -k train`
   - CPU smoke (CI): `PYTHONPATH=. uv run -q pytest -k train_smoke`
 
+## M7 Training Debug Commands
+
+- Unbuffered training with diagnostics (env dump, heartbeat, watchdog):
+  - `export CONFIG=configs/m7c_125m_fast_log.yaml; export PYTHONUNBUFFERED=1`
+  - `python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 0 --fwe-report-docs 500 --loader-timeout 120 2>&1 | tee training.log`
+- Heartbeat and dumps:
+  - Tail: `tail -f artifacts/train_showcase/heartbeat_rank0.jsonl`
+  - Stack dump: `kill -USR1 <PID>` then inspect `artifacts/train_showcase/stackdump_*.txt`
+- Loader-only smoke tool:
+  - `python scripts/automation/fwe_smoke.py --seq-len 1024 --batch 1 --timeout 60 --tokenizer byte`
+  - `python scripts/automation/fwe_smoke.py --seq-len 1024 --batch 1 --timeout 60 --tokenizer gpt2`
+- HF streaming sanity:
+  - `python - <<'PY'\nfrom datasets import load_dataset\ns=load_dataset('HuggingFaceFW/fineweb-edu', split='train', streaming=True)\nprint('ok, first text head:', next(iter(s))['text'][:80])\nPY`
+- Local/offline fallback:
+  - `python -u scripts/train_showcase.py --dataset fineweb_edu_local --local-path /data/local.jsonl --ddp 0`
+- Synthetic sanity:
+  - `python -u scripts/train_showcase.py --dataset synthetic --ddp 0`
+
 ## Agent Workflow (for this repo)
 
 - Plan: outline small, verifiable steps; keep exactly one step in progress.
