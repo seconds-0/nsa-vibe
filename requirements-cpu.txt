@@ -12,6 +12,7 @@ hypothesis
 tomli
 ruff
 mypy
+tensorboard
 
 # Dependencies for pytest and mypy
 pluggy

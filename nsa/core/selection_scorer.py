@@ -142,8 +142,9 @@ def select_topn_ranges(
     for b in range(B):
         bg = []
         for g in range(G):
-            blocks = sel_starts[sel_idx[b, g]]  # [k]
-            blocks = torch.unique(blocks, sorted=True)
+            blocks = sel_starts[sel_idx[b, g]]  # [k], sorted non-decreasing
+            # Deduplicate without extra sort (faster on GPU for small k)
+            blocks = torch.unique_consecutive(blocks)
             if blocks.numel() == 0:
                 bg.append(torch.zeros((n_top, 2), dtype=torch.int32, device=device))
                 continue
@@ -208,10 +209,14 @@ def select_topn_ranges_batched(
             idx = (last_block - k).clamp_min(0).view(1, S, 1, 1).expand(B, S, G, 1)
             forced_list.append(idx)
     forced = (
-        torch.cat(forced_list, dim=-1).unique(sorted=True, dim=-1)
+        torch.cat(forced_list, dim=-1)
         if forced_list
         else torch.empty((B, S, G, 0), dtype=torch.long, device=device)
     )
+    if forced.numel() > 0:
+        # Ensure ascending per trailing dim then drop duplicates consecutively
+        forced = torch.sort(forced, dim=-1).values
+        forced = torch.unique_consecutive(forced, dim=-1)
 
     if forced.numel() > 0:
         forced_mask = torch.zeros_like(masked, dtype=torch.bool)

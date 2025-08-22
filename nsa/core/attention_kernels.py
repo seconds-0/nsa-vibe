@@ -175,35 +175,19 @@ def sliding_window_attention_masked(
     V: torch.Tensor,  # [B,G,S,Dv]
     w: int,
 ) -> torch.Tensor:  # [B,S,G,h,Dv]
-    # Row-packed masked SDPA that mirrors current per-token + is_causal semantics:
-    # within the [start..t] window, only the first element (start) is attended.
+    # Memory-friendly masked semantics: only the first element in [start..t] is attended.
+    # With a single allowed key per row, SDPA reduces to returning that V directly.
     B, S, G, h, Dk = Q.shape
-    # Small-length auto-switch can be applied at the caller; leave here pure masked-SDPA
     if w <= 0 or K.shape[2] == 0:
         return torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=V.device)
     device = Q.device
-    BGH = B * G * h
-    # Flatten groups/heads and build per-row packed Q
-    Qfg = Q.permute(0, 2, 3, 1, 4).reshape(BGH, S, Dk)  # [BGH,S,Dk]
-    Kfg = K.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(BGH, S, Dk)  # [BGH,S,Dk]
-    Vfg = V.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(BGH, S, V.shape[-1])  # [BGH,S,Dv]
-    Qrf = Qfg.reshape(BGH * S, 1, Dk)  # [BGH*S,1,Dk]
-    Krf = Kfg.repeat_interleave(S, dim=0)  # [BGH*S,S,Dk]
-    Vrf = Vfg.repeat_interleave(S, dim=0)  # [BGH*S,S,Dv]
-    # Build allowed mask per row: only start = max(0, t-w+1) is allowed
     tpos = torch.arange(S, device=device)
     start = (tpos - (w - 1)).clamp_min(0)  # [S]
-    # A[t,j] = (j == start[t])
-    A = torch.zeros((S, S), dtype=torch.bool, device=device)
-    A[torch.arange(S, device=device), start] = True
-    zeros = torch.zeros((), dtype=Qrf.dtype, device=device)
-    neg_inf = torch.full((), float("-inf"), dtype=Qrf.dtype, device=device)
-    Mf = torch.where(
-        A.unsqueeze(0).expand(BGH, S, S).reshape(BGH * S, S), zeros, neg_inf
-    ).unsqueeze(1)
-    Of = F.scaled_dot_product_attention(Qrf, Krf, Vrf, attn_mask=Mf)
-    Of = Of.reshape(BGH, S, V.shape[-1]).reshape(B, G, h, S, V.shape[-1]).permute(0, 3, 1, 2, 4)
-    Of = torch.nan_to_num(Of, nan=0.0)
+    # Build per-(B,G,S) gather indices and fetch V at start
+    idx = start.view(1, 1, S, 1).expand(B, G, S, 1)  # [B,G,S,1]
+    v_sel = torch.gather(V, 2, idx.expand(B, G, S, V.shape[-1]))  # [B,G,S,Dv]
+    # Expand across heads; result [B,S,G,h,Dv]
+    Of = v_sel.permute(0, 2, 1, 3).unsqueeze(3).expand(B, S, G, h, V.shape[-1])
     return Of
 
 
@@ -214,39 +198,18 @@ def batched_causal_attention_compressed_masked(
     l: int,
     d: int,
 ) -> torch.Tensor:  # [B,S,G,h,Dv]
-    # Row-packed masked SDPA mirroring per-token + is_causal semantics:
-    # when num_cmp(t)>0, only compressed index 0 is attended; else zero.
+    # Memory-friendly masked semantics: if num_cmp(t)>0, attend only to index 0 → return V[:, :, 0].
     B, S, G, h, Dk = Q.shape
     S_cmp = K_cmp.shape[2]
     device = Q.device
     if S_cmp == 0:
         return torch.zeros((B, S, G, h, V_cmp.shape[-1]), dtype=V_cmp.dtype, device=V_cmp.device)
-    BGH = B * G * h
-    Qfg = Q.permute(0, 2, 3, 1, 4).reshape(BGH, S, Dk)  # [BGH,S,Dk]
-    Kfg = K_cmp.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(BGH, S_cmp, Dk)  # [BGH,S_cmp,Dk]
-    Vfg = (
-        V_cmp.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(BGH, S_cmp, V_cmp.shape[-1])
-    )  # [BGH,S_cmp,Dv]
-    Qrf = Qfg.reshape(BGH * S, 1, Dk)  # [BGH*S,1,Dk]
-    Krf = Kfg.repeat_interleave(S, dim=0)  # [BGH*S,S_cmp,Dk]
-    Vrf = Vfg.repeat_interleave(S, dim=0)  # [BGH*S,S_cmp,Dv]
-    # Build per-row mask: allow only j==0 when num_cmp(t)>0
     tpos = torch.arange(S, device=device)
     num_cmp = torch.where(tpos + 1 < l, 0, ((tpos + 1 - l) // d) + 1).clamp(min=0, max=S_cmp)  # [S]
-    A = torch.zeros((S, S_cmp), dtype=torch.bool, device=device)
-    A[num_cmp > 0, 0] = True
-    zeros = torch.zeros((), dtype=Qrf.dtype, device=device)
-    neg_inf = torch.full((), float("-inf"), dtype=Qrf.dtype, device=device)
-    Mf = torch.where(
-        A.unsqueeze(0).expand(BGH, S, S_cmp).reshape(BGH * S, S_cmp), zeros, neg_inf
-    ).unsqueeze(1)
-    Of = F.scaled_dot_product_attention(Qrf, Krf, Vrf, attn_mask=Mf)
-    Of = (
-        Of.reshape(BGH, S, V_cmp.shape[-1])
-        .reshape(B, G, h, S, V_cmp.shape[-1])
-        .permute(0, 3, 1, 2, 4)
-    )
-    Of = torch.nan_to_num(Of, nan=0.0)
+    have_any = (num_cmp > 0).view(1, S, 1, 1, 1).expand(B, S, G, h, 1)
+    v0 = V_cmp[:, :, 0, :]  # [B,G,Dv]
+    v0f = v0.unsqueeze(1).unsqueeze(3).expand(B, S, G, h, V_cmp.shape[-1])
+    Of = torch.where(have_any, v0f, torch.zeros_like(v0f))
     return Of
 
 

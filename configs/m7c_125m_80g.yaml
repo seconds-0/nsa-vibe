@@ -1,0 +1,36 @@
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_groups: 2
+  d_k: 64
+  d_v: 64
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: "avg"
+data:
+  tokenizer: "gpt2"
+runtime:
+  device: "cuda"
+  precision: "bf16"
+  use_flash: true
+  use_triton_sel: false
+train:
+  steps: 200000
+  seq_len: 4096
+  batch_size: 8              # global, 2 GPUs => 4 per GPU
+  lr: 2.0e-4
+  lr_schedule: "cosine"
+  warmup_steps: 2000
+  weight_decay: 0.01
+  grad_clip: 1.0
+  accumulate_grad_batches: 2
+  log_every: 50
+  eval_every: 2000
+  save_every: 10000
+  seed: 1337
+  out_dir: "artifacts/m7c_125m"
