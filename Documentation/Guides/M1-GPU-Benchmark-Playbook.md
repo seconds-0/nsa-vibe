@@ -67,7 +67,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Clone repo and install deps
 git clone https://github.com/seconds-0/nsa-vibe.git
 cd nsa-vibe
-uv venv -p 3.10 .venv
+uv venv -p 3.11 .venv
 uv pip sync -r requirements.txt
 
 # CUDA/PyTorch sanity
@@ -164,7 +164,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
       - name: Install deps
         run: |
-          uv venv -p 3.10 .venv
+          uv venv -p 3.11 .venv
           uv pip sync -r requirements.txt
       - name: Bench
         env:
@@ -196,7 +196,7 @@ body = {
   "name": "nsa-bench",
   "gpu": "L4",
   "image": "nvcr.io/nvidia/pytorch:24.06-py3",
-  "command": "bash -lc 'git clone https://github.com/seconds-0/nsa-vibe.git && cd nsa-vibe && curl -LsSf https://astral.sh/uv/install.sh | sh && uv venv -p 3.10 .venv && uv pip sync -r requirements.txt && NSA_USE_FA2=1 PYTHONPATH=. ./.venv/bin/python bench/bench_fa2.py | tee bench.out && aws s3 cp bench.out s3://your-bucket/path/'"
+  "command": "bash -lc 'git clone https://github.com/seconds-0/nsa-vibe.git && cd nsa-vibe && curl -LsSf https://astral.sh/uv/install.sh | sh && uv venv -p 3.11 .venv && uv pip sync -r requirements.txt && NSA_USE_FA2=1 PYTHONPATH=. ./.venv/bin/python bench/bench_fa2.py | tee bench.out && aws s3 cp bench.out s3://your-bucket/path/'"
 }
 r = requests.post("https://api.runpod.io/graphql", headers=headers, data=json.dumps({"query": "..."}))
 # Refer to RunPod API docs for exact endpoint/body; handle job id, status polling, and logs fetch.

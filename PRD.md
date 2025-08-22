@@ -596,7 +596,7 @@ Anchors: Eqs. 5, 7–12, §3.3.3; Figure 2 flow.
 
 19) Commands / Dev Ergonomics
 # Env setup (first time)
-uv venv -p 3.10 .venv
+uv venv -p 3.11 .venv
 uv pip sync -r requirements.txt
 
 # Fast tests

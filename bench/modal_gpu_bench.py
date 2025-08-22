@@ -23,7 +23,7 @@ app = modal.App("nsa-gpu-bench")
 
 # Container image with CUDA and PyTorch
 gpu_image = (
-    modal.Image.from_registry("nvcr.io/nvidia/pytorch:24.06-py3", add_python="3.10")
+    modal.Image.from_registry("nvcr.io/nvidia/pytorch:24.06-py3", add_python="3.11")
     .apt_install("git", "curl")
     .pip_install("pyyaml")  # Required for parsing configs
     .run_commands(
@@ -218,7 +218,7 @@ def run_gpu_benchmark(gpu_type: str = "T4") -> dict:
     os.chdir("nsa-vibe")
 
     # Set up environment
-    subprocess.run(["/root/.cargo/bin/uv", "venv", "-p", "3.10", ".venv"], check=True)
+    subprocess.run(["/root/.cargo/bin/uv", "venv", "-p", "3.11", ".venv"], check=True)
     subprocess.run(["/root/.cargo/bin/uv", "pip", "sync", "-r", "requirements.txt"], check=True)
 
     # Install flash-attn if needed
