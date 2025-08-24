@@ -321,9 +321,13 @@ class PrimeIntellectBenchmark:
         elif "PRIME_SSH_PASSWORD" in os.environ:
             connect_kwargs["password"] = os.environ["PRIME_SSH_PASSWORD"]
             auth_configured = True
-        elif Path("~/.ssh/primeintellect_ed25519").expanduser().exists():
-            # Use the generated Prime Intellect key
-            connect_kwargs["key_filename"] = str(Path("~/.ssh/primeintellect_ed25519").expanduser())
+        elif os.environ.get("SSH_KEY_PATH") and Path(os.environ["SSH_KEY_PATH"]).expanduser().exists():
+            # Use SSH_KEY_PATH environment variable
+            connect_kwargs["key_filename"] = str(Path(os.environ["SSH_KEY_PATH"]).expanduser())
+            auth_configured = True
+        elif Path("~/.ssh/id_ed25519").expanduser().exists():
+            # Use default SSH key
+            connect_kwargs["key_filename"] = str(Path("~/.ssh/id_ed25519").expanduser())
             auth_configured = True
 
         # If no explicit auth provided, try system SSH keys and passwordless auth

@@ -1,0 +1,37 @@
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_groups: 2
+  d_k: 64
+  d_v: 64
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: "avg"
+data:
+  tokenizer: "byte"  # Use byte tokenizer for synthetic data
+runtime:
+  device: "cuda"
+  precision: "bf16"
+  use_flash: true
+  use_triton_sel: false
+  gradient_checkpointing: true  # CRITICAL: Enable gradient checkpointing
+train:
+  steps: 100  # Short test run
+  seq_len: 2048  # Conservative 2K sequence length
+  batch_size: 4   # 2 per GPU for 2×A100
+  lr: 2.0e-4
+  lr_schedule: "cosine"
+  warmup_steps: 10
+  weight_decay: 0.01
+  grad_clip: 1.0
+  accumulate_grad_batches: 1  # Start with no accumulation to test DDP fix
+  log_every: 5  # Log frequently for debugging
+  eval_every: 50
+  save_every: 0  # Disable checkpointing for test
+  seed: 1337
+  out_dir: "artifacts/m7c_125m_2k_test"

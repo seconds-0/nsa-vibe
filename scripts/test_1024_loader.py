@@ -3,9 +3,9 @@
 import sys
 
 try:
-    from scripts.datasets.fineweb_edu_loader import iter_fineweb_edu_batches
+    from nsa.data_pipeline import fineweb_stream_batches, Shard
 except Exception as e:
-    print(f"ERR: loader import failed: {e}")
+    print(f"ERR: pipeline import failed: {e}")
     sys.exit(2)
 
 def main():
@@ -24,12 +24,11 @@ def main():
     
     # Test the data loader
     try:
-        it = iter_fineweb_edu_batches(
-            encode=encode_gpt2, 
-            seq_len=1024, 
-            batch_size=1, 
-            split_mod=100, 
-            split_rem=1
+        it = fineweb_stream_batches(
+            encode=encode_gpt2,
+            seq_len=1024,
+            batch_size=1,
+            shard=Shard(mod=100, rem=1),
         )
         
         for i in range(3):

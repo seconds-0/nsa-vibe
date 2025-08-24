@@ -1,25 +1,36 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "🔗 Starting TensorBoard connection to Prime Intellect..."
-echo "📡 Connecting to ubuntu@216.81.248.82..."
+REMOTE_HOST="${REMOTE_HOST:?Set REMOTE_HOST, e.g. user@host}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-}"
+TB_PORT="${TB_PORT:-6006}"
+SSH_OPTS="${SSH_OPTS:- -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4}"
+REMOTE_CMD_PREFIX="${REMOTE_CMD_PREFIX:-cd nsa-vibe &&}"
+LOGDIR="${TB_LOGDIR:-artifacts/m7c_125m/tb}"
 
-# Test SSH connection first
-if ssh -i ~/.ssh/primeintellect_ed25519 ubuntu@216.81.248.82 "echo 'SSH connection successful'"; then
-    echo "✅ SSH connection working"
+[[ ${TB_PORT} -ge 1024 && ${TB_PORT} -le 65535 ]] || { echo "Invalid TB_PORT" >&2; exit 2; }
+command -v ssh >/dev/null || { echo "ssh not found" >&2; exit 1; }
+
+echo "🔗 Starting TensorBoard connection..."
+echo "📡 Connecting to ${REMOTE_HOST}..."
+
+SSH=(ssh $SSH_OPTS)
+if [[ -n "${SSH_KEY_PATH}" ]]; then SSH+=(-i "${SSH_KEY_PATH}"); fi
+SSH+=("${REMOTE_HOST}")
+
+if "${SSH[@]}" "echo 'SSH connection successful'" >/dev/null 2>&1; then
+  echo "✅ SSH connection working"
 else
-    echo "❌ SSH connection failed"
-    exit 1
+  echo "❌ SSH connection failed"; exit 1
 fi
 
-# Check if TensorBoard directory exists and has data
 echo "📊 Checking TensorBoard data..."
-ssh -i ~/.ssh/primeintellect_ed25519 ubuntu@216.81.248.82 "cd nsa-vibe && ls -la artifacts/m7c_125m/tb/ 2>/dev/null || echo 'No m7c_125m/tb directory yet, checking train_showcase...'; ls -la artifacts/train_showcase/tb/ 2>/dev/null || echo 'No data directories found'"
+"${SSH[@]}" "${REMOTE_CMD_PREFIX} ls -la ${LOGDIR} 2>/dev/null || echo 'No ${LOGDIR} directory yet'"
 
-echo "🚀 Starting TensorBoard tunnel on port 6006..."
-echo "📈 After this starts, open: http://localhost:6006"
+echo "🚀 Starting TensorBoard tunnel on port ${TB_PORT}..."
+echo "📈 After this starts, open: http://localhost:${TB_PORT}"
 echo "🔄 Keep this terminal open - TensorBoard will run here"
 echo ""
 
-# Start the tunnel with TensorBoard
-ssh -i ~/.ssh/primeintellect_ed25519 -L 6006:localhost:6006 ubuntu@216.81.248.82 'cd nsa-vibe && . .venv/bin/activate && echo "🎯 TensorBoard starting on remote..." && tensorboard --logdir artifacts/m7c_125m/tb --port 6006 --host 0.0.0.0 --reload_interval 5'
+"${SSH[@]}" -L "${TB_PORT}:localhost:${TB_PORT}" "${REMOTE_HOST}" \
+  "${REMOTE_CMD_PREFIX} . .venv/bin/activate && echo '🎯 TensorBoard starting on remote...' && tensorboard --logdir ${LOGDIR} --port ${TB_PORT} --host 0.0.0.0 --reload_interval 5"

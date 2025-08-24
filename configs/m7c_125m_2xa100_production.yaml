@@ -1,0 +1,37 @@
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_groups: 2
+  d_k: 64
+  d_v: 64
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: "avg"
+data:
+  tokenizer: "byte"  # Use byte tokenizer for synthetic data
+runtime:
+  device: "cuda"
+  precision: "bf16"  # BF16 for memory efficiency
+  use_flash: true    # Enable FlashAttention-2
+  use_triton_sel: false
+  gradient_checkpointing: true  # CRITICAL: Enable for memory headroom
+train:
+  steps: 500  # Target for stability test
+  seq_len: 2048  # Conservative 2K sequence length
+  batch_size: 2   # 1 per GPU for 2×A100 (micro-batch=1)
+  lr: 2.0e-4
+  lr_schedule: "cosine"
+  warmup_steps: 50
+  weight_decay: 0.01
+  grad_clip: 1.0
+  accumulate_grad_batches: 1  # Start with 1 for DDP stability test
+  log_every: 10  # Frequent logging for monitoring
+  eval_every: 100
+  save_every: 100  # Periodic checkpoints
+  seed: 1337
+  out_dir: "artifacts/m7c_125m_2xa100_prod"

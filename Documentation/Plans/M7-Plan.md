@@ -40,7 +40,7 @@ Training Tracks & Targets
 - Track B (Long‑context demo): 20–40M params, S=8192, batch 1–2, gradient checkpointing optional. 10k–20k steps on A100‑40G (≈3–6h) to demonstrate multi‑page continuations and NSA selection at scale.
 
 How to Use FineWeb‑Edu in this repo
-- Data loader (plan): add `scripts/datasets/fineweb_edu_loader.py` to stream, tokenize, and pack batches for `[B, S]` training.
+- Data pipeline: use `nsa.data_pipeline.fineweb_stream_batches` to stream, tokenize, and pack batches for `[B, S]` training.
 - Wiring: add a CLI flag to `scripts/train_showcase.py` (e.g., `--dataset fineweb_edu`), defaulting to synthetic; when selected, use the streaming loader.
 - Determinism: fixed random seeds; shard → pack order stable across runs; document in the report.
 

@@ -33,11 +33,11 @@ def main():
         encode = encode_bytes
 
     try:
-        from scripts.datasets.fineweb_edu_loader import iter_fineweb_edu_batches  # type: ignore
+        from nsa.data_pipeline import fineweb_stream_batches, Shard  # type: ignore
     except Exception as e:
-        raise SystemExit(f"failed to import loader: {e}")
+        raise SystemExit(f"failed to import data pipeline: {e}")
 
-    it = iter_fineweb_edu_batches(encode=encode, seq_len=args.seq_len, batch_size=args.batch, split_mod=100, split_rem=1)
+    it = fineweb_stream_batches(encode=encode, seq_len=args.seq_len, batch_size=args.batch, shard=Shard(mod=100, rem=1), report_docs=args.report_docs)
     print(f"[smoke] pulling first batch: S={args.seq_len} B={args.batch} tokenizer={args.tokenizer}")
     box = {}
     import threading
@@ -60,4 +60,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

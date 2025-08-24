@@ -32,7 +32,7 @@ This guide runs Triton selection parity smokes and microbenchmarks on the Prime 
 ## Prerequisites
 - SSH to Prime Intellect 4090
   - Quick: `ssh root@47.47.180.127 -p 12181`
-  - With key: `ssh -i ~/.ssh/primeintellect_ed25519 root@47.47.180.127 -p 12181`
+  - With key: `ssh -i $SSH_KEY_PATH root@47.47.180.127 -p 12181` (set SSH_KEY_PATH env var)
 - Code sync options
   - Option A (bench EXACT local code): `scp -P 12181 -r . root@47.47.180.127:/root/nsa-vibe`
   - Option B (clone main branch on host): `git clone https://github.com/seconds-0/nsa-vibe.git /root/nsa-vibe`

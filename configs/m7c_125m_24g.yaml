@@ -19,6 +19,7 @@ runtime:
   precision: "bf16"
   use_flash: true
   use_triton_sel: false
+  gradient_checkpointing: true
 train:
   steps: 200000
   seq_len: 4096
