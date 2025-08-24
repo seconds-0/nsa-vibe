@@ -2,9 +2,9 @@ PYTHON := python
 PIP := pip
 VENV := .venv
 
-# Prime Intellect automation
-PRIME_HOST = ubuntu@216.81.248.82
-SSH_KEY = ~/.ssh/primeintellect_ed25519
+# Prime Intellect automation (parameterized)
+PRIME_HOST ?= $(REMOTE_HOST)
+SSH_KEY ?= $(SSH_KEY_PATH)
 REPO_URL = https://github.com/seconds-0/nsa-vibe.git
 BRANCH = test-plan/m7-training-readiness
 TB_PORT = 6006
@@ -100,9 +100,10 @@ help-prime:
 
 train-prime:
 	@echo "🚀 Starting automated M7C training on Prime Intellect..."
+	@if [ -z "$(PRIME_HOST)" ]; then echo "Set REMOTE_HOST or PRIME_HOST"; exit 2; fi
 	@echo "📡 Connecting to $(PRIME_HOST)..."
 	@scripts/automation/create_train_script.sh
-	ssh -i $(SSH_KEY) $(PRIME_HOST) 'bash -s' < scripts/automation/remote_train_setup.sh
+	ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'bash -s' < scripts/automation/remote_train_setup.sh
 	@echo ""
 	@echo "✅ Training started! Next steps:"
 	@echo "   1. Run in NEW terminal: make monitor-prime"
@@ -113,26 +114,34 @@ monitor-prime:
 	@echo "📊 Starting TensorBoard tunnel..."
 	@echo "🔗 Will auto-open http://localhost:$(TB_PORT)..."
 	@sleep 2 && (command -v open >/dev/null && open http://localhost:$(TB_PORT) &) || echo "Open http://localhost:$(TB_PORT) manually" &
-	ssh -i $(SSH_KEY) -L $(TB_PORT):localhost:$(TB_PORT) $(PRIME_HOST) \
+	@if [ -z "$(PRIME_HOST)" ]; then echo "Set REMOTE_HOST or PRIME_HOST"; exit 2; fi
+	ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) -L $(TB_PORT):localhost:$(TB_PORT) $(PRIME_HOST) \
 		'cd nsa-vibe && . .venv/bin/activate && bash scripts/run_tensorboard.sh'
 
 logs-prime:
 	@echo "📋 Tailing training logs..."
-	ssh -i $(SSH_KEY) $(PRIME_HOST) 'cd nsa-vibe && tail -f artifacts/m7c_125m/training.csv 2>/dev/null || echo "No training.csv yet, checking run logs..." && find artifacts/train_runs -name "train.log" -exec tail -f {} \; 2>/dev/null || echo "No logs found yet"'
+	@if [ -z "$(PRIME_HOST)" ]; then echo "Set REMOTE_HOST or PRIME_HOST"; exit 2; fi
+	ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'cd nsa-vibe && tail -f artifacts/m7c_125m/training.csv 2>/dev/null || echo "No training.csv yet, checking run logs..." && find artifacts/train_runs -name "train.log" -exec tail -f {} \; 2>/dev/null || echo "No logs found yet"'
 
 setup-prime:
 	@echo "⚙️  Setting up environment only..."
 	@scripts/automation/create_setup_script.sh
-	ssh -i $(SSH_KEY) $(PRIME_HOST) 'bash -s' < scripts/automation/remote_setup_only.sh
+	@if [ -z "$(PRIME_HOST)" ]; then echo "Set REMOTE_HOST or PRIME_HOST"; exit 2; fi
+	ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'bash -s' < scripts/automation/remote_setup_only.sh
 
 clean-prime:
 	@echo "🧹 Cleaning remote artifacts..."
-	ssh -i $(SSH_KEY) $(PRIME_HOST) 'cd nsa-vibe && rm -rf artifacts/train_runs/* artifacts/m7c_125m/* 2>/dev/null || true && echo "✅ Artifacts cleaned"'
+	@if [ -z "$(PRIME_HOST)" ]; then echo "Set REMOTE_HOST or PRIME_HOST"; exit 2; fi
+	ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'cd nsa-vibe && rm -rf artifacts/train_runs/* artifacts/m7c_125m/* 2>/dev/null || true && echo "✅ Artifacts cleaned"'
 
 status-prime:
 	@echo "📊 Prime Intellect Status Check"
 	@echo "================================"
-	@ssh -i $(SSH_KEY) $(PRIME_HOST) 'cd nsa-vibe 2>/dev/null && echo "✅ Repo exists" || echo "❌ Repo missing"' || echo "❌ SSH connection failed"
-	@ssh -i $(SSH_KEY) $(PRIME_HOST) 'cd nsa-vibe && test -f artifacts/m7c_125m/training.csv && echo "✅ Training active" || echo "⏳ No training.csv yet"' 2>/dev/null || echo "❓ Cannot check training status"
-	@ssh -i $(SSH_KEY) $(PRIME_HOST) 'nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -2' || echo "❓ GPU status unknown"
-	@ssh -i $(SSH_KEY) $(PRIME_HOST) 'tmux list-sessions 2>/dev/null | grep m7c && echo "✅ tmux session active" || echo "⏳ No tmux session"' || echo "❓ Cannot check tmux"
+	@if [ -z "$(PRIME_HOST)" ]; then echo "Set REMOTE_HOST or PRIME_HOST"; exit 2; fi
+	@ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'cd nsa-vibe 2>/dev/null && echo "✅ Repo exists" || echo "❌ Repo missing"' || echo "❌ SSH connection failed"
+	@ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'cd nsa-vibe && test -f artifacts/m7c_125m/training.csv && echo "✅ Training active" || echo "⏳ No training.csv yet"' 2>/dev/null || echo "❓ Cannot check training status"
+	@ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -2' || echo "❓ GPU status unknown"
+	@ssh $(if [ -n "$(SSH_KEY)" ]; then echo -n "-i $(SSH_KEY)"; fi) $(PRIME_HOST) 'tmux list-sessions 2>/dev/null | grep m7c && echo "✅ tmux session active" || echo "⏳ No tmux session"' || echo "❓ Cannot check tmux"
+env-guard:
+	@echo "Running environment guard..."
+	python scripts/_env_guard.py

@@ -37,9 +37,10 @@ def apply_rope(
     # Simple NTK/YARN-style extension via position scaling: effective_pos = pos / scale
     if scale <= 0:
         scale = 1.0
-    angles = (pos.to(x.dtype) / float(scale)).unsqueeze(-1) * inv_freq  # [..., S, D/2]
-    sin = torch.sin(angles)
-    cos = torch.cos(angles)
+    # Compute angles in float32 for accuracy, then cast sin/cos to input dtype to preserve dtype end-to-end
+    angles = (pos.to(torch.float32) / float(scale)).unsqueeze(-1) * inv_freq  # [..., S, D/2] (float32)
+    sin = torch.sin(angles).to(dtype=x.dtype)
+    cos = torch.cos(angles).to(dtype=x.dtype)
     x_2 = x.view(*x.shape[:-1], D // 2, 2)
     x0, x1 = x_2[..., 0], x_2[..., 1]
     y0 = x0 * cos - x1 * sin

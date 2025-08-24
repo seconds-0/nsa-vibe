@@ -6,41 +6,214 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is an implementation of Native Sparse Attention (NSA), a drop-in attention module for decoder-only Transformers with trainable, hardware-aligned sparse attention. The implementation follows the paper's architecture combining three branches (Compressed, Selected, Sliding) with learned gates.
 
-## Prime Intellect GPU Pod Access
+## M8 Roadmap
 
-### SSH Connection Setup
-1. **SSH Key Location**: Prime Intellect ED25519 key is at `~/.ssh/primeintellect_ed25519`
-2. **Current Prime Intellect Host**: `ssh -i ~/.ssh/primeintellect_ed25519 ubuntu@216.81.248.82`
-3. **Old Host Reference (legacy)**: `ssh root@47.47.180.127 -p 12181`
-3. **Recommended ~/.ssh/config** (easier usage):
-   ```
-   Host prime-4090
-     HostName 47.47.180.127
-     Port 12181
-     User root
-     IdentityFile ~/.ssh/primeintellect_ed25519
-     IdentitiesOnly yes
-     ServerAliveInterval 30
-     ServerAliveCountMax 6
-   ```
-   Then connect with: `ssh prime-4090`
-4. **Pod Template**: Use "UBUNTU 22, CUDA 12" base image for cleanest environment
-5. **Note**: The private key MUST be in your local SSH directory with 600 permissions for authentication to work
+See Documentation/Plans/M8/Roadmap.md for the stabilization plan, execution order, and links to subsystem subplans.
 
-### Pod Setup Script
+## M8 Data Pipeline Migration
+
+The training system now uses the new `nsa.data_pipeline` module for robust data handling:
+
+### Streaming FineWeb-Edu (New Default)
 ```bash
-# After connecting to pod
-cd /root
-apt-get update && apt-get install -y git python3-pip python3-venv ninja-build
-git clone https://github.com/seconds-0/nsa-vibe.git
+# Basic streaming with timeout and progress reporting
+python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 0 \
+  --fwe-report-docs 500 --loader-timeout 120 --synthetic-on-fail \
+  2>&1 | tee training.log
+
+# Multi-GPU with deterministic sharding
+CONFIG=configs/train_showcase.yaml python -u scripts/train_showcase.py \
+  --dataset fineweb_edu --ddp 1 --fwe-report-docs 1000
+```
+
+### Local Data Fallback
+```bash
+# Local JSONL or text file
+python -u scripts/train_showcase.py --dataset fineweb_edu_local \
+  --local-path /path/to/data.jsonl --ddp 0
+
+# Works with both byte and GPT-2 tokenizers
+NSA_TOKENIZER=gpt2 python -u scripts/train_showcase.py \
+  --dataset fineweb_edu_local --local-path /path/to/data.txt
+```
+
+### Monitoring and Watchdog
+```bash
+# Start watchdog for anomaly detection
+python scripts/_watchdog.py --dir artifacts/train_showcase --halt 1
+
+# Watchdog creates .HALT file to gracefully stop training
+# Trainer polls for .HALT every step and exits cleanly
+```
+
+### Key Features
+- **Deterministic sharding**: `Shard(mod=world_size, rem=rank)` for multi-GPU
+- **Graceful fallbacks**: Synthetic data if streaming fails with `--synthetic-on-fail`
+- **Rich telemetry**: Heartbeat JSONL includes `dt_fetch_s` for data stall diagnosis
+- **Environment validation**: Automatic PyTorch/CUDA/device capability checks
+- **Safe tokenization**: S-1 truncation preserves sequence length contracts
+
+## Prime Intellect GPU Training Setup
+
+**All GPU training is conducted through Prime Intellect cloud GPUs.** Claude has SSH access to Prime Intellect instances for executing training runs, performance tests, and production validation.
+
+### SSH Access Configuration
+- **SSH Keys**: Available in the repository (`.ssh/primeintellect_ed25519`)
+- **Host Access**: Ask user for current SSH address when needed
+- **Environment**: Ubuntu 22.04, CUDA 12.x, 2×A100 80GB typical configuration
+- **Access Method**: Direct SSH with provided keys
+
+### GPU Training Commands
+```bash
+# Ask user for SSH address, then connect directly
+ssh -i ~/.ssh/primeintellect_ed25519 ubuntu@<provided-address>
+
+# Standard training commands on remote GPU
+cd nsa-vibe && source .venv/bin/activate
+PYTHONPATH=. torchrun --nproc_per_node=2 scripts/train_showcase.py --dataset fineweb_edu
+
+# FSDP training (post-DDP compatibility fix)
+PYTHONPATH=. torchrun --nproc_per_node=2 scripts/train_showcase_fsdp.py --dataset fineweb_edu
+```
+
+### Monitoring and Diagnostics
+```bash
+# Real-time monitoring on Prime Intellect GPUs
+nvidia-smi dmon -s mu -d 1  # GPU utilization
+tail -f artifacts/*/heartbeat_rank0.jsonl  # Training telemetry
+```
+
+### Environment Setup
+- **Python Environment**: Pre-configured venv with PyTorch CUDA
+- **Dependencies**: All NSA requirements installed
+- **Data Pipeline**: FineWeb-Edu streaming and local data support
+- **Diagnostics**: Full telemetry and artifact collection enabled
+
+### Automated Pod Bootstrap
+The `make train-prime` command automatically runs this setup on the remote host:
+```bash
+# Creates parameterized setup script and executes it
+# - Installs system dependencies (git, python3-venv, ninja-build, tmux)  
+# - Clones repo and switches to correct branch
+# - Creates Python venv with GPU dependencies
+# - Validates environment and data loader
+# - Starts training in tmux session 'nsa-training'
+```
+
+### Manual Pod Setup (if needed)
+```bash
+# Connect to pod
+ssh $REMOTE_HOST
+
+# Run bootstrap script
 cd nsa-vibe
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip wheel
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install triton packaging ninja
-pip install flash-attn --no-build-isolation
-pip install numpy hydra-core pydantic pytest hypothesis ruff mypy
+bash scripts/prime_bootstrap.sh
+
+# Validate environment
+python scripts/_env_guard.py
+```
+
+### Training Monitoring Commands
+
+#### Real-Time Status Checking
+```bash
+# Quick status check (GPU, training process, tmux session)
+make status-prime
+
+# Comprehensive training monitor with alerts
+bash scripts/monitor_training.sh
+
+# Live training logs
+make logs-prime
+
+# TensorBoard tunnel (auto-opens browser)
+make monitor-prime
+```
+
+#### Heartbeat and Telemetry Monitoring
+```bash
+# Watch live heartbeat telemetry (loss, throughput, memory, gate health)
+ssh $REMOTE_HOST 'cd nsa-vibe && tail -f artifacts/train_showcase/heartbeat_rank0.jsonl'
+
+# Parse specific metrics from heartbeat
+ssh $REMOTE_HOST 'cd nsa-vibe && grep "progress" artifacts/train_showcase/heartbeat_rank0.jsonl | tail -10 | jq ".loss, .toks_per_s"'
+
+# Check for data loader stalls
+ssh $REMOTE_HOST 'cd nsa-vibe && grep "dt_fetch_s" artifacts/train_showcase/heartbeat_rank0.jsonl | tail -20'
+```
+
+#### Watchdog and Anomaly Detection
+```bash
+# Start watchdog (monitors heartbeat, creates .HALT on stall)
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/_watchdog.py --dir artifacts/train_showcase --halt 1 &'
+
+# Manual halt (graceful training stop)
+ssh $REMOTE_HOST 'cd nsa-vibe && touch artifacts/train_showcase/.HALT'
+
+# Check watchdog status
+ssh $REMOTE_HOST 'cd nsa-vibe && ps aux | grep _watchdog'
+```
+
+### Emergency Procedures and Troubleshooting
+
+#### Stack Dumps and Process Analysis
+```bash
+# Trigger live stack dump (sends SIGUSR1 to training process)
+TRAINING_PID=$(ssh $REMOTE_HOST 'ps aux | grep train_showcase.py | grep -v grep | awk "{print \$2}"')
+ssh $REMOTE_HOST "kill -USR1 $TRAINING_PID"
+
+# Inspect stack dump
+ssh $REMOTE_HOST 'cd nsa-vibe && ls -la artifacts/train_showcase/stackdump_*.txt'
+ssh $REMOTE_HOST 'cd nsa-vibe && tail -50 artifacts/train_showcase/stackdump_*.txt'
+
+# Check for watchdog-generated dumps (>180s heartbeat stall)
+ssh $REMOTE_HOST 'cd nsa-vibe && ls -la artifacts/train_showcase/watchdog_stackdump_*.txt'
+```
+
+#### Training Recovery and Resume
+```bash
+# Check for existing checkpoints
+ssh $REMOTE_HOST 'cd nsa-vibe && ls -la artifacts/*/checkpoint_step*.pt'
+
+# Resume training from latest checkpoint (automatic in train_m7c_prime.sh)
+ssh $REMOTE_HOST 'cd nsa-vibe && bash scripts/train_m7c_prime.sh'
+
+# Manual resume from specific checkpoint
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/train_showcase.py --dataset fineweb_edu --resume artifacts/m7c_125m/checkpoint_step1000.pt'
+```
+
+#### Data Loader Troubleshooting
+```bash
+# Test HuggingFace streaming directly
+ssh $REMOTE_HOST 'cd nsa-vibe && python - <<EOF
+from datasets import load_dataset
+s=load_dataset("HuggingFaceFW/fineweb-edu", split="train", streaming=True)
+print("OK, first text head:", next(iter(s))["text"][:80])
+EOF'
+
+# Loader-only smoke test
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/automation/fwe_smoke.py --seq-len 1024 --batch 1 --timeout 60 --tokenizer byte'
+
+# Fallback to synthetic data
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/train_showcase.py --dataset synthetic --ddp 0'
+
+# Fallback to local data
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/train_showcase.py --dataset fineweb_edu_local --local-path /path/to/data.jsonl --ddp 0'
+```
+
+#### GPU and CUDA Troubleshooting
+```bash
+# Check GPU status
+ssh $REMOTE_HOST 'nvidia-smi'
+
+# Detailed GPU query
+ssh $REMOTE_HOST 'nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv'
+
+# Test CUDA availability
+ssh $REMOTE_HOST 'cd nsa-vibe && python -c "import torch; print(f\"CUDA: {torch.cuda.is_available()}, Devices: {torch.cuda.device_count()}, GPU: {torch.cuda.get_device_name()}\")"'
+
+# Check for CUDA errors in training logs
+ssh $REMOTE_HOST 'cd nsa-vibe && grep -i "cuda\|RuntimeError\|NCCL" artifacts/train_runs/*/train.log'
 ```
 
 ### Quick: Run Selection Benches + Threshold
@@ -101,13 +274,36 @@ uv run python bench/bench_prefill.py --config configs/base.yaml
 uv run python bench/bench_decode.py --config configs/base.yaml
 ```
 
-### Milestone Smokes (CPU default)
+### Milestone Smokes and Validation
+
+#### Local Testing (CPU default)
 ```bash
-# Quick pass over key M0–M3 tests
-uv run -q python scripts/run_milestone_smoke.py
+# Quick pass over key M0–M8 tests
+python scripts/run_milestone_smoke.py
+
+# M8 comprehensive suite with baseline capture
+python scripts/run_smoke_tests.py --run-synthetic --smoke-steps 500 --save-baseline baselines/local_cpu.json
+
+# Compare against saved baseline (5% tolerance)
+python scripts/run_smoke_tests.py --csv artifacts/train_showcase/training.csv --compare-baseline baselines/local_cpu.json
 
 # Long-context selection smoke (optional, large S)
-PYTHONPATH=. uv run -q python bench/needle_64k_smoke.py --S 65536 --device cpu
+PYTHONPATH=. python bench/needle_64k_smoke.py --S 65536 --device cpu
+```
+
+#### Remote GPU Validation
+```bash
+# Run comprehensive smoke tests on remote GPU
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/run_smoke_tests.py --run-synthetic --run-fineweb --smoke-steps 1000'
+
+# Validate existing training run
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/run_smoke_tests.py --csv artifacts/train_showcase/training.csv --heartbeat artifacts/train_showcase/heartbeat_rank0.jsonl'
+
+# Create baseline for this GPU configuration
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/run_smoke_tests.py --csv artifacts/train_showcase/training.csv --save-baseline baselines/gpu_a100.json'
+
+# Regression detection (compare against baseline)
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/run_smoke_tests.py --csv artifacts/train_showcase/training.csv --compare-baseline baselines/gpu_a100.json --baseline-tolerance 3.0'
 ```
 
 ### Experimental CUDA Selection (GPU)
@@ -283,3 +479,58 @@ Key figures and equations to reference during implementation:
 - Figure 3 (p.9): Kernel execution model
 - Table 4 (p.14): Decode memory economics
 - Figure 5 (p.12): 64k needle retrieval target
+
+## Complete Testing Workflow Summary
+
+### Phase 1: Local Development Testing
+```bash
+# Environment setup
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+# Core correctness validation
+python scripts/run_milestone_smoke.py
+python scripts/run_smoke_tests.py --run-synthetic --smoke-steps 500
+
+# Create local baseline
+python scripts/run_smoke_tests.py --run-synthetic --smoke-steps 500 --save-baseline baselines/local_cpu.json
+```
+
+### Phase 2: Prime Intellect GPU Testing
+```bash
+# Setup remote host (ask user for current address)
+# SSH keys available in repo: ~/.ssh/primeintellect_ed25519
+
+# One-command launch (automated setup + training)
+make train-prime
+
+# Monitor in separate terminal
+make monitor-prime  # TensorBoard at http://localhost:6006
+make status-prime   # Quick status checks
+```
+
+### Phase 3: Production Monitoring
+```bash
+# Live telemetry monitoring
+ssh $REMOTE_HOST 'cd nsa-vibe && tail -f artifacts/train_showcase/heartbeat_rank0.jsonl'
+
+# Comprehensive status with alerts
+bash scripts/monitor_training.sh
+
+# Smoke test validation with baseline comparison
+ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/run_smoke_tests.py --csv artifacts/train_showcase/training.csv --compare-baseline baselines/gpu_a100.json'
+```
+
+### Emergency Response Procedures
+1. **Training Stall**: Trigger stack dump with `kill -USR1 <PID>`
+2. **Data Issues**: Check loader with `fwe_smoke.py`, fallback to synthetic
+3. **GPU Issues**: Check `nvidia-smi`, validate CUDA availability  
+4. **Graceful Halt**: Create `.HALT` file or run watchdog
+5. **Resume**: Automatic checkpoint detection in `train_m7c_prime.sh`
+
+### Key Artifacts Locations
+- Training logs: `artifacts/train_runs/m7c_*/train.log`
+- Heartbeat telemetry: `artifacts/train_showcase/heartbeat_rank0.jsonl`
+- TensorBoard events: `artifacts/m7c_125m/tb/`
+- Checkpoints: `artifacts/m7c_125m/checkpoint_step*.pt`
+- Stack dumps: `artifacts/train_showcase/stackdump_*.txt`
