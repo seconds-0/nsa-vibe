@@ -46,6 +46,22 @@ class TinyLM(nn.Module):
         from nsa.model.llama_block_nsa import RMSNorm
         self.embed = nn.Embedding(vocab, dim)
         self.grad_checkpointing = bool(grad_checkpointing)
+        # Optional: restrict checkpointing to a layer range via env (e.g., "1:6")
+        gc_rng_env = os.getenv("NSA_GC_RANGE", "").strip()
+        self._gc_range: tuple[int, int] | None = None
+        if gc_rng_env:
+            try:
+                parts = gc_rng_env.split(":")
+                a = int(parts[0]) if parts[0] != "" else 0
+                b = int(parts[1]) if len(parts) > 1 and parts[1] != "" else int(n_layers)
+                if a < 0:
+                    a = 0
+                if b > int(n_layers):
+                    b = int(n_layers)
+                if a < b:
+                    self._gc_range = (a, b)
+            except Exception:
+                self._gc_range = None
         self.blocks = nn.ModuleList(
             [
                 LlamaBlockNSA(
@@ -68,8 +84,15 @@ class TinyLM(nn.Module):
 
     def forward(self, x_tok: torch.Tensor) -> torch.Tensor:
         x = self.embed(x_tok)  # [B,S,dim]
-        for blk in self.blocks:
+        for i, blk in enumerate(self.blocks):
+            use_ckpt = False
             if self.grad_checkpointing and x.requires_grad:
+                if self._gc_range is None:
+                    use_ckpt = True
+                else:
+                    a, b = self._gc_range
+                    use_ckpt = (i >= a and i < b)
+            if use_ckpt:
                 import torch.utils.checkpoint as _ckpt
                 x = _ckpt.checkpoint(lambda inp: blk(inp), x, use_reentrant=False)
             else:
@@ -247,6 +270,7 @@ def main():
     cli.add_argument("--fwe-report-docs", type=int, default=1000, help="FineWeb‑Edu progress print frequency (docs)")
     cli.add_argument("--synthetic-on-fail", action="store_true", help="Fallback to synthetic if FineWeb‑Edu stalls")
     cli.add_argument("--local-path", type=str, default="", help="Path for --dataset fineweb_edu_local (text or JSONL)")
+    cli.add_argument("--steps", type=int, default=None, help="Override training steps for quick traces")
     cli_args, _ = cli.parse_known_args()
     cfg_path = os.environ.get("CONFIG", "configs/train_showcase.yaml")
     print(f"[boot] loading config {cfg_path}", flush=True)
@@ -419,10 +443,39 @@ def main():
             except Exception:
                 pass
 
+        # Optional: trace DDP buckets (very noisy; enable for 1 step)
+        if os.getenv("NSA_TRACE_DDP_BUCKETS", "0").lower() in ("1", "true", "yes"):
+            import torch.distributed as _dist
+
+            def _logging_allreduce(state, bucket):  # type: ignore
+                try:
+                    t = bucket.get_tensor()
+                    print(f"[DDP] rank={_dist.get_rank()} bucket_elems={t.numel()} dtype={t.dtype}", flush=True)
+                except Exception:
+                    pass
+                fut = _dist.all_reduce(bucket.get_tensor(), async_op=True).get_future()
+                return fut.then(lambda fut: fut.value()[0])
+
+            try:
+                model.register_comm_hook(state=None, hook=_logging_allreduce)
+                if rank == 0:
+                    print("[trace] DDP comm hook enabled (bucket logging)", flush=True)
+            except Exception as _e:
+                if rank == 0:
+                    print(f"[trace] Failed to register DDP comm hook: {_e}", flush=True)
+
     # Emit dtype audit after model is fully constructed/wrapped
     _dump_dtypes_report(model, out_dir, rank)
 
+    # Steps with optional CLI override
     steps = int(cfg.train.steps)
+    if cli_args.steps is not None:
+        try:
+            steps = int(cli_args.steps)
+            if rank == 0:
+                print(f"[trace] overriding steps to {steps}", flush=True)
+        except Exception:
+            pass
     S = int(cfg.train.seq_len)
     B_global = int(cfg.train.batch_size)
     if world_size > 1:
@@ -455,6 +508,74 @@ def main():
     use_fwe_local = (str(cli_args.dataset).lower() == "fineweb_edu_local")
     hb = Heartbeat(out_dir, rank)
     hb.write(0, "boot", {"phase": "start"})
+
+    # --- Optional tracing: per-parameter grad arrival & module backward ---
+    trace_grads = os.getenv("NSA_TRACE_GRADS", "0").lower() in ("1", "true", "yes")
+    trace_mod_bwd = os.getenv("NSA_TRACE_MODULE_BWD", "0").lower() in ("1", "true", "yes")
+    grad_seen: dict[str, tuple[torch.Size, bool]] = {}
+    mod_bwd_seen: dict[int, str] = {}
+
+    def _register_grad_tracer():
+        nonlocal grad_seen
+        try:
+            if not trace_grads:
+                return
+            tgt = model.module if hasattr(model, "module") else model
+            for n, p in tgt.named_parameters():
+                if p.requires_grad:
+                    def _mk(nm):
+                        def _h(g):
+                            try:
+                                grad_seen[nm] = (g.shape, bool(torch.isnan(g).any().item()))
+                            except Exception:
+                                grad_seen[nm] = (getattr(g, 'shape', torch.Size([])), False)
+                            return g
+                        return _h
+                    try:
+                        p.register_hook(_mk(n))
+                    except Exception:
+                        continue
+            if rank == 0:
+                print("[trace] grad-arrival hooks registered", flush=True)
+        except Exception as _e:
+            if rank == 0:
+                print(f"[trace] grad tracer registration failed: {_e}", flush=True)
+
+    def _dump_grad_seen(tag: str):
+        try:
+            if not trace_grads or rank != 0:
+                return
+            tgt = model.module if hasattr(model, "module") else model
+            missing = [n for n, p in tgt.named_parameters() if p.requires_grad and n not in grad_seen]
+            print(f"[GRAD-TRACE] {tag} arrived={len(grad_seen)} missing={len(missing)}", flush=True)
+            for n in missing[:50]:
+                print(f"  - MISSING: {n}", flush=True)
+        except Exception:
+            pass
+
+    def _register_module_bwd_hooks():
+        try:
+            if not trace_mod_bwd:
+                return
+            tgt = model.module if hasattr(model, "module") else model
+            def _bwd_hook(mod, grad_in, grad_out):
+                try:
+                    mod_bwd_seen[id(mod)] = mod.__class__.__name__
+                except Exception:
+                    pass
+            for m in tgt.modules():
+                try:
+                    m.register_full_backward_hook(_bwd_hook)
+                except Exception:
+                    continue
+            if rank == 0:
+                print("[trace] module backward hooks registered", flush=True)
+        except Exception as _e:
+            if rank == 0:
+                print(f"[trace] module-bwd hook registration failed: {_e}", flush=True)
+
+    _register_grad_tracer()
+    _register_module_bwd_hooks()
 
     dt_fetch_last: Optional[float] = None
     halt_path = out_dir / ".HALT"
@@ -587,6 +708,24 @@ def main():
                             stack = sys._current_frames().get(getattr(th, "ident", None))
                             if stack:
                                 f.write("".join(traceback.format_stack(stack)))
+                        # Append tracing info if enabled
+                        if trace_grads and rank == 0:
+                            try:
+                                f.write("\n\n--- GRAD TRACE (watchdog) ---\n")
+                                tgt = model.module if hasattr(model, "module") else model
+                                missing = [n for n, p in tgt.named_parameters() if p.requires_grad and n not in grad_seen]
+                                for n in missing:
+                                    f.write(f"MISSING: {n}\n")
+                            except Exception:
+                                pass
+                        if trace_mod_bwd and rank == 0:
+                            try:
+                                f.write("\n\n--- MODULE BWD TRACE (watchdog) ---\n")
+                                # Note: we only know which modules were seen; dump a sample
+                                seen = set(mod_bwd_seen.values())
+                                f.write(f"seen_types={sorted(list(seen))}\n")
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 hb.write(0, "watchdog_dump", {"path": str(dump_path)})
@@ -693,6 +832,8 @@ def main():
                 loss.backward()
         else:
             loss.backward()
+        # Dump grad trace after backward for this step
+        _dump_grad_seen(f"after_backward_step{step}")
         grad_accum += 1
         if grad_accum >= accum:
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.train.get("grad_clip", 1.0)))

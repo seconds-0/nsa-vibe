@@ -131,6 +131,23 @@ Guidance for coding agents (Codex CLI, Cursor, Claude Code) contributing to this
 - Validate: run targeted tests for the area you changed, then broader suites.
 - Safety: ask before destructive actions; keep CPU fallback working; do not introduce Triton in M0.
 
+## Training Preflight Checklist (A100/H100)
+
+Before starting any long GPU run, ensure:
+- `CONFIG` points to a production profile (e.g., `configs/m7c_125m_2xa100_production.yaml`).
+- Critical fields: `precision=bf16`, `gradient_checkpointing=true`, `use_flash=true`, `save_every>=1000`.
+- `seq_len`, `batch_size`, `steps`, `out_dir` match the plan and capacity.
+- Env: `NSA_USE_FA2=1`, `NCCL_P2P_DISABLE=0` `IB_DISABLE=0`, `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True`.
+- Short probe only for SDPA routing (`TORCH_LOGS=+sdp`), then unset.
+
+If any item fails, stop and fix the config before launch.
+
+## Telemetry Units and Reporting
+
+- Heartbeat `gpu_mem_alloc` and `gpu_mem_reserved` are MiB. Do not label them as GB.
+- Prefer showing both MiB and GiB (derived) in user‑facing reports.
+- When reconciling with `nvidia-smi`, sample over a short window during steady compute.
+
 ## Acceptance Checklist (per change)
 
 - Invariants preserved (causality, GQA consistency, Eq.9/10 semantics, counters).

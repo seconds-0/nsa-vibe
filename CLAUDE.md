@@ -76,6 +76,39 @@ PYTHONPATH=. torchrun --nproc_per_node=2 scripts/train_showcase.py --dataset fin
 PYTHONPATH=. torchrun --nproc_per_node=2 scripts/train_showcase_fsdp.py --dataset fineweb_edu
 ```
 
+## Training Config Hygiene (Critical)
+
+Always pin and verify the training config before launching multi‑hour GPU runs.
+
+- Use production profiles on A100/H100: `configs/m7c_125m_2xa100_production.yaml`.
+- Required settings for long runs:
+  - `runtime.precision: bf16`
+  - `runtime.gradient_checkpointing: true`
+  - `runtime.use_flash: true`
+  - `train.save_every: >= 1000` (recommend 5000)
+  - Distinct `train.out_dir` per run
+- Preflight checklist (must be green before launch):
+  - Printed `CONFIG=...` path matches intended file
+  - Precision shows bf16 in logs; gradient checkpointing “on”; flash enabled
+  - `save_every` > 0; `seq_len`, `batch_size`, `steps` match the plan
+  - `out_dir` is empty or a new folder
+
+One‑liner example:
+```bash
+CONFIG=configs/m7c_125m_2xa100_production.yaml \
+NSA_USE_FA2=1 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True \
+NCCL_P2P_DISABLE=0 IB_DISABLE=0 \
+python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 1
+```
+
+## Memory Units Guidance
+
+- Heartbeat fields are recorded in MiB (base‑2 mebibytes):
+  - `gpu_mem_alloc = memory_allocated() // (1024*1024)`
+  - `gpu_mem_reserved = memory_reserved() // (1024*1024)`
+- When reporting in docs/dashboards, label units explicitly. Optionally add derived GiB (`MiB/1024`) for readability.
+- `nvidia-smi` snapshots may capture inter‑step lows; reconcile by sampling over several seconds during steady compute.
+
 ### Monitoring and Diagnostics
 ```bash
 # Real-time monitoring on Prime Intellect GPUs

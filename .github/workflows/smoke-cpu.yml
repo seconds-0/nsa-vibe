@@ -1,0 +1,35 @@
+name: CPU Smokes
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  smokes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps (CPU)
+        run: |
+          python -m pip install -U pip wheel
+          pip install -r requirements-cpu.txt
+          pip install pytest
+      - name: Unit tests (determinism + causality)
+        env:
+          NSA_STRICT_ASSERTS: '1'
+        run: |
+          PYTHONPATH=. pytest -q nsa/tests/test_selection_tiebreak.py nsa/tests/test_causality_asserts.py
+      - name: Quick synthetic smoke (200 steps)
+        env:
+          CONFIG: configs/train_showcase.yaml
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 200
+      - name: Validate training CSV exists
+        run: |
+          test -f artifacts/train_showcase/training.csv || (echo 'training.csv missing' && exit 1)
