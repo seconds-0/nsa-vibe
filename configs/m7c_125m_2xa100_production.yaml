@@ -21,17 +21,17 @@ runtime:
   use_triton_sel: false
   gradient_checkpointing: true  # CRITICAL: Enable for memory headroom
 train:
-  steps: 500  # Target for stability test
+  steps: 50000  # Full 50k training run
   seq_len: 2048  # Conservative 2K sequence length
   batch_size: 2   # 1 per GPU for 2×A100 (micro-batch=1)
   lr: 2.0e-4
   lr_schedule: "cosine"
-  warmup_steps: 50
+  warmup_steps: 2000  # 4% of total steps
   weight_decay: 0.01
   grad_clip: 1.0
   accumulate_grad_batches: 1  # Start with 1 for DDP stability test
-  log_every: 10  # Frequent logging for monitoring
-  eval_every: 100
-  save_every: 100  # Periodic checkpoints
+  log_every: 20  # Log every 20 steps
+  eval_every: 1000
+  save_every: 5000  # Checkpoint every 5000 steps as recommended
   seed: 1337
   out_dir: "artifacts/m7c_125m_2xa100_prod"

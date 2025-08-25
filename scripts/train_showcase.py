@@ -325,6 +325,15 @@ def main():
     model.train()
     if dtype != torch.float32:
         model = model.to(dtype=dtype)
+    # Optionally disable gradient checkpointing in DDP to avoid hook complexity
+    if ddp and os.getenv("NSA_DDP_DISABLE_GC", "1").lower() in ("1", "true", "yes"):
+        try:
+            if hasattr(model, "grad_checkpointing") and getattr(model, "grad_checkpointing"):
+                setattr(model, "grad_checkpointing", False)
+                if rank == 0:
+                    print("[ddp-safe] Disabled gradient checkpointing under DDP", flush=True)
+        except Exception:
+            pass
     if rank == 0:
         print(f"[train] gradient_checkpointing={'on' if getattr(model, 'grad_checkpointing', False) else 'off'}", flush=True)
         if os.getenv("NSA_SDPA_FLASH_ONLY"):
@@ -372,18 +381,43 @@ def main():
             print(f"[train] tensorboard init failed: {e}")
     if ddp and world_size > 1:
         from torch.nn.parallel import DistributedDataParallel as DDP
-        model = DDP(
-            model,
-            device_ids=[device.index] if device.type == "cuda" else None,
-            find_unused_parameters=False,
-        )
-        # Hint DDP that the graph is static to reduce hook bookkeeping
-        try:
-            model._set_static_graph()
-        except Exception:
-            pass
-        # Fix DDP + gradient checkpointing incompatibility
-        model._set_static_graph()
+        # Optional safe-mode for DDP to avoid kernel/backward edge-cases
+        ddp_safe = os.getenv("NSA_DDP_SAFE_MODE", "0").lower() in ("1", "true", "yes")
+        ddp_kwargs = {
+            "device_ids": [device.index] if device.type == "cuda" else None,
+            "find_unused_parameters": True,
+        }
+        if ddp_safe:
+            # Avoid buffer broadcasts and large buckets; disable grad-as-bucket-view
+            ddp_kwargs.update(
+                {
+                    "broadcast_buffers": False,
+                    "gradient_as_bucket_view": False,
+                    "bucket_cap_mb": 2,
+                }
+            )
+            # Also steer NSA kernels to conservative paths on multi-GPU
+            os.environ.setdefault("NSA_SDPA_NO_FLASH", "1")
+            os.environ.setdefault("NSA_USE_FA2", "0")
+            os.environ.setdefault("NSA_USE_FA2_WIN", "0")
+            os.environ.setdefault("NSA_USE_FA2_CMP", "0")
+            os.environ.setdefault("NSA_USE_TRITON_SEL", "0")
+            # Prefer simplest, most conservative selection path (gather), not packed/masked
+            os.environ.setdefault("NSA_USE_SEL_PACK", "0")
+            os.environ.setdefault("NSA_USE_SEL_MASK", "0")
+            os.environ.setdefault("NSA_FORCE_PARITY", "1")
+            # Reduce gradient coupling from gates in DDP
+            os.environ.setdefault("NSA_STOPGRAD_GATES", "1")
+            if rank == 0:
+                print("[ddp-safe] Enabled conservative DDP+NSA settings (gather selection, stopgrad gates)", flush=True)
+        model = DDP(model, **ddp_kwargs)
+        # Optional: allow static graph only if explicitly requested
+        _use_static = os.getenv("NSA_DDP_STATIC_GRAPH", "0").lower() in ("1", "true", "yes")
+        if _use_static:
+            try:
+                model._set_static_graph()
+            except Exception:
+                pass
 
     # Emit dtype audit after model is fully constructed/wrapped
     _dump_dtypes_report(model, out_dir, rank)

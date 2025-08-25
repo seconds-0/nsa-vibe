@@ -40,6 +40,11 @@ class GateMLP(nn.Module):
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, q_group_pooled: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
+        # Uniform gate override for debugging DDP hangs
+        if os.getenv("NSA_FORCE_UNIFORM_GATE", "0").lower() in ("1", "true", "yes"):
+            one_third = 1.0 / 3.0
+            shape = (*q_group_pooled.shape[:-1], 3)
+            return torch.full(shape, one_third, device=q_group_pooled.device, dtype=q_group_pooled.dtype)
         fb = os.getenv("NSA_FORCE_BRANCH")
         if fb:
             fb = fb.strip().lower()
@@ -695,6 +700,8 @@ class NSAAttention(nn.Module):
                 # Preserve dtype for gate input
                 q_gp = Q_t.mean(dim=2, dtype=Q_t.dtype)
                 gates = self.gate(q_gp, tau=self.gate_temp)
+                if os.getenv("NSA_STOPGRAD_GATES", "0").lower() in ("1", "true", "yes"):
+                    gates = gates.detach()
                 
                 # Update gate statistics for M8 monitoring
                 self._update_gate_stats(gates)
@@ -979,6 +986,8 @@ class NSAAttention(nn.Module):
         # Gates and combine
         q_gp = Q.mean(dim=3)  # [B,S,G,Dk]
         gates = self.gate(q_gp.reshape(B * S * self.n_kv_groups, self.d_k), tau=self.gate_temp)
+        if os.getenv("NSA_STOPGRAD_GATES", "0").lower() in ("1", "true", "yes"):
+            gates = gates.detach()
         gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
         
         # Update gate statistics for M8 monitoring
@@ -1116,6 +1125,8 @@ class NSAAttention(nn.Module):
             )
             q_gp = Q_t.mean(dim=2, dtype=Q_t.dtype)
             gates = self.gate(q_gp, tau=self.gate_temp)
+            if os.getenv("NSA_STOPGRAD_GATES", "0").lower() in ("1", "true", "yes"):
+                gates = gates.detach()
             
             # Update gate statistics for M8 monitoring (accumulate across steps)
             self._update_gate_stats(gates)
