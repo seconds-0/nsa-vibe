@@ -8,7 +8,7 @@ What this repo provides
 Quick local sanity
 - Create venv, install (CPU): python3.11 -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements-cpu.txt
 - Run tests: PYTHONPATH=. pytest -q (GPU tests skip by design)
-- Bench summary (clean output): bash scripts/bench_report.sh
+- Bench summary (clean output): bash scripts/bench_summary.sh
 - Tiny decode bench: PYTHONPATH=. python bench/bench_decode.py --S_list 8 --iters 3 --warmup 1 --csv artifacts/decode_test.csv --branch_force_mode env; python scripts/summarize_bench.py artifacts/decode_test.csv
 
 Selection ranges inspection (debug)

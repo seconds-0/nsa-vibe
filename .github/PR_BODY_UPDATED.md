@@ -13,7 +13,7 @@ This PR fixes all CI test failures from PR #11 and implements comprehensive repo
 ## Repository Polish
 - 📚 **Documentation**: Comprehensive README overhaul with quick start, benchmarks, test guides
 - 🧹 **Organization**: Moved artifacts to `artifacts/tracked/`, added cleanup scripts
-- 🛠️ **Developer Tools**: Added `scripts/bench_report.sh`, `scripts/cleanup_repo.sh`, `scripts/history_cleanup.sh`
+- 🛠️ **Developer Tools**: Added `scripts/bench_summary.sh`, `scripts/cleanup_repo.sh`, `scripts/history_cleanup.sh`
 - 📋 **Contributing Guide**: Added `CONTRIBUTING.md` with clear development workflows
 - 🗂️ **Artifact Management**: Cleaned up generated files, organized reports
 

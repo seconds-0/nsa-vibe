@@ -52,7 +52,7 @@ bench-summarize:
 	$(PYTHON) bench/summarize_decode_csv.py artifacts/decode_test.csv
 
 bench-report:
-	bash scripts/bench_report.sh
+	bash scripts/bench_summary.sh
 
 triton-fwd:
 	NSA_USE_TRITON_SEL=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_parity_gpu.py

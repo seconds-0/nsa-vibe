@@ -3,7 +3,7 @@
 Generate a compact Markdown report from a one-shot artifacts directory.
 
 Usage:
-  python scripts/report_from_artifacts.py artifacts/runner/<commit> > report.md
+  python scripts/generate_summary_from_artifacts.py artifacts/runner/<commit> > report.md
 """
 
 import argparse

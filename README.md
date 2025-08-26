@@ -19,7 +19,7 @@ Core tests (CPU-safe)
 - `PYTHONPATH=. pytest -q -k "test_masks or test_block_math or test_equiv_small or test_decode_counters or test_group_consistency"`
 
 Bench summary (screenshot‑ready)
-- `bash scripts/bench_report.sh`  # prints env, PASS lines, needle checks, decode table, csv head
+- `bash scripts/bench_summary.sh`  # prints env, PASS lines, needle checks, decode table, csv head
 
 Decode bench (CSV + summary)
 - `PYTHONPATH=. python bench/bench_decode.py --S_list 512,1024,2048,4096 --iters 64 --warmup 8 --csv artifacts/decode_gpu_final.csv`
@@ -63,7 +63,7 @@ Notes
 - `nsa/` core modules (attention, selection, packing, rope, flags) and tests under `nsa/tests/`
 - `bench/` decode and selection benches; CSV summarizer
 - `configs/` base + training showcase config
-- `scripts/` helpers: bench_report.sh, train_showcase.py, cleanup_repo.sh, etc.
+- `scripts/` helpers: bench_summary.sh, train_showcase.py, cleanup_repo.sh, etc.
 - `Documentation/` PRD, plans (M0–M6), guides, test plans
 
 ## Contributing

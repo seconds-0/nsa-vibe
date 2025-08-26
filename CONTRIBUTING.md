@@ -22,7 +22,7 @@ Quality
 Benches
 - Decode bench CSV: `PYTHONPATH=. python bench/bench_decode.py --S_list 512,1024 --iters 16 --warmup 4 --csv artifacts/decode_test.csv`
 - Summarize: `python scripts/summarize_bench.py artifacts/decode_test.csv`
-- Bench summary (screenshot-friendly): `bash scripts/bench_report.sh`
+- Bench summary (screenshot-friendly): `bash scripts/bench_summary.sh`
 
 Outputs and cleanup
 - Generated files go under `artifacts/` (ignored).

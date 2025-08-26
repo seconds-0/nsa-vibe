@@ -11,7 +11,7 @@ Scripts (shell/Python)
 - scripts/automation/create_train_script.sh — fix: installs generic deps; align with constraints and `_env_guard.py`; tmux session naming
 - scripts/automation/remote_train_setup.sh — fix: same as above; ensure no hardcoded branches/paths
 - scripts/automation/create_setup_script.sh — fix: reduce to minimal setup; avoid global apt where possible
-- scripts/bench_report.sh — keep: internal use; ensure markers and paths exist
+- scripts/bench_summary.sh — keep: internal use; ensure markers and paths exist
 - scripts/prime_bootstrap.sh — fix: align to constraints-cu121-torch24.txt; print env tuple; no host specifics
 - scripts/cleanup_repo.sh — fix: contains rm -rf on patterns; ensure dry-run default and prompt/flag to confirm
 - scripts/dev_quickcheck.sh — keep: dev only; ensure no remote calls
