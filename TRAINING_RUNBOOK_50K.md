@@ -46,7 +46,9 @@ Run this once per GPU pod to confirm the environment and the M8 fix are healthy.
   - `tensorboard --logdir artifacts/train_showcase/tb --port 6006`
 - Health expectations:
   - Loss: smooth decline; no plateaus > 1k steps
-  - Throughput: ~400 toks/s ±10% (for seq_len=128 toy run)
+  - Throughput acceptance (production profile, seq_len=2048):
+    - 2×A100 80GB PCIe Gen3: 35–40 toks/s
+    - 2×A100 80GB PCIe Gen4: 45–55 toks/s
   - Memory (heartbeat MiB): allocated/reserved flat; no creep
   - Fallback counters: near zero; not trending upward
   - Gates: entropy_mean > 0.5; max_gate_mean < 0.9; collapse_fraction ≈ 0
@@ -106,13 +108,19 @@ Use a production profile with BF16, gradient checkpointing, and frequent checkpo
   - `train.seq_len: 2048` (validate), consider 3072 if reserved < 40 GB/GPU
   - `train.save_every: 5000` (or 1000 if tighter RPO)
   - Distinct `train.out_dir`
-- Launch (2×A100):
+- Launch (2×A100, PCIe‑aware):
 ```
 CONFIG=configs/m7c_125m_2xa100_production.yaml \
-NSA_USE_FA2=1 NCCL_P2P_DISABLE=0 IB_DISABLE=0 \
+NSA_SEL_RANGES_V2=1 \
+NSA_DDP_COMPRESS=bf16 NSA_DDP_BUCKET_MB=50 \
+NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_IB_DISABLE=1 \
 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True \
-python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 1
+python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 1 --precision bf16
 ```
+  - Notes:
+    - Keep per‑GPU batch small (1–2); scale with `NSA_ACCUM`.
+    - If overlap is poor, sweep `NSA_DDP_BUCKET_MB` in {25, 50, 100}.
+    - Selection v2 is default‑on; disable only for A/B (`NSA_SEL_RANGES_V2=0`).
 - Success criteria (first 500 steps):
   - No DDP errors; stable throughput; reserved < 30–40 GB/GPU (@2k seq)
   - Low FA‑2 fallback counts; healthy gate entropy; no causality asserts
@@ -122,9 +130,11 @@ python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 1
 - Precision is BF16; gradient checkpointing “on”; flash enabled.
 - `save_every` > 0; `steps`, `seq_len`, `batch_size`, `out_dir` as planned.
 - Env:
-  - `NSA_USE_FA2=1`
-  - `NCCL_P2P_DISABLE=0` `IB_DISABLE=0`
+  - `NSA_SEL_RANGES_V2=1` (default; v2 GPU range conversion)
+  - `NSA_DDP_COMPRESS=bf16` (default on DDP); `NSA_DDP_BUCKET_MB` set (start 50)
+  - `NCCL_ALGO=Ring` `NCCL_PROTO=Simple` (PCIe) and `NCCL_IB_DISABLE=1` if no IB
   - `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True`
+  - Optional: `NSA_SDPA_AUDIT=1` for one‑time Flash viability log
 - Short SDPA routing probe (`TORCH_LOGS=+sdp`) only for the first 30–100 steps, then unset.
 
 ## Troubleshooting
@@ -132,6 +142,7 @@ python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 1
 - Low/volatile GPU mem in `nvidia-smi`: sample during steady compute; reconcile with heartbeat (MiB) values.
 - DDP + checkpointing errors: keep `accumulate_grad_batches=1`; use `no_sync` during accumulation; start here before scaling.
 - Kernel routing mismatches: don’t force flash‑only globally; use short probes; selection isn’t always flash‑eligible.
+ - Selection hotspot regression: ensure `NSA_SEL_RANGES_V2=1`; run `scripts/profiler_comparison.py` for v1 vs v2 A/B.
 
 ## RUN / Tradeoffs (Recommended First, with context)
 - Recommend: BF16 + gradient checkpointing ON.
@@ -166,6 +177,7 @@ python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 1
 - Benches:
   - Prefill: `PYTHONPATH=. NSA_USE_FA2=1 uv run python bench/bench_prefill.py --config configs/base.yaml`
   - Decode: `PYTHONPATH=. NSA_USE_FA2=1 uv run python bench/bench_decode.py --config configs/base.yaml`
+ - A/B perf: `python scripts/profiler_comparison.py --steps 100 --warmup 10`
 
 ---
 Prepared for the test engineer. Follow this runbook verbatim for validation, monitoring, and executing the production redo with guardrails.

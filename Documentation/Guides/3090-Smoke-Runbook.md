@@ -1,5 +1,5 @@
 Title: 3090 Single‑GPU Next Test Runbook (Preamble + Full Steps)
-Version: v1.4
+Version: v1.5
 Date: 2025-08-26
 
 Overview (What & Why)
@@ -34,6 +34,7 @@ Environment & Defaults
   - `NSA_HEARTBEAT_EVERY=1` (per‑step heartbeat)
   - `NSA_DISABLE_AUX_STATS=1` (skip end‑of‑step NSA gate/selection stats)
   - `NSA_PREFILL_BATCHED=1` (use batched prefill path; bypasses step‑5 hang)
+  - `NSA_SEL_RANGES_V2=1` (GPU range conversion; default ON)
   - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:256`
   - `NSA_MEM_DUMP_EVERY=0|N` (optional; dump GPU mem pre/post step every N steps; use 1 for dense debugging)
 

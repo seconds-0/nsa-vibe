@@ -8,6 +8,13 @@ Highlights
 - Per‑branch counters and gate stats for observability; long‑context “needle” test.
 - Training‑ready: backward passes for all branches; tiny showcase trainer included.
 
+New defaults and flags (Aug 2025)
+- Selection v2 enabled by default: GPU‑vectorized range conversion replaces Python loops.
+  - Disable only for A/B: `NSA_SEL_RANGES_V2=0` (default is 1).
+- DDP gradient compression: `NSA_DDP_COMPRESS=bf16|fp16|none` (default `bf16` when DDP).
+- SDPA audit (one‑time): `NSA_SDPA_AUDIT=1` to log cmp/win Flash viability at startup.
+- NVTX profiling: `NSA_NVTX=1` to annotate major prefill stages (ranges v2, mapping, branches).
+
 ## Quick Start
 
 Setup (CPU or GPU)
@@ -30,6 +37,14 @@ Prime Intellect Runbook (SSH)
 - Start training (auto‑picks config by VRAM, handles 1–2 GPUs): `bash scripts/train_m7c_prime.sh`
 - Logs: `artifacts/train_runs/` and `artifacts/m7c_125m/` (training.csv, checkpoints)
 
+Profiling and A/B tools
+- Compare v1 vs v2 selection, with/without compression:
+  - `python scripts/profiler_comparison.py --steps 100 --warmup 10`
+  - Multi‑GPU adds `v2_ranges_ddp_bf16/fp16` runs automatically.
+- Single smoke with NVTX:
+  - `NSA_NVTX=1 NSA_SEL_RANGES_V2=1 CONFIG=configs/m7c_125m_40g.yaml \
+     python -u scripts/train_showcase.py --dataset synthetic --steps 200`
+
 End-to-end test runner
 - `PYTHONPATH=. python scripts/run_m7_readiness.py --out artifacts/run_$(date +%Y%m%d-%H%M)`
 - Optional flags: `--enable-triton` (parity tests), `--enable-fa2` (if available), `--skip-long` (omit 64k probes)
@@ -45,6 +60,7 @@ How NSA chooses SDPA vs FA‑2 vs Triton, and all device/flag guards:
 Notes
 - On RTX 4090 (SM 8.9), Triton selection is disabled by ADR. Use `NSA_TRITON_SEL_FORCE=1` only for parity tests.
 - Torch↔Triton: Torch 2.3 ↔ Triton 2.3; Torch 2.4+ ↔ Triton 3.x.
+- On PCIe multi‑GPU, prefer per‑GPU batch 1–2 and scale with `NSA_ACCUM`; adjust `NSA_DDP_BUCKET_MB` (25–100) and keep `NSA_DDP_COMPRESS=bf16`.
 
 ## What’s Implemented
 - NSAAttention: cmp/sel/win branches + GateMLP (zero‑init last layer, τ=1.0), strict causal masks.

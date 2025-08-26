@@ -1,5 +1,5 @@
 Title: 2×A100 Production Runbook (NSA M7C 125M)
-Version: v1.3
+Version: v1.4
 Date: 2025-08-26
 
 Overview (What & Why)
@@ -19,12 +19,15 @@ Defaults (A100)
 - Aux stats: `NSA_DISABLE_AUX_STATS=1` (avoid end‑of‑step overhead during smokes).
 - Logging: `NSA_TB_DISABLE=1`, `NSA_DISABLE_CSV_LOGS=1` for smokes.
 - GC: config enables GC, but trainer disables under DDP by default via `NSA_DDP_DISABLE_GC=1` to simplify hooks. Turn GC back on after smokes if needed for memory.
+ - Selection v2 (GPU ranges): default ON (`NSA_SEL_RANGES_V2=1`).
+ - DDP gradient compression: default BF16 (`NSA_DDP_COMPRESS=bf16`).
 
 Mandatory Envs (for production runs)
 - `NSA_PREFILL_BATCHED=1` (bypass sequential prefill hang)
 - `NSA_DISABLE_AUX_STATS=1` (avoid end‑of‑step overhead during smokes)
 - `NSA_DDP_STATIC_GRAPH=1` and `NSA_DDP_FIND_UNUSED=0` (static‑graph performance)
-- `NSA_DDP_BUCKET_MB=25` (larger DDP buckets)
+- `NSA_DDP_BUCKET_MB=50` (start; sweep 25–100 for overlap)
+- `NSA_DDP_COMPRESS=bf16` (reduce PCIe bytes)
 - On PCIe (no NVLink): set `NCCL_ALGO=Ring`, `NCCL_PROTO=Simple`; keep `NCCL_IB_DISABLE=1` if no InfiniBand.
 
 Preflight
@@ -43,7 +46,8 @@ Commands
   - `bash scripts/run_m7c_2xa100_production.sh`
 
 - Manual (explicit) 2×A100 smoke (300 steps):
-  - `NSA_PREFILL_BATCHED=1 NSA_DISABLE_AUX_STATS=1 NSA_TB_DISABLE=1 NSA_DISABLE_CSV_LOGS=1 NSA_DDP_STATIC_GRAPH=1 NSA_DDP_FIND_UNUSED=0 NSA_DDP_BUCKET_MB=25 \
+  - `NSA_PREFILL_BATCHED=1 NSA_DISABLE_AUX_STATS=1 NSA_TB_DISABLE=1 NSA_DISABLE_CSV_LOGS=1 \
+NSA_DDP_STATIC_GRAPH=1 NSA_DDP_FIND_UNUSED=0 NSA_DDP_BUCKET_MB=50 NSA_DDP_COMPRESS=bf16 \
 CONFIG=configs/m7c_125m_2xa100_production.yaml \
 torchrun --nproc_per_node=2 scripts/train_showcase.py --dataset fineweb_edu --steps 300 --precision bf16`
 
@@ -73,6 +77,7 @@ Acceptance Criteria
 - Phase 1: completes 300 steps; no stalls; loss finite beyond step 5; steady step times; utilization across both GPUs balanced (>80%); throughput within expected PCIe bounds (Gen3: 35–40 toks/s; Gen4: 45–55 toks/s).
 - Phase 2: completes 1000 steps; memory usage stable per GPU (< 60 GB, configurable threshold).
 - Heartbeats: rank0 shows step “progress” and “step_end”; subsequent steps emit “step_start”.
+ - Selection v2 CPU hotspot removed: with `NSA_NVTX=1`, Chrome trace shows selection range conversion as GPU kernels only (no large CPU blocks).
 
 Monitoring & Artifacts
 - Output dir: `artifacts/m7c_125m_2xa100_prod/` (env.json, heartbeats, optional mem dumps, logs).
@@ -91,6 +96,7 @@ Toggles & Tuning
 - SDPA A/B (if regressions):
   - `NSA_SDPA_NO_FLASH=1` (force mem_efficient/math kernels)
   - `NSA_SDPA_FLASH_ONLY=1` (diagnostic; flash only)
+ - One‑time SDPA audit: `NSA_SDPA_AUDIT=1` (logs cmp/win Flash viability at startup)
 - fp16 is not recommended on 3090; on A100 stick to bf16. If you must run fp16, trainer supports AMP + GradScaler with env tuning:
   - `NSA_SCALER_INIT_SCALE` (65536), `NSA_SCALER_GROWTH_INTERVAL` (2000), `NSA_SCALER_GROWTH_FACTOR` (2.0), `NSA_SCALER_BACKOFF_FACTOR` (0.5)
   - `NSA_LR` to override learning rate for quick A/B.

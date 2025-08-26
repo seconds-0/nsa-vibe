@@ -315,8 +315,28 @@ def select_topn_ranges_batched(
     if n_top >= S_sel:
         selected = torch.where(pick_mask, all_idx, torch.full_like(all_idx, -1))
     selected = torch.sort(selected, dim=-1).values
-    ranges = convert_indices_to_ranges_batched(selected, meta, S)
+    # Env-gated GPU range conversion (v2) to remove Python loops on hot path
+    use_v2 = os.getenv("NSA_SEL_RANGES_V2", "1").lower() in ("1", "true", "yes")
+    if use_v2:
+        ranges = convert_indices_to_ranges_batched_v2(selected, meta, S)
+    else:
+        ranges = convert_indices_to_ranges_batched(selected, meta, S)
     return ranges
+
+
+def convert_indices_to_ranges_batched_dispatch(
+    indices: torch.Tensor,
+    meta: BlockMeta,
+    S: int,
+) -> torch.Tensor:
+    """
+    Dispatch helper mirroring production behavior: chooses v2 by default unless disabled.
+    Exposed for tests and tooling.
+    """
+    use_v2 = os.getenv("NSA_SEL_RANGES_V2", "1").lower() in ("1", "true", "yes")
+    if use_v2:
+        return convert_indices_to_ranges_batched_v2(indices, meta, S)
+    return convert_indices_to_ranges_batched(indices, meta, S)
 
 
 def convert_indices_to_ranges_batched(
@@ -367,6 +387,160 @@ def convert_indices_to_ranges_batched(
                     out[b, t, g, i, 0] = s0
                     out[b, t, g, i, 1] = e0
                 idx += 1
+    return out
+
+
+def convert_indices_to_ranges_batched_v2(
+    indices: torch.Tensor,  # [B,S,G,k], sorted asc, -1 padded
+    meta: BlockMeta,
+    S: int,
+) -> torch.Tensor:  # [B,S,G,k,2] (padded with zero-length ranges)
+    """
+    Vectorized GPU range conversion with no Python loops.
+    - Treat equal and +1 successive block ids as a single merged run.
+    - Map runs to token [start, end) using sel_starts and l_sel.
+    - Clamp end to t+1 per row to preserve causality.
+    - Output is padded to k runs per row; zero-length ranges are encoded as [0,0].
+    """
+    # NVTX annotation support
+    _nvtx = os.getenv("NSA_NVTX", "0").lower() in ("1", "true", "yes")
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_push("nsa.sel.ranges_v2")
+        except Exception:
+            _nvtx = False
+    
+    device = indices.device
+    B, S_q, G, K = indices.shape
+    if K == 0:
+        return torch.zeros((B, S_q, G, 0, 2), dtype=torch.int32, device=device)
+
+    # Valid mask and prepared index tensor
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_push("v2_run_detection")
+        except Exception:
+            pass
+    
+    valid = indices.ge(0)
+    x = torch.where(valid, indices, torch.full_like(indices, -2))  # sentinel -2
+
+    # Identify run starts: first valid element or break in adjacency (including dedup collapse)
+    x_shift = torch.cat([torch.full_like(x[..., :1], -2), x[..., :-1]], dim=-1)
+    prev_valid = x_shift.ge(0)
+    diff = x - x_shift
+    adjacent_or_dup = (diff.eq(1) | diff.eq(0)) & prev_valid
+    run_start = valid & (~adjacent_or_dup | (~prev_valid))
+    
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_pop()
+        except Exception:
+            pass
+
+    # Row-local run ids [0..runs_per_row-1], -1 for invalid
+    run_id = run_start.to(torch.int32).cumsum(dim=-1) - 1
+    run_id = torch.where(valid, run_id, torch.full_like(run_id, -1))
+
+    # Number of runs per row and flattened row indexing
+    runs_per_row = run_start.sum(dim=-1, dtype=torch.int32)  # [B,S,G]
+    N = B * S_q * G
+    runs_per_row_flat = runs_per_row.reshape(N)
+
+    # Build flattened per-run metadata
+    # Flatten last dim for selection
+    run_start_flat = run_start.reshape(-1, K)
+    x_flat = x.reshape(-1, K)
+    run_id_flat = run_id.reshape(-1, K)
+
+    # Indices (within last dim) where runs start per row
+    pos = torch.arange(K, device=device, dtype=torch.int32)
+    pos_flat = pos.view(1, K).expand(run_start_flat.shape[0], K)
+    start_pos_flat = pos_flat[run_start_flat]
+    # Corresponding block ids where runs start
+    start_blk_flat = x_flat[run_start_flat].to(torch.int32)
+
+    # Build unique global run ids by offsetting row-local run ids with row offsets
+    run_offsets = torch.cumsum(
+        torch.nn.functional.pad(runs_per_row_flat, (1, 0)), dim=0
+    )[:-1]  # [N]
+    # Row index per element (0..N-1)
+    row_ids = torch.arange(N, device=device, dtype=torch.int32)
+    row_ids_per_elem = row_ids.view(N, 1).expand(N, K)
+    # Global run id per element; -1 for invalid
+    global_rid = torch.where(
+        run_id_flat.ge(0),
+        run_id_flat + run_offsets.view(N, 1),
+        torch.full_like(run_id_flat, -1),
+    )
+    global_rid_valid = global_rid[run_id_flat.ge(0)]  # [total_valid_elems]
+
+    # For each global run, compute max block id in that run (end block)
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_push("v2_scatter_reduce")
+        except Exception:
+            pass
+    
+    total_runs = int(runs_per_row_flat.sum().item())
+    if total_runs == 0:
+        if _nvtx:
+            try:
+                torch.cuda.nvtx.range_pop()
+            except Exception:
+                pass
+        return torch.zeros((B, S_q, G, K, 2), dtype=torch.int32, device=device)
+    max_blk = torch.full((total_runs,), -2, dtype=torch.int32, device=device)
+    # Values to reduce are block ids for valid elements
+    blk_vals = x_flat[run_id_flat.ge(0)].to(torch.int32)
+    max_blk.scatter_reduce_(0, global_rid_valid.to(torch.int64), blk_vals, reduce="amax", include_self=False)
+    
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_pop()
+        except Exception:
+            pass
+
+    # Start block ids per run, collected in row order
+    start_blk_per_run = start_blk_flat  # length == total_runs
+
+    # Map block ids to token starts/ends
+    sel_starts = meta.sel_starts.to(device=device, dtype=torch.int32)
+    l_sel = int(meta.l_sel)
+    start_tok_flat = sel_starts[start_blk_per_run.clamp_min(0)]  # [total_runs]
+    end_tok_flat = sel_starts[max_blk.clamp_min(0)] + l_sel
+
+    # Clamp end to t+1 per row
+    # Row t positions: [S] repeated over B,G
+    tpos = torch.arange(S, device=device, dtype=torch.int32)
+    t_rows = tpos.view(1, S, 1).expand(B, S, G).reshape(N)  # [N]
+    # t per run: repeat per row by runs_per_row
+    t_per_run = torch.repeat_interleave(t_rows, runs_per_row_flat)
+    end_tok_flat = torch.minimum(end_tok_flat, (t_per_run + 1))
+
+    # Prepare output [B,S,G,K,2], fill zeros then scatter first runs_per_row entries per row
+    out = torch.zeros((B, S_q, G, K, 2), dtype=torch.int32, device=device)
+    # Positions within row to write (0..K-1): take row-local run_id at run starts
+    run_id_at_starts = (run_id.reshape(-1, K))[run_start_flat]
+    # Compute base index in flattened out for each run write
+    # Build linear indices for advanced indexing
+    # Map flat run order back to (row, pos)
+    row_of_run = torch.repeat_interleave(row_ids, runs_per_row_flat)
+    pos_in_row = run_id_at_starts  # 0..runs_per_row[row]-1
+    b = (row_of_run // (S_q * G)).to(torch.int64)
+    rem = row_of_run % (S_q * G)
+    t = (rem // G).to(torch.int64)
+    g = (rem % G).to(torch.int64)
+    p = pos_in_row.to(torch.int64)
+    out[b, t, g, p, 0] = start_tok_flat.to(torch.int32)
+    out[b, t, g, p, 1] = end_tok_flat.to(torch.int32)
+    
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_pop()
+        except Exception:
+            pass
+    
     return out
 
 
