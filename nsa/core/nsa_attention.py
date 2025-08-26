@@ -541,32 +541,14 @@ class NSAAttention(nn.Module):
             p_cmp_all = compute_pcmp_all(Q, K_cmp_full, scale)
             # Per-token outputs (S should be 1 in decode)
             outs = []
-            # Parse env toggles once per decode call, or reuse a static snapshot if NSA_ENV_STATIC=1
-            if self._env_static and self._env_cache is not None:
-                env = self._env_cache
-            else:
-                env = {
-                    "force_parity": os.getenv("NSA_FORCE_PARITY", "0").lower()
-                    in ("1", "true", "yes"),
-                    "use_sel_pack": os.getenv("NSA_USE_SEL_PACK", "1").lower()
-                    in ("1", "true", "yes"),
-                    "use_triton_sel": (
-                        os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes")
-                    )
-                    or self.use_triton_sel,
-                    "use_cuda_sel": os.getenv("NSA_SEL_CUDA", "0").lower() in ("1", "true", "yes"),
-                    "fa2_all": os.getenv("NSA_USE_FA2", "0").lower() in ("1", "true", "yes"),
-                    "fa2_win": os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes"),
-                    "fa2_cmp": os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes"),
-                }
-                if self._env_static:
-                    self._env_cache = env
+            # Use cached environment variables
+            env = self._env_cache
 
             for t in range(S):
                 p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all[:, t : t + 1], kv.meta)
                 
                 # M8: Optional Eq.9 verification in decode 
-                if os.getenv("NSA_VERIFY_EQ9_MAPPING", "0").lower() in ("1", "true", "yes"):
+                if self._env_cache.get("verify_eq9", False):
                     is_equiv, details = verify_mapping_equivalence(p_cmp_all[:, t : t + 1], kv.meta)
                     if not is_equiv:
                         log("error.eq9_verification_failed_decode",
@@ -665,7 +647,7 @@ class NSAAttention(nn.Module):
                         # Fallback to gather SDPA
                         O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
                 elif (
-                    os.getenv("NSA_USE_SEL_MASK", "0").lower() in ("1", "true", "yes")
+                    self._env_cache.get("use_sel_mask", False)
                     and not force_parity
                 ):
                     try:
@@ -746,7 +728,7 @@ class NSAAttention(nn.Module):
                 # Preserve dtype for gate input
                 q_gp = Q_t.mean(dim=2, dtype=Q_t.dtype)
                 gates = self.gate(q_gp, tau=self.gate_temp)
-                if os.getenv("NSA_STOPGRAD_GATES", "0").lower() in ("1", "true", "yes"):
+                if self._env_cache.get("stopgrad_gates", False):
                     gates = gates.detach()
                 
                 # Update gate statistics for M8 monitoring
@@ -787,7 +769,7 @@ class NSAAttention(nn.Module):
         """
         B, S, _ = x.shape
         # Projections
-        _nvtx = os.getenv("NSA_NVTX", "0").lower() in ("1", "true", "yes")
+        _nvtx = self._env_cache.get("nvtx", False)
         if _nvtx:
             try:
                 import torch as _t
@@ -861,7 +843,7 @@ class NSAAttention(nn.Module):
         p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all, kv.meta)  # [B,S,G,h,S_sel]
         
         # M8: Optional Eq.9 verification in batched prefill
-        if os.getenv("NSA_VERIFY_EQ9_MAPPING", "0").lower() in ("1", "true", "yes"):
+        if self._env_cache.get("verify_eq9", False):
             is_equiv, details = verify_mapping_equivalence(p_cmp_all, kv.meta)
             if not is_equiv:
                 log("error.eq9_verification_failed_prefill", 
@@ -899,7 +881,7 @@ class NSAAttention(nn.Module):
                 pass
         
         # M8: Assert causal masking for batched selection (GPU-sync gated)
-        strict_asserts = os.getenv("NSA_STRICT_ASSERTS", "0").lower() in ("1", "true", "yes")
+        strict_asserts = self._env_cache.get("strict_asserts", False)
         if strict_asserts and sel_ranges_all.numel() > 0:
             for t in range(S):
                 t_ranges = sel_ranges_all[:, t]  # [B,G,n,2]
@@ -912,18 +894,11 @@ class NSAAttention(nn.Module):
         log("prefill.select", n_sel=self.n_sel, l_sel=self.l_sel, ranges=sel_ranges_all)
 
         # Branch attentions in parallel (parity-first for cmp/win, with optional masked SDPA gates)
-        force_parity = os.getenv("NSA_FORCE_PARITY", "0").lower() in ("1", "true", "yes")
-        env_all = os.environ.get("NSA_USE_FA2")
-        fa2_all = (
-            (env_all.lower() in ("1", "true", "yes"))
-            if env_all is not None
-            else self.use_flash_default
-        )
-        fa2_win = os.getenv("NSA_USE_FA2_WIN", "0").lower() in ("1", "true", "yes")
-        fa2_cmp = os.getenv("NSA_USE_FA2_CMP", "0").lower() in ("1", "true", "yes")
-        use_cmp_mask = (
-            os.getenv("NSA_USE_CMP_MASK", "1").lower() in ("1", "true", "yes") and not force_parity
-        )
+        force_parity = self._env_cache.get("force_parity", False)
+        fa2_all = self._env_cache.get("fa2_all", False) or self.use_flash_default
+        fa2_win = self._env_cache.get("fa2_win", False)
+        fa2_cmp = self._env_cache.get("fa2_cmp", False)
+        use_cmp_mask = self._env_cache.get("use_cmp_mask", True) and not force_parity
         if (fa2_all or fa2_cmp) and not force_parity:
             try:
                 O_cmp = compressed_attention_fa2(Q, kv.K_cmp, kv.V_cmp, self.l, self.d)
@@ -976,13 +951,8 @@ class NSAAttention(nn.Module):
         log("prefill.cmp", O_cmp=O_cmp)
 
         # Selected ranges attention (prefer Triton if enabled; else packed/gather)
-        use_sel_pack = (
-            os.getenv("NSA_USE_SEL_PACK", "1").lower() in ("1", "true", "yes") and not force_parity
-        )
-        use_triton_sel = (
-            os.getenv("NSA_USE_TRITON_SEL", "0").lower() in ("1", "true", "yes")
-            or self.use_triton_sel
-        ) and not force_parity
+        use_sel_pack = self._env_cache.get("use_sel_pack", True) and not force_parity
+        use_triton_sel = self._env_cache.get("use_triton_sel", False) or self.use_triton_sel and not force_parity
         if use_triton_sel:
             try:
                 from nsa.kernels.triton_sel_kernel import selection_attention_triton
@@ -1006,7 +976,7 @@ class NSAAttention(nn.Module):
                     total_fails=self._fallback_counters["selection_pack_fails"])
                 # Fallback to gather SDPA
                 O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
-        elif os.getenv("NSA_USE_SEL_MASK", "0").lower() in ("1", "true", "yes"):
+        elif self._env_cache.get("use_sel_mask", False):
             try:
                 O_sel = grouped_selection_attention_masked(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
             except Exception as e:
@@ -1021,9 +991,7 @@ class NSAAttention(nn.Module):
             O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         log("prefill.sel", O_sel=O_sel)
 
-        use_win_mask = (
-            os.getenv("NSA_USE_WIN_MASK", "1").lower() in ("1", "true", "yes") and not force_parity
-        )
+        use_win_mask = self._env_cache.get("use_win_mask", True) and not force_parity
         if (fa2_all or fa2_win) and not force_parity:
             try:
                 O_win = sliding_window_attention_fa2(Q, K_win, V_win, self.w)
@@ -1069,7 +1037,7 @@ class NSAAttention(nn.Module):
         # Gates and combine
         q_gp = Q.mean(dim=3)  # [B,S,G,Dk]
         gates = self.gate(q_gp.reshape(B * S * self.n_kv_groups, self.d_k), tau=self.gate_temp)
-        if os.getenv("NSA_STOPGRAD_GATES", "0").lower() in ("1", "true", "yes"):
+        if self._env_cache.get("stopgrad_gates", False):
             gates = gates.detach()
         gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
         
@@ -1086,7 +1054,7 @@ class NSAAttention(nn.Module):
         log("prefill.out", out=out)
 
         # Optional debug compare: sequential-style per-token recompute to measure MAE
-        if os.getenv("NSA_DEBUG_COMPARE", "0").lower() in ("1", "true", "yes"):
+        if self._env_cache.get("debug_compare", False):
             with torch.no_grad():
                 # Compressed per-token recompute
                 O_cmp_seq = torch.zeros_like(O_cmp)
@@ -1208,7 +1176,7 @@ class NSAAttention(nn.Module):
             )
             q_gp = Q_t.mean(dim=2, dtype=Q_t.dtype)
             gates = self.gate(q_gp, tau=self.gate_temp)
-            if os.getenv("NSA_STOPGRAD_GATES", "0").lower() in ("1", "true", "yes"):
+            if self._env_cache.get("stopgrad_gates", False):
                 gates = gates.detach()
             
             # Update gate statistics for M8 monitoring (accumulate across steps)
@@ -1304,7 +1272,7 @@ class NSAAttention(nn.Module):
         Dv = V.shape[-1]
         outs = []
         S_kv = K.shape[2]
-        strict_asserts = os.getenv("NSA_STRICT_ASSERTS", "0").lower() in ("1", "true", "yes")
+        strict_asserts = self._env_cache.get("strict_asserts", False) if hasattr(self, '_env_cache') else False
         for b in range(B):
             row = []
             for g in range(G):
