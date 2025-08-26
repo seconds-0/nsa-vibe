@@ -21,9 +21,16 @@ echo
 
 # Set production environment variables per plan
 export NSA_USE_FA2=1
+export NSA_PREFILL_BATCHED=1
+export NSA_DISABLE_AUX_STATS=1
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True
+export NSA_DDP_STATIC_GRAPH=1
+export NSA_DDP_FIND_UNUSED=0
+export NSA_DDP_BUCKET_MB=25
 export NCCL_P2P_DISABLE=0
-export NCCL_IB_DISABLE=0
+export NCCL_IB_DISABLE=1
+export NCCL_ALGO=Ring
+export NCCL_PROTO=Simple
 export NSA_MEM_DUMP_EVERY=100
 export NSA_LOG_GRAD_NORM=1
 export PYTHONPATH=.
@@ -37,6 +44,8 @@ echo "  NSA_USE_FA2=$NSA_USE_FA2"
 echo "  PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
 echo "  NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE"
 echo "  NCCL_IB_DISABLE=$NCCL_IB_DISABLE"
+echo "  NCCL_ALGO=$NCCL_ALGO"
+echo "  NCCL_PROTO=$NCCL_PROTO"
 echo "  NSA_MEM_DUMP_EVERY=$NSA_MEM_DUMP_EVERY"
 echo "  TORCH_LOGS=$TORCH_LOGS (first 100 steps)"
 echo "  CONFIG=$CONFIG"

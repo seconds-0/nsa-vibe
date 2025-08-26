@@ -158,6 +158,9 @@ def grouped_selection_attention(
                     v_btgh = (
                         v.unsqueeze(0).unsqueeze(0).expand(1, q.shape[0], v.shape[0], v.shape[1])
                     )  # [1,h,L,Dv]
+                    q_btgh = q_btgh.contiguous()
+                    k_btgh = k_btgh.contiguous()
+                    v_btgh = v_btgh.contiguous()
                     attn = F.scaled_dot_product_attention(
                         q_btgh, k_btgh, v_btgh, is_causal=True
                     )  # [1,h,1,Dv]
@@ -338,6 +341,7 @@ def grouped_selection_attention_masked(
         neg_inf,
     )
 
+    Qf = Qf.contiguous(); Kf = Kf.contiguous(); Vf = Vf.contiguous(); Mf = Mf.contiguous()
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     return Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
 

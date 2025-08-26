@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Reports & Naming Rules (MUST FOLLOW)
+
+- Role: Claude is the Test Engineer. All Test Engineer authored reports MUST:
+  - Live under `Documentation/Reports/`
+  - Be named: `<yyyy-mm-dd> Test Engineer Report - <Subject> <vX>.md`
+  - Example: `2025-08-26 Test Engineer Report - DDP One-Step Trace v1.md`
+- Content: Summarize objectives, environment, exact commands, results, evidence paths, and a clear go/no‑go.
+- Scope: Prefer one primary report per subject per day; increment `vX` for iterations.
+- Anti-pattern: Do not drop ad‑hoc `.md` reports in the repo root; do not create multiple similarly named files across directories.
+
 ## Project Overview
 
 This is an implementation of Native Sparse Attention (NSA), a drop-in attention module for decoder-only Transformers with trainable, hardware-aligned sparse attention. The implementation follows the paper's architecture combining three branches (Compressed, Selected, Sliding) with learned gates.

@@ -23,13 +23,13 @@ runtime:
 train:
   steps: 50000  # Full 50k training run
   seq_len: 2048  # Conservative 2K sequence length
-  batch_size: 2   # 1 per GPU for 2×A100 (micro-batch=1)
+  batch_size: 2   # CRITICAL: Keep at 2 - larger sizes degrade performance on PCIe
   lr: 2.0e-4
   lr_schedule: "cosine"
   warmup_steps: 2000  # 4% of total steps
   weight_decay: 0.01
   grad_clip: 1.0
-  accumulate_grad_batches: 1  # Start with 1 for DDP stability test
+  accumulate_grad_batches: 2  # Use gradient accumulation for effective batch_size=4
   log_every: 20  # Log every 20 steps
   eval_every: 1000
   save_every: 5000  # Checkpoint every 5000 steps as recommended

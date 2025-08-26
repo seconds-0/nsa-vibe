@@ -45,17 +45,21 @@ def map_pcmp_to_pslc(p_cmp: torch.Tensor, meta: BlockMeta) -> torch.Tensor:
     values = meta.M_csl_values
     S_sel = meta.sel_starts.numel()
     device = p_cmp.device
+    # Out-of-place accumulation to avoid in-place versioning issues under GC/DDP
     p_slc = torch.zeros((B, G, h, S_sel), device=device, dtype=p_cmp.dtype)
+    acc = torch.zeros_like(p_slc)
     # CSR row-wise multiply-add
     for r in range(S_cmp):
         start, end = int(indptr[r].item()), int(indptr[r + 1].item())
         if start == end:
             continue
-        cols = indices[start:end]
-        w = values[start:end].to(p_cmp.dtype)  # [nnz_r]
+        cols = indices[start:end].to(device)
+        w = values[start:end].to(device=device, dtype=p_cmp.dtype)  # [nnz_r]
         contrib = p_cmp[..., r].unsqueeze(-1) * w  # [B,G,h,nnz_r]
-        p_slc.index_add_(dim=-1, index=cols.to(device), source=contrib)
-    return p_slc
+        # Ensure Long dtype for scatter_add indices
+        idx = cols.view(1, 1, 1, -1).expand(B, G, h, -1).long()
+        acc = acc.scatter_add(-1, idx, contrib)
+    return acc
 
 
 def map_pcmp_to_pslc_batched(p_cmp_all: torch.Tensor, meta: BlockMeta) -> torch.Tensor:
@@ -82,7 +86,9 @@ def map_pcmp_to_pslc_batched(p_cmp_all: torch.Tensor, meta: BlockMeta) -> torch.
         return torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
     p_src = p_cmp_all[..., rows] * w  # [B,S,G,h,nnz]
     p_slc = torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
-    p_slc.index_add_(-1, cols, p_src)
+    # Ensure Long dtype for scatter_add indices
+    idx = cols.view(1, 1, 1, 1, -1).expand(B, S, G, h, -1).long()
+    p_slc = p_slc.scatter_add(-1, idx, p_src)
     return p_slc
 
 

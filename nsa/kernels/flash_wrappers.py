@@ -60,6 +60,7 @@ def attention_bgh(
         q = Q.reshape(B * G * h, 1, Dk)
         k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
         v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
+        q = q.contiguous(); k = k.contiguous(); v = v.contiguous()
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
         o = attn.squeeze(1).reshape(B, G, h, -1)
         # Guard against rare numerical issues on some GPU precisions

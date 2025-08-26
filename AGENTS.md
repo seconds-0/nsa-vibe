@@ -2,6 +2,23 @@
 
 Guidance for coding agents (Codex CLI, Cursor, Claude Code) contributing to this repository. This document aligns with CLAUDE.md and the Cursor rules under `.cursor/`.
 
+## Reports & Naming Rules (MUST FOLLOW)
+
+- Roles:
+  - GPT‑5 is the Core Engineer.
+  - Claude is the Test Engineer.
+- Location: All reports from both roles MUST live under `Documentation/Reports/`.
+- Naming:
+  - Core Engineer (GPT‑5): `<yyyy-mm-dd> Core Engineer Report - <Subject> <vX>.md`
+  - Test Engineer (Claude): `<yyyy-mm-dd> Test Engineer Report - <Subject> <vX>.md`
+- Examples:
+  - `2025-08-26 Core Engineer Report - GC Remediation v2.md`
+  - `2025-08-26 Test Engineer Report - DDP One-Step Trace v1.md`
+- Hygiene:
+  - Do not place `.md` reports at repo root or scatter them across directories.
+  - Link large artifacts (logs/CSV/traces) from `artifacts/` rather than embedding.
+  - Prefer one canonical report per subject per day; bump `vX` for iterations.
+
 ## Source of Truth
 
 - PRD: `PRD.md`

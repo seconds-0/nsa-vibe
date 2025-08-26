@@ -94,7 +94,21 @@ class TinyLM(nn.Module):
                     use_ckpt = (i >= a and i < b)
             if use_ckpt:
                 import torch.utils.checkpoint as _ckpt
-                x = _ckpt.checkpoint(lambda inp: blk(inp), x, use_reentrant=False)
+                _ckpt_reentrant = os.getenv("NSA_GC_REENTRANT", "0").lower() in ("1", "true", "yes")
+                if _ckpt_reentrant:
+                    x = _ckpt.checkpoint(
+                        lambda inp: blk(inp),
+                        x.contiguous(),
+                        use_reentrant=True,
+                        preserve_rng_state=False,
+                    )
+                else:
+                    x = _ckpt.checkpoint(
+                        lambda inp: blk(inp),
+                        x.contiguous(),
+                        use_reentrant=False,
+                        preserve_rng_state=False,
+                    )
             else:
                 x = blk(x)
         x = self.norm_f(x)
@@ -293,6 +307,16 @@ def main():
 
     set_seed(int(cfg.train.seed))
 
+    # Optional autograd anomaly detection (debug only; slows down and may change timing)
+    if os.getenv("NSA_DETECT_ANOMALY", "0").lower() in ("1", "true", "yes"):
+        try:
+            torch.autograd.set_detect_anomaly(True)
+            if rank == 0:
+                print("[debug] autograd anomaly detection enabled", flush=True)
+        except Exception as _e:
+            if rank == 0:
+                print(f"[debug] failed to enable anomaly detection: {_e}")
+
     # DDP init
     want_ddp = cli_args.ddp
     env_ws = int(os.environ.get("WORLD_SIZE", "1"))
@@ -347,6 +371,41 @@ def main():
         grad_checkpointing=bool(cfg.runtime.get("gradient_checkpointing", False)),
     ).to(device)
     model.train()
+    # Mixed precision & GradScaler setup
+    use_cuda = (device.type == "cuda") and torch.cuda.is_available()
+    use_amp = False
+    amp_dtype = None
+    scaler = None
+    if use_cuda:
+        if dtype == torch.float16:
+            use_amp = True
+            amp_dtype = torch.float16
+            try:
+                init_scale = float(os.getenv("NSA_SCALER_INIT_SCALE", "65536"))
+                growth_interval = int(os.getenv("NSA_SCALER_GROWTH_INTERVAL", "2000"))
+                growth_factor = float(os.getenv("NSA_SCALER_GROWTH_FACTOR", "2.0"))
+                backoff_factor = float(os.getenv("NSA_SCALER_BACKOFF_FACTOR", "0.5"))
+                scaler = torch.cuda.amp.GradScaler(
+                    enabled=True,
+                    init_scale=init_scale,
+                    growth_interval=growth_interval,
+                    growth_factor=growth_factor,
+                    backoff_factor=backoff_factor,
+                )
+                if rank == 0:
+                    print(
+                        f"[amp] GradScaler init_scale={init_scale} growth_interval={growth_interval} growth_factor={growth_factor} backoff_factor={backoff_factor}",
+                        flush=True,
+                    )
+            except Exception as _e:
+                if rank == 0:
+                    print(f"[amp] GradScaler init failed: {_e}", flush=True)
+                scaler = None
+        elif dtype == torch.bfloat16:
+            use_amp = True
+            amp_dtype = torch.bfloat16
+            scaler = None
+    # Keep prior behavior: cast model weights to chosen dtype if not fp32
     if dtype != torch.float32:
         model = model.to(dtype=dtype)
     # Optionally disable gradient checkpointing in DDP to avoid hook complexity
@@ -393,9 +452,10 @@ def main():
                 f.write("\n".join(lines))
         except Exception as e:
             print(f"[warn] dtype audit failed: {e}")
-    # TensorBoard writer (rank 0)
+    # TensorBoard writer (rank 0) with optional disable
     tb_writer = None
-    if SummaryWriter is not None and rank == 0:
+    tb_disable = os.getenv("NSA_TB_DISABLE", "0").lower() in ("1", "true", "yes")
+    if SummaryWriter is not None and rank == 0 and not tb_disable:
         try:
             tb_dir = Path(cfg.train.out_dir) / "tb"
             tb_dir.mkdir(parents=True, exist_ok=True)
@@ -407,10 +467,31 @@ def main():
         from torch.nn.parallel import DistributedDataParallel as DDP
         # Optional safe-mode for DDP to avoid kernel/backward edge-cases
         ddp_safe = os.getenv("NSA_DDP_SAFE_MODE", "0").lower() in ("1", "true", "yes")
+        # DDP kwargs with env overrides for performance tuning
+        def _env_bool(name: str, default: bool) -> bool:
+            v = os.getenv(name)
+            if v is None:
+                return default
+            return v.lower() in ("1", "true", "yes")
+        def _env_int(name: str, default: int) -> int:
+            try:
+                v = os.getenv(name)
+                return int(v) if v is not None and v.strip() != "" else default
+            except Exception:
+                return default
         ddp_kwargs = {
             "device_ids": [device.index] if device.type == "cuda" else None,
-            "find_unused_parameters": True,
+            # Allow disabling find_unused for static graphs
+            "find_unused_parameters": _env_bool("NSA_DDP_FIND_UNUSED", True),
         }
+        # Optional DDP tuning: bucket size, broadcast buffers, grad-as-bucket-view
+        bucket_mb = _env_int("NSA_DDP_BUCKET_MB", 0)
+        if bucket_mb > 0:
+            ddp_kwargs["bucket_cap_mb"] = bucket_mb
+        if os.getenv("NSA_DDP_BROADCAST_BUFFERS") is not None:
+            ddp_kwargs["broadcast_buffers"] = _env_bool("NSA_DDP_BROADCAST_BUFFERS", True)
+        if os.getenv("NSA_DDP_GRAD_AS_BUCKET_VIEW") is not None:
+            ddp_kwargs["gradient_as_bucket_view"] = _env_bool("NSA_DDP_GRAD_AS_BUCKET_VIEW", True)
         if ddp_safe:
             # Avoid buffer broadcasts and large buckets; disable grad-as-bucket-view
             ddp_kwargs.update(
@@ -478,6 +559,15 @@ def main():
             pass
     S = int(cfg.train.seq_len)
     B_global = int(cfg.train.batch_size)
+    # Optional batch/accum overrides via env for quick A/B
+    try:
+        bs_env = os.getenv("NSA_BATCH_SIZE")
+        if bs_env is not None and bs_env.strip() != "":
+            B_global = int(bs_env)
+            if rank == 0:
+                print(f"[train] overriding batch_size via NSA_BATCH_SIZE={B_global}", flush=True)
+    except Exception:
+        pass
     if world_size > 1:
         base = B_global // world_size
         extra = B_global % world_size
@@ -485,9 +575,26 @@ def main():
     else:
         B_local = B_global
     lr = float(cfg.train.lr)
+    # Optional LR override via env for quick tuning
+    try:
+        lr_env = os.getenv("NSA_LR")
+        if lr_env is not None and lr_env.strip() != "":
+            lr = float(lr_env)
+            if rank == 0:
+                print(f"[train] overriding lr via NSA_LR={lr}", flush=True)
+    except Exception:
+        pass
     save_every = int(cfg.train.get("save_every", 0))
     eval_every = int(cfg.train.get("eval_every", 0))
     accum = int(cfg.train.get("accumulate_grad_batches", 1))
+    try:
+        acc_env = os.getenv("NSA_ACCUM")
+        if acc_env is not None and acc_env.strip() != "":
+            accum = int(acc_env)
+            if rank == 0:
+                print(f"[train] overriding accumulate_grad_batches via NSA_ACCUM={accum}", flush=True)
+    except Exception:
+        pass
     warmup = int(cfg.train.get("warmup_steps", 0))
 
     opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=float(cfg.train.get("weight_decay", 0.0)))
@@ -775,7 +882,22 @@ def main():
         except Exception:
             pass
 
+    csv_disable = os.getenv("NSA_DISABLE_CSV_LOGS", "0").lower() in ("1", "true", "yes")
+    hb_every = os.getenv("NSA_HEARTBEAT_EVERY", "0").lower() in ("1", "true", "yes")
+    disable_aux_stats = os.getenv("NSA_DISABLE_AUX_STATS", "0").lower() in ("1", "true", "yes")
+    # Optional periodic GPU memory dump
+    try:
+        mem_every_env = os.getenv("NSA_MEM_DUMP_EVERY", "0")
+        mem_every = int(mem_every_env) if mem_every_env is not None else 0
+    except Exception:
+        mem_every = 0
     for step in range(1, steps + 1):
+        # Optional per-step heartbeat for stall localization
+        if hb_every:
+            try:
+                hb.write(step, "beat", {"phase": "step_start"})
+            except Exception:
+                pass
         # Load batch
         if use_fwe:
             try:
@@ -813,10 +935,22 @@ def main():
                 print("[train] HALT file detected — stopping gracefully.", flush=True)
             break
 
+        # Optional per-step memory snapshot before forward
+        if mem_every and (step % mem_every == 1 or mem_every == 1):
+            _dump_mem(out_dir, f"pre_step{step}")
         with _sdp_kernel_ctx():
-            logits = model(x)
+            if use_amp and amp_dtype is not None:
+                with torch.cuda.amp.autocast(dtype=amp_dtype):
+                    logits = model(x)
+            else:
+                logits = model(x)
         logits_trim = logits[:, :-1, :].contiguous()
-        loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1))) / max(1, accum)
+        if use_amp and amp_dtype is not None:
+            with torch.cuda.amp.autocast(dtype=amp_dtype):
+                raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1)))
+        else:
+            raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1)))
+        loss = raw_loss / max(1, accum)
         # Early abort on NaN/Inf
         if not torch.isfinite(loss):
             if rank == 0:
@@ -829,18 +963,38 @@ def main():
         # overlapping reductions that can trigger "mark variable ready twice".
         if ddp and world_size > 1 and hasattr(model, "no_sync") and grad_accum + 1 < accum:
             with model.no_sync():
-                loss.backward()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
         else:
-            loss.backward()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
         # Dump grad trace after backward for this step
         _dump_grad_seen(f"after_backward_step{step}")
         grad_accum += 1
         if grad_accum >= accum:
+            # If using GradScaler, unscale before clipping
+            if scaler is not None:
+                try:
+                    scaler.unscale_(opt)
+                except Exception:
+                    pass
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.train.get("grad_clip", 1.0)))
-            opt.step()
-            opt.zero_grad(set_to_none=True)
+            if scaler is not None:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
+            else:
+                opt.step()
+                opt.zero_grad(set_to_none=True)
             scheduler.step()
             grad_accum = 0
+            # Optional per-step memory snapshot after optimizer step
+            if mem_every and (step % mem_every == 0):
+                _dump_mem(out_dir, f"post_step{step}")
 
         losses.append(loss.detach().float().item())
         # Throughput accounting (effective tokens for next-token loss = S-1)
@@ -885,75 +1039,76 @@ def main():
                 if gn_val is not None:
                     hb_extra["grad_norm"] = gn_val
                 
-                # M8: Extract gate health statistics from NSA attention
-                try:
-                    if hasattr(model, 'module'):
-                        # DDP case
-                        first_block = model.module.blocks[0] if model.module.blocks else None
-                    else:
-                        # Single GPU case
-                        first_block = model.blocks[0] if model.blocks else None
-                    
-                    if first_block and hasattr(first_block, 'attn'):
-                        gate_stats = first_block.attn.get_gate_stats()
-                        if gate_stats:
-                            # Add key gate health metrics to heartbeat
-                            hb_extra.update({
-                                "gate_entropy_mean": gate_stats["entropy_mean"],
-                                "gate_entropy_min": gate_stats["entropy_min"],
-                                "gate_max_gate": gate_stats["max_gate_max"],
-                                "gate_collapse_frac": gate_stats["collapse_fraction"],
-                                "gate_branch_shares": gate_stats["branch_shares"],  # [cmp, sel, win]
-                            })
-                        # Fallback counters: log and persist per step
-                        fb = first_block.attn.get_fallback_counters() if hasattr(first_block.attn, 'get_fallback_counters') else {}
-                        if fb:
-                            hb_extra.update({f"fb_{k}": int(v) for k, v in fb.items()})
-                            fc_path = Path(cfg.train.out_dir) / "fallback_counters.csv"
-                            if not fc_path.exists():
-                                fc_path.write_text(
-                                    "step,selection_triton_fails,selection_cuda_fails,selection_pack_fails,selection_mask_fails,compressed_fa2_fails,sliding_fa2_fails,total_fallbacks\n"
-                                )
-                            with open(fc_path, "a") as fcf:
-                                fcf.write(
-                                    f"{step},{int(fb.get('selection_triton_fails',0))},{int(fb.get('selection_cuda_fails',0))},{int(fb.get('selection_pack_fails',0))},{int(fb.get('selection_mask_fails',0))},{int(fb.get('compressed_fa2_fails',0))},{int(fb.get('sliding_fa2_fails',0))},{int(fb.get('total_fallbacks',0))}\n"
-                                )
-                except Exception as e:
-                    # Don't fail training if gate stats extraction fails
-                    if step <= 10:  # Log only for first few steps to avoid spam
-                        print(f"[warn] Gate stats extraction failed: {e}", flush=True)
-                # Selection K stats (if exposed by NSA attention)
-                try:
-                    if hasattr(model, 'module'):
-                        first_block = model.module.blocks[0] if model.module.blocks else None
-                    else:
-                        first_block = model.blocks[0] if model.blocks else None
-                    if first_block and hasattr(first_block, 'attn') and hasattr(first_block.attn, 'get_selection_stats'):
-                        sel_stats = first_block.attn.get_selection_stats()
-                        if sel_stats:
-                            hb_extra.update({
-                                "sel_k_mean": sel_stats.get("k_mean"),
-                                "sel_k_max": sel_stats.get("k_max"),
-                                "sel_rows": sel_stats.get("rows"),
-                                "sel_pct_at_max": sel_stats.get("pct_at_max"),
-                            })
-                            # Append CSV row for external analysis
-                            ks_path = Path(cfg.train.out_dir) / "k_stats.csv"
-                            if not ks_path.exists():
-                                with open(ks_path, "w") as kf:
-                                    kf.write("step,k_mean,k_max,rows,pct_at_max\n")
-                            with open(ks_path, "a") as kf:
-                                kf.write(
-                                    f"{step},{sel_stats.get('k_mean', 0.0):.4f},{int(sel_stats.get('k_max', 0))},{int(sel_stats.get('rows', 0))},{sel_stats.get('pct_at_max', 0.0):.4f}\n"
-                                )
-                except Exception as e:
-                    if step <= 5:
-                        print(f"[warn] k-stats logging failed: {e}")
+                # Optional auxiliary NSA stats (disabled by default in smokes)
+                if not disable_aux_stats:
+                    try:
+                        if hasattr(model, 'module'):
+                            first_block = model.module.blocks[0] if model.module.blocks else None
+                        else:
+                            first_block = model.blocks[0] if model.blocks else None
+                        if first_block and hasattr(first_block, 'attn'):
+                            gate_stats = first_block.attn.get_gate_stats()
+                            if gate_stats:
+                                hb_extra.update({
+                                    "gate_entropy_mean": gate_stats["entropy_mean"],
+                                    "gate_entropy_min": gate_stats["entropy_min"],
+                                    "gate_max_gate": gate_stats["max_gate_max"],
+                                    "gate_collapse_frac": gate_stats["collapse_fraction"],
+                                    "gate_branch_shares": gate_stats["branch_shares"],
+                                })
+                            fb = first_block.attn.get_fallback_counters() if hasattr(first_block.attn, 'get_fallback_counters') else {}
+                            if fb:
+                                hb_extra.update({f"fb_{k}": int(v) for k, v in fb.items()})
+                                if not csv_disable:
+                                    fc_path = Path(cfg.train.out_dir) / "fallback_counters.csv"
+                                    if not fc_path.exists():
+                                        fc_path.write_text(
+                                            "step,selection_triton_fails,selection_cuda_fails,selection_pack_fails,selection_mask_fails,compressed_fa2_fails,sliding_fa2_fails,total_fallbacks\n"
+                                        )
+                                    with open(fc_path, "a") as fcf:
+                                        fcf.write(
+                                            f"{step},{int(fb.get('selection_triton_fails',0))},{int(fb.get('selection_cuda_fails',0))},{int(fb.get('selection_pack_fails',0))},{int(fb.get('selection_mask_fails',0))},{int(fb.get('compressed_fa2_fails',0))},{int(fb.get('sliding_fa2_fails',0))},{int(fb.get('total_fallbacks',0))}\n"
+                                        )
+                    except Exception as e:
+                        if step <= 10:
+                            print(f"[warn] Gate/fallback stats extraction failed: {e}", flush=True)
+                    try:
+                        if hasattr(model, 'module'):
+                            first_block = model.module.blocks[0] if model.module.blocks else None
+                        else:
+                            first_block = model.blocks[0] if model.blocks else None
+                        if first_block and hasattr(first_block, 'attn') and hasattr(first_block.attn, 'get_selection_stats'):
+                            sel_stats = first_block.attn.get_selection_stats()
+                            if sel_stats:
+                                hb_extra.update({
+                                    "sel_k_mean": sel_stats.get("k_mean"),
+                                    "sel_k_max": sel_stats.get("k_max"),
+                                    "sel_rows": sel_stats.get("rows"),
+                                    "sel_pct_at_max": sel_stats.get("pct_at_max"),
+                                })
+                                if not csv_disable:
+                                    ks_path = Path(cfg.train.out_dir) / "k_stats.csv"
+                                    if not ks_path.exists():
+                                        with open(ks_path, "w") as kf:
+                                            kf.write("step,k_mean,k_max,rows,pct_at_max\n")
+                                    with open(ks_path, "a") as kf:
+                                        kf.write(
+                                            f"{step},{sel_stats.get('k_mean', 0.0):.4f},{int(sel_stats.get('k_max', 0))},{int(sel_stats.get('rows', 0))},{sel_stats.get('pct_at_max', 0.0):.4f}\n"
+                                        )
+                    except Exception as e:
+                        if step <= 5:
+                            print(f"[warn] k-stats logging failed: {e}")
                 hb.write(step, "progress", hb_extra)
-                (Path(cfg.train.out_dir) / "training.csv").parent.mkdir(parents=True, exist_ok=True)
-                with open(Path(cfg.train.out_dir) / "training.csv", "a") as tf:
-                    tf.write(f"{step},{log_loss:.6f},{scheduler.get_last_lr()[0]:.6e},{toks_per_s_global:.0f}\n")
-                if tb_writer is not None:
+                # End-of-step heartbeat to localize stalls between iterations
+                try:
+                    hb.write(step, "step_end", {"phase": "end"})
+                except Exception:
+                    pass
+                if not csv_disable:
+                    (Path(cfg.train.out_dir) / "training.csv").parent.mkdir(parents=True, exist_ok=True)
+                    with open(Path(cfg.train.out_dir) / "training.csv", "a") as tf:
+                        tf.write(f"{step},{log_loss:.6f},{scheduler.get_last_lr()[0]:.6e},{toks_per_s_global:.0f}\n")
+                if tb_writer is not None and not tb_disable:
                     try:
                         tb_writer.add_scalar("train/loss", log_loss, step)
                         tb_writer.add_scalar("train/toks_per_s", toks_per_s_global, step)

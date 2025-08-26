@@ -1,0 +1,38 @@
+model:
+  dim: 256
+  n_layers: 6
+  n_heads: 8
+  n_kv_groups: 2
+  d_k: 32
+  d_v: 32
+nsa:
+  l: 16
+  d: 8
+  l_sel: 32
+  n_sel: 8
+  w: 256
+  phi: "avg"
+data:
+  tokenizer: "byte"
+runtime:
+  device: "cuda"
+  precision: "bf16"
+  use_flash: true
+  use_triton_sel: false
+  gradient_checkpointing: false
+train:
+  steps: 200
+  seq_len: 1024
+  batch_size: 1
+  lr: 2.0e-4
+  lr_schedule: "cosine"
+  warmup_steps: 20
+  weight_decay: 0.01
+  grad_clip: 1.0
+  accumulate_grad_batches: 1
+  log_every: 20
+  eval_every: 0
+  save_every: 0
+  seed: 1337
+  out_dir: "artifacts/small_smoke"
+

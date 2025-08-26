@@ -741,6 +741,13 @@ class NSAAttention(nn.Module):
         """
         B, S, _ = x.shape
         # Projections
+        _nvtx = os.getenv("NSA_NVTX", "0").lower() in ("1", "true", "yes")
+        if _nvtx:
+            try:
+                import torch as _t
+                _t.cuda.nvtx.range_push("projections+rope")
+            except Exception:
+                _nvtx = False
         Q_lin = self._shape_q(self.W_Q(x), B, S)  # [B,S,G,h,Dk]
         assert Q_lin.shape[:2] == (B, S)
         # Apply RoPE to Q
@@ -769,6 +776,11 @@ class NSAAttention(nn.Module):
         pos_k = torch.arange(S, device=x.device)
         K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
         K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
+        if _nvtx:
+            try:
+                _t.cuda.nvtx.range_pop()
+            except Exception:
+                pass
 
         # Update caches (prefill uses full sequence projections)
         kv.update_selection_raw(K_sel, V_sel)
@@ -789,7 +801,17 @@ class NSAAttention(nn.Module):
 
         # Selection scores (batched)
         scale = 1.0 / (self.d_k**0.5)
+        if _nvtx:
+            try:
+                _t.cuda.nvtx.range_push("pcmp_all")
+            except Exception:
+                pass
         p_cmp_all = compute_pcmp_all(Q, kv.K_cmp, scale)  # [B,S,G,h,S_cmp]
+        if _nvtx:
+            try:
+                _t.cuda.nvtx.range_pop(); _t.cuda.nvtx.range_push("map_pcmp_to_pslc")
+            except Exception:
+                pass
         p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all, kv.meta)  # [B,S,G,h,S_sel]
         
         # M8: Optional Eq.9 verification in batched prefill
@@ -809,11 +831,26 @@ class NSAAttention(nn.Module):
         )
 
         # Batched top‑n → ranges for all positions
+        if _nvtx:
+            try:
+                _t.cuda.nvtx.range_push("topk+ranges")
+            except Exception:
+                pass
         sel_ranges_all = select_topn_ranges_batched(
             p_grp_all, kv.meta, self.n_sel, S, True, 2
         )  # [B,S,G,n,2]
+        if _nvtx:
+            try:
+                _t.cuda.nvtx.range_pop(); _t.cuda.nvtx.range_push("branch_attn+gate")
+            except Exception:
+                pass
         # Update selection statistics for this prefill batch
         self._update_sel_stats_from_ranges(sel_ranges_all)
+        if _nvtx:
+            try:
+                _t.cuda.nvtx.range_pop()
+            except Exception:
+                pass
         
         # M8: Assert causal masking for batched selection (GPU-sync gated)
         strict_asserts = os.getenv("NSA_STRICT_ASSERTS", "0").lower() in ("1", "true", "yes")

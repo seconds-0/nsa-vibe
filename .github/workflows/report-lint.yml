@@ -1,0 +1,55 @@
+name: Report Lint
+
+on:
+  pull_request:
+    paths:
+      - '**/*.md'
+  push:
+    paths:
+      - '**/*.md'
+
+jobs:
+  lint-reports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate report placement and naming
+        run: |
+          set -euo pipefail
+          echo '::group::Scanning Markdown files'
+          mapfile -t FILES < <(git ls-files "*.md")
+          BAD=0
+          re_test='^[0-9]{4}-[0-9]{2}-[0-9]{2} Test Engineer Report - .+ v[0-9]+\.md$'
+          re_core='^[0-9]{4}-[0-9]{2}-[0-9]{2} Core Engineer Report - .+ v[0-9]+\.md$'
+          for f in "${FILES[@]}"; do
+            # Allow docs, guides, plans, readmes anywhere under Documentation/*
+            if [[ "$f" == Documentation/Reports/* ]]; then
+              base=$(basename "$f")
+              if [[ "$base" =~ ^README\.md$ ]]; then continue; fi
+              if [[ "$base" =~ $re_test ]] || [[ "$base" =~ $re_core ]]; then
+                continue
+              else
+                echo "Report file in Reports with invalid name: $f";
+                BAD=1
+              fi
+            elif [[ "$f" == Documentation/* ]]; then
+              # Non-report docs are allowed under Documentation/*
+              continue
+            else
+              # Any report-ish file outside Reports directory should be flagged
+              case "$f" in
+                README.md|CONTRIBUTING.md|PRD.md) continue;;
+              esac
+              # If it looks like a report (contains 'Report' in filename), flag it
+              if [[ "$f" =~ [Rr]eport ]]; then
+                echo "Report must live under Documentation/Reports/: $f";
+                BAD=1
+              fi
+            fi
+          done
+          echo '::endgroup::'
+          if [[ $BAD -ne 0 ]]; then
+            echo "Report lint failed. Place reports under Documentation/Reports/ with proper naming.";
+            exit 1
+          fi
+
