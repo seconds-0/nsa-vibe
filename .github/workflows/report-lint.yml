@@ -24,6 +24,10 @@ jobs:
           for f in "${FILES[@]}"; do
             # Allow docs, guides, plans, readmes anywhere under Documentation/*
             if [[ "$f" == Documentation/Reports/* ]]; then
+              # Allow archive and templates subdirectories with any naming
+              if [[ "$f" == Documentation/Reports/archive/* ]] || [[ "$f" == Documentation/Reports/templates/* ]]; then
+                continue
+              fi
               base=$(basename "$f")
               if [[ "$base" =~ ^README\.md$ ]]; then continue; fi
               if [[ "$base" =~ $re_test ]] || [[ "$base" =~ $re_core ]]; then
