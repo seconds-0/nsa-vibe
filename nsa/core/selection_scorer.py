@@ -411,32 +411,32 @@ def convert_indices_to_ranges_batched_v2(
             _nvtx = False
     
     device = indices.device
-        B, S_q, G, K = indices.shape
-        if K == 0:
-            return torch.zeros((B, S_q, G, 0, 2), dtype=torch.int32, device=device)
+    B, S_q, G, K = indices.shape
+    if K == 0:
+        return torch.zeros((B, S_q, G, 0, 2), dtype=torch.int32, device=device)
 
-        # Valid mask and prepared index tensor
-        if _nvtx:
-            try:
-                torch.cuda.nvtx.range_push("v2_run_detection")
-            except Exception:
-                pass
-        
-        valid = indices.ge(0)
-        x = torch.where(valid, indices, torch.full_like(indices, -2))  # sentinel -2
+    # Valid mask and prepared index tensor
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_push("v2_run_detection")
+        except Exception:
+            pass
+    
+    valid = indices.ge(0)
+    x = torch.where(valid, indices, torch.full_like(indices, -2))  # sentinel -2
 
-        # Identify run starts: first valid element or break in adjacency (including dedup collapse)
-        x_shift = torch.cat([torch.full_like(x[..., :1], -2), x[..., :-1]], dim=-1)
-        prev_valid = x_shift.ge(0)
-        diff = x - x_shift
-        adjacent_or_dup = (diff.eq(1) | diff.eq(0)) & prev_valid
-        run_start = valid & (~adjacent_or_dup | (~prev_valid))
-        
-        if _nvtx:
-            try:
-                torch.cuda.nvtx.range_pop()
-            except Exception:
-                pass
+    # Identify run starts: first valid element or break in adjacency (including dedup collapse)
+    x_shift = torch.cat([torch.full_like(x[..., :1], -2), x[..., :-1]], dim=-1)
+    prev_valid = x_shift.ge(0)
+    diff = x - x_shift
+    adjacent_or_dup = (diff.eq(1) | diff.eq(0)) & prev_valid
+    run_start = valid & (~adjacent_or_dup | (~prev_valid))
+    
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_pop()
+        except Exception:
+            pass
 
     # Row-local run ids [0..runs_per_row-1], -1 for invalid
     run_id = run_start.to(torch.int32).cumsum(dim=-1) - 1
@@ -475,31 +475,31 @@ def convert_indices_to_ranges_batched_v2(
     )
     global_rid_valid = global_rid[run_id_flat.ge(0)]  # [total_valid_elems]
 
-        # For each global run, compute max block id in that run (end block)
-        if _nvtx:
-            try:
-                torch.cuda.nvtx.range_push("v2_scatter_reduce")
-            except Exception:
-                pass
-        
-        total_runs = int(runs_per_row_flat.sum().item())
-        if total_runs == 0:
-            if _nvtx:
-                try:
-                    torch.cuda.nvtx.range_pop()
-                except Exception:
-                    pass
-            return torch.zeros((B, S_q, G, K, 2), dtype=torch.int32, device=device)
-        max_blk = torch.full((total_runs,), -2, dtype=torch.int32, device=device)
-        # Values to reduce are block ids for valid elements
-        blk_vals = x_flat[run_id_flat.ge(0)].to(torch.int32)
-        max_blk.scatter_reduce_(0, global_rid_valid.to(torch.int64), blk_vals, reduce="amax", include_self=False)
-        
+    # For each global run, compute max block id in that run (end block)
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_push("v2_scatter_reduce")
+        except Exception:
+            pass
+    
+    total_runs = int(runs_per_row_flat.sum().item())
+    if total_runs == 0:
         if _nvtx:
             try:
                 torch.cuda.nvtx.range_pop()
             except Exception:
                 pass
+        return torch.zeros((B, S_q, G, K, 2), dtype=torch.int32, device=device)
+    max_blk = torch.full((total_runs,), -2, dtype=torch.int32, device=device)
+    # Values to reduce are block ids for valid elements
+    blk_vals = x_flat[run_id_flat.ge(0)].to(torch.int32)
+    max_blk.scatter_reduce_(0, global_rid_valid.to(torch.int64), blk_vals, reduce="amax", include_self=False)
+    
+    if _nvtx:
+        try:
+            torch.cuda.nvtx.range_pop()
+        except Exception:
+            pass
 
     # Start block ids per run, collected in row order
     start_blk_per_run = start_blk_flat  # length == total_runs
