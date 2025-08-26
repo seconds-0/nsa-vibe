@@ -28,6 +28,7 @@ jobs:
         env:
           CONFIG: configs/train_showcase.yaml
           PYTHONUNBUFFERED: '1'
+          PYTHONPATH: .
         run: |
           python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 200
       - name: Validate training CSV exists
