@@ -1,6 +1,6 @@
 Reports Directory
 
-Purpose:
+Purpose and Organization:
 - Centralize all Test Engineer and Core Engineer reports for easy discovery.
 
 Conventions:
