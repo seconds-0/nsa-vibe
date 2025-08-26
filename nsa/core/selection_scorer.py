@@ -104,6 +104,7 @@ def select_topn_ranges(
     t_token: int,
     force_init: bool = True,
     force_local: int = 2,
+    _skip_validation: bool = False,
 ) -> torch.Tensor:
     """Select top-n block ranges with deterministic tie-breaking.
     
@@ -182,8 +183,8 @@ def select_topn_ranges(
     # sort selected indices ascending for consistent range merging
     sel_idx = torch.sort(sel_idx, dim=-1).values
     
-    # M8: Optional determinism validation
-    if os.getenv("NSA_VALIDATE_SELECTION_DETERMINISM", "0").lower() in ("1", "true", "yes"):
+    # M8: Optional determinism validation (skip if called from validation itself)
+    if not _skip_validation and os.getenv("NSA_VALIDATE_SELECTION_DETERMINISM", "0").lower() in ("1", "true", "yes"):
         validate_selection_determinism(p_grp, meta, n_top, t_token)
     # merge adjacent into contiguous ranges
     ranges = []
@@ -505,7 +506,7 @@ def validate_selection_determinism(
     with torch.no_grad():
         results = []
         for trial in range(num_trials):
-            ranges = select_topn_ranges(p_grp.clone(), meta, n_top, t_token, True, 2)
+            ranges = select_topn_ranges(p_grp.clone(), meta, n_top, t_token, True, 2, _skip_validation=True)
             results.append(ranges.clone())
         
         # Check if all results are identical
