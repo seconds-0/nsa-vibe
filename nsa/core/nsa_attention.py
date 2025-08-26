@@ -38,14 +38,17 @@ class GateMLP(nn.Module):
         # zero-init last layer per PRD
         nn.init.zeros_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
+        # Cache environment variables at init to avoid hot path parsing
+        self._force_uniform_gate = os.getenv("NSA_FORCE_UNIFORM_GATE", "0").lower() in ("1", "true", "yes")
+        self._force_branch = os.getenv("NSA_FORCE_BRANCH")
 
     def forward(self, q_group_pooled: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
         # Uniform gate override for debugging DDP hangs
-        if os.getenv("NSA_FORCE_UNIFORM_GATE", "0").lower() in ("1", "true", "yes"):
+        if self._force_uniform_gate:
             one_third = 1.0 / 3.0
             shape = (*q_group_pooled.shape[:-1], 3)
             return torch.full(shape, one_third, device=q_group_pooled.device, dtype=q_group_pooled.dtype)
-        fb = os.getenv("NSA_FORCE_BRANCH")
+        fb = self._force_branch
         if fb:
             fb = fb.strip().lower()
             if fb in ("cmp", "sel", "win"):
@@ -217,9 +220,8 @@ class NSAAttention(nn.Module):
         self.use_flash_default = use_flash
         # Selection Triton toggle (M4)
         self.use_triton_sel = use_triton_sel
-        # Optional: cache env flags statically for production if NSA_ENV_STATIC=1
-        self._env_static = os.getenv("NSA_ENV_STATIC", "0").lower() in ("1", "true", "yes")
-        self._env_cache: Optional[dict] = None
+        # Cache environment variables to avoid repeated parsing in hot path
+        self._cache_env_vars()
         # Optional learnable ϕ via depthwise Conv1d over time with kernel l and stride d
         # Initialize to average pooling for parity with M0
         self.phi_k_conv: Optional[nn.Conv1d]
@@ -237,6 +239,49 @@ class NSAAttention(nn.Module):
         else:
             self.phi_k_conv = None
             self.phi_v_conv = None
+
+    def _cache_env_vars(self) -> None:
+        """Cache environment variables to avoid repeated parsing in hot path."""
+        def parse_bool(val: str, default: str = "0") -> bool:
+            return os.getenv(val, default).lower() in ("1", "true", "yes")
+        
+        # Cache frequently accessed environment variables
+        self._env_cache = {
+            "static": parse_bool("NSA_ENV_STATIC", "0"),
+            "force_uniform_gate": parse_bool("NSA_FORCE_UNIFORM_GATE", "0"),
+            "force_branch": os.getenv("NSA_FORCE_BRANCH"),
+            "prefill_batched": parse_bool("NSA_PREFILL_BATCHED", "0"),
+            "strict_asserts": parse_bool("NSA_STRICT_ASSERTS", "0"),
+            "force_parity": parse_bool("NSA_FORCE_PARITY", "0"),
+            "use_sel_pack": parse_bool("NSA_USE_SEL_PACK", "1"),
+            "use_triton_sel": parse_bool("NSA_USE_TRITON_SEL", "0") or self.use_triton_sel,
+            "use_cuda_sel": parse_bool("NSA_SEL_CUDA", "0"),
+            "fa2_all": parse_bool("NSA_USE_FA2", "0"),
+            "fa2_win": parse_bool("NSA_USE_FA2_WIN", "0"),
+            "fa2_cmp": parse_bool("NSA_USE_FA2_CMP", "0"),
+            "use_sel_mask": parse_bool("NSA_USE_SEL_MASK", "0"),
+            "use_cmp_mask": parse_bool("NSA_USE_CMP_MASK", "1"),
+            "use_win_mask": parse_bool("NSA_USE_WIN_MASK", "1"),
+            "verify_eq9": parse_bool("NSA_VERIFY_EQ9_MAPPING", "0"),
+            "stopgrad_gates": parse_bool("NSA_STOPGRAD_GATES", "0"),
+            "nvtx": parse_bool("NSA_NVTX", "0"),
+            "debug_compare": parse_bool("NSA_DEBUG_COMPARE", "0"),
+        }
+        
+        # Parse numeric values
+        try:
+            self._rope_scale = float(os.getenv("NSA_ROPE_SCALE", "1.0"))
+            if not (self._rope_scale > 0.0) or self._rope_scale != self._rope_scale:
+                self._rope_scale = 1.0
+        except (ValueError, TypeError):
+            self._rope_scale = 1.0
+            
+        try:
+            self._prefill_tile = int(os.getenv("NSA_PREFILL_TILE", "0"))
+            if self._prefill_tile < 0:
+                self._prefill_tile = 0
+        except (ValueError, TypeError):
+            self._prefill_tile = 0
 
     def _shape_q(self, Q: torch.Tensor, B: int, S: int) -> torch.Tensor:
         Q = Q.view(B, S, self.n_heads, self.d_k)
@@ -368,7 +413,7 @@ class NSAAttention(nn.Module):
         assert x.dim() == 3, "x must be [B,S,dim]"
         assert self.n_heads % self.n_kv_groups == 0, "n_heads must be divisible by n_kv_groups"
         # Strict assertions may introduce GPU syncs; gate via env for tests/smokes
-        strict_asserts = os.getenv("NSA_STRICT_ASSERTS", "0").lower() in ("1", "true", "yes")
+        strict_asserts = self._env_cache.get("strict_asserts", False)
         
         # M8: Assert causal masking - enforce mode constraints
         if prefill:
@@ -382,7 +427,7 @@ class NSAAttention(nn.Module):
             # Optional: route prefill via single-token decode steps to support very long contexts safely.
             if getattr(self, "prefill_tile", 0) and self.prefill_tile > 0:
                 return self._forward_prefill_via_decode(x, kv)
-            use_batched = os.getenv("NSA_PREFILL_BATCHED", "0").lower() in ("1", "true", "yes")
+            use_batched = self._env_cache.get("prefill_batched", False)
             if use_batched:
                 return self._forward_prefill_batched(x, kv)
             else:
@@ -535,7 +580,8 @@ class NSAAttention(nn.Module):
                 
                 # M8: Assert causal masking - selection ranges cannot include future tokens
                 if strict_asserts and sel_ranges.numel() > 0:
-                    max_end = sel_ranges[..., 1].max().item()  # Max end position (GPU sync)
+                    # Only sync for strict asserts (debug mode)
+                    max_end = sel_ranges[..., 1].max().item()  # GPU sync only in debug
                     assert max_end <= current_pos + 1, (
                         f"Selection range violates causality: max_end={max_end} > current_pos+1={current_pos+1}. "
                         f"Selection must not access future tokens."

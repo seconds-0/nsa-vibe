@@ -29,6 +29,8 @@ def _empty_kv(B: int, G: int, d_k: int, d_v: int, device: torch.device):
 
 
 def test_decode_selection_causality_strict_asserts(monkeypatch):
+    # Save and set environment variable
+    old_val = os.environ.get("NSA_STRICT_ASSERTS")
     os.environ["NSA_STRICT_ASSERTS"] = "1"
     torch.manual_seed(0)
     B, dim = 1, 32
@@ -51,11 +53,21 @@ def test_decode_selection_causality_strict_asserts(monkeypatch):
     monkeypatch.setattr(mod, "select_topn_ranges", fake_select_topn_ranges)
 
     x = torch.randn(B, 1, dim, device=device)
-    with pytest.raises(AssertionError):
-        _ = nsa(x, kv, prefill=False)
+    try:
+        with pytest.raises(AssertionError):
+            _ = nsa(x, kv, prefill=False)
+    finally:
+        # Restore original value
+        if old_val is None:
+            os.environ.pop("NSA_STRICT_ASSERTS", None)
+        else:
+            os.environ["NSA_STRICT_ASSERTS"] = old_val
 
 
 def test_prefill_batched_selection_causality_strict_asserts(monkeypatch):
+    # Save and set environment variables
+    old_strict = os.environ.get("NSA_STRICT_ASSERTS")
+    old_batched = os.environ.get("NSA_PREFILL_BATCHED")
     os.environ["NSA_STRICT_ASSERTS"] = "1"
     os.environ["NSA_PREFILL_BATCHED"] = "1"
     torch.manual_seed(0)
@@ -80,11 +92,25 @@ def test_prefill_batched_selection_causality_strict_asserts(monkeypatch):
     monkeypatch.setattr(mod, "select_topn_ranges_batched", fake_select_topn_ranges_batched)
 
     x = torch.randn(B, S, dim, device=device)
-    with pytest.raises(AssertionError):
-        _ = nsa(x, kv, prefill=True)
+    try:
+        with pytest.raises(AssertionError):
+            _ = nsa(x, kv, prefill=True)
+    finally:
+        # Restore original values
+        if old_strict is None:
+            os.environ.pop("NSA_STRICT_ASSERTS", None)
+        else:
+            os.environ["NSA_STRICT_ASSERTS"] = old_strict
+        if old_batched is None:
+            os.environ.pop("NSA_PREFILL_BATCHED", None)
+        else:
+            os.environ["NSA_PREFILL_BATCHED"] = old_batched
 
 
 def test_prefill_batched_compressed_bounds_ok_strict():
+    # Save and set environment variables
+    old_strict = os.environ.get("NSA_STRICT_ASSERTS")
+    old_batched = os.environ.get("NSA_PREFILL_BATCHED")
     os.environ["NSA_STRICT_ASSERTS"] = "1"
     os.environ.pop("NSA_PREFILL_BATCHED", None)  # Use default sequential prefill to exercise logic safely
     torch.manual_seed(0)
@@ -93,6 +119,17 @@ def test_prefill_batched_compressed_bounds_ok_strict():
     device = torch.device("cpu")
     kv = _empty_kv(B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, device)
     x = torch.randn(B, S, dim, device=device)
-    # Should not raise under strict asserts for normal inputs
-    y, kv2 = nsa(x, kv, prefill=True)
-    assert y.shape == (B, S, dim)
+    try:
+        # Should not raise under strict asserts for normal inputs
+        y, kv2 = nsa(x, kv, prefill=True)
+        assert y.shape == (B, S, dim)
+    finally:
+        # Restore original values
+        if old_strict is None:
+            os.environ.pop("NSA_STRICT_ASSERTS", None)
+        else:
+            os.environ["NSA_STRICT_ASSERTS"] = old_strict
+        if old_batched is None:
+            os.environ.pop("NSA_PREFILL_BATCHED", None)
+        else:
+            os.environ["NSA_PREFILL_BATCHED"] = old_batched
