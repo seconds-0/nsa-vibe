@@ -516,6 +516,18 @@ def main():
             if rank == 0:
                 print("[ddp-safe] Enabled conservative DDP+NSA settings (gather selection, stopgrad gates)", flush=True)
         model = DDP(model, **ddp_kwargs)
+        # Optional: gradient compression hook to reduce PCIe bandwidth
+        try:
+            from torch.distributed.algorithms.ddp_comm_hooks import default as ddp_hooks  # type: ignore
+            _compress = os.getenv("NSA_DDP_COMPRESS", "bf16").strip().lower()
+            if _compress in ("bf16", "fp16"):
+                hook = ddp_hooks.bf16_compress_hook if _compress == "bf16" else ddp_hooks.fp16_compress_hook
+                model.register_comm_hook(state=None, hook=hook)
+                if rank == 0:
+                    print(f"[ddp] gradient compression enabled: {_compress}", flush=True)
+        except Exception as _e:
+            if rank == 0:
+                print(f"[ddp] could not register compression hook: {_e}", flush=True)
         # Optional: allow static graph only if explicitly requested
         _use_static = os.getenv("NSA_DDP_STATIC_GRAPH", "0").lower() in ("1", "true", "yes")
         if _use_static:

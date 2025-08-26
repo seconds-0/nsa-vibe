@@ -218,6 +218,8 @@ class NSAAttention(nn.Module):
         self.gate = GateMLP(d_k, gate_hidden)
         # Default FA-2 usage (can be overridden by env flags)
         self.use_flash_default = use_flash
+        # One-time SDPA backend audit flag
+        self._sdpa_audited = False
         # Selection Triton toggle (M4)
         self.use_triton_sel = use_triton_sel
         # Cache environment variables to avoid repeated parsing in hot path
@@ -827,6 +829,14 @@ class NSAAttention(nn.Module):
             )
         kv.update_compressed(K_cmp, V_cmp, self.l, self.d)
 
+        # One-time SDPA backend audit (opt-in via env)
+        try:
+            if (not self._sdpa_audited) and os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+                self._audit_sdpa_backends_once(Q[:, :1], K_sel[:, :, : max(1, S // 8), :], V_sel[:, :, : max(1, S // 8), :],
+                                               K_win[:, :, : max(1, S // 8), :], V_win[:, :, : max(1, S // 8), :])
+        except Exception:
+            pass
+
         # Selection scores (batched)
         scale = 1.0 / (self.d_k**0.5)
         if _nvtx:
@@ -1098,6 +1108,49 @@ class NSAAttention(nn.Module):
                 print(f"NSA-DBG out_mae={out_mae:.6e}")
         return out, kv
 
+    def _audit_sdpa_backends_once(
+        self,
+        Q: torch.Tensor,  # [B,1,G,h,Dk]
+        K_sel: torch.Tensor,  # [B,G,S,Dk]
+        V_sel: torch.Tensor,  # [B,G,S,Dv]
+        K_win: torch.Tensor,  # [B,G,S,Dk]
+        V_win: torch.Tensor,  # [B,G,S,Dv]
+    ) -> None:
+        if self._sdpa_audited:
+            return
+        try:
+            from torch.nn.attention import sdpa_kernel
+        except Exception:
+            # Older torch, skip audit
+            self._sdpa_audited = True
+            return
+        B = Q.shape[0]
+        G = self.n_kv_groups
+        h = self.h_per_group
+        # Prepare a small representative slice per branch
+        q = Q[:, 0]  # [B,G,h,Dk]
+        # Ensure contiguity
+        q = q.contiguous(); ks = K_sel.contiguous(); vs = V_sel.contiguous(); kw = K_win.contiguous(); vw = V_win.contiguous()
+        def _probe(tag: str, k: torch.Tensor, v: torch.Tensor) -> str:
+            try:
+                with sdpa_kernel(enable_flash=True, enable_mem_efficient=False, enable_math=False):
+                    _ = F.scaled_dot_product_attention(
+                        q.reshape(B * G * h, 1, self.d_k),
+                        k.repeat_interleave(h, dim=1).reshape(B * G * h, k.shape[2], self.d_k),
+                        v.repeat_interleave(h, dim=1).reshape(B * G * h, v.shape[2], self.d_v),
+                        is_causal=True,
+                    )
+                return "flash"
+            except Exception:
+                return "fallback"
+        try:
+            b_sel = _probe("cmp/win(sel)", ks, vs)
+            b_win = _probe("win", kw, vw)
+            log("sdpa.audit", sel=b_sel, win=b_win)
+        except Exception:
+            pass
+        self._sdpa_audited = True
+
     def _forward_prefill_via_decode(self, x: torch.Tensor, kv: NSA_KV) -> tuple[torch.Tensor, NSA_KV]:
         """Prefill by stepping decode one token at a time.
 
@@ -1204,9 +1257,9 @@ class NSAAttention(nn.Module):
         # Q: [B,G,h,Dk]; K/V: [B,G,S,D*] -> out [B,G,h,Dv]
         B, G, h, Dk = Q.shape
         S = K.shape[2]
-        q = Q.reshape(B * G * h, 1, Dk)
-        k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
-        v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
+        q = Q.reshape(B * G * h, 1, Dk).contiguous()
+        k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk).contiguous()
+        v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1]).contiguous()
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         o = attn.squeeze(1).reshape(B, G, h, -1)
         return o

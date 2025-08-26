@@ -53,3 +53,13 @@ Expected Outcomes (PASS criteria)
 Notes
 - On RTX 4090 (SM 8.9), keep NSA_TRITON_SEL_FORCE=1 scoped to tests only; default runtime falls back to packed SDPA per ADR.
 - If FA‑2 not available, note it and proceed; decode bench does not require FA‑2.
+- Selection v2 (GPU path) should be used for training and perf checks:
+  - Default is ON. For A/B, set `NSA_SEL_RANGES_V2=0` to revert to legacy CPU path.
+- DDP compression is recommended on PCIe multi‑GPU:
+  - `NSA_DDP_COMPRESS=bf16` (default). Sweep `NSA_DDP_BUCKET_MB` in {25,50,100}.
+- SDPA audit once if kernel routing concerns:
+  - `NSA_SDPA_AUDIT=1` logs cmp/win Flash viability at startup.
+- NVTX profiling annotations are available for prefill stages and selection v2:
+  - `NSA_NVTX=1` for short smokes only (profiling overhead).
+- A/B perf tool:
+  - `python scripts/profiler_comparison.py --steps 100 --warmup 10` generates a report under `artifacts/profiler_comparison/`.

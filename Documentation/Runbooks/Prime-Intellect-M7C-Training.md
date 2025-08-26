@@ -60,6 +60,13 @@ What it does automatically:
 - Auto‑resume: picks the latest `artifacts/m7c_125m/checkpoint_step*.pt` if present
 - Logs and run info to `artifacts/train_runs/m7c_<timestamp>/`
 
+Recommended environment (PCIe, production):
+- Selection v2 (GPU): enabled by default — `NSA_SEL_RANGES_V2=1`
+- DDP compression: `NSA_DDP_COMPRESS=bf16` (default), bucket size sweep via `NSA_DDP_BUCKET_MB={25,50,100}`
+- NCCL for PCIe: `NCCL_ALGO=Ring`, `NCCL_PROTO=Simple`, set `NCCL_IB_DISABLE=1` if no InfiniBand
+- Prefill profiling (optional): `NSA_NVTX=1` (use sparingly)
+- SDPA audit once (optional): `NSA_SDPA_AUDIT=1`
+
 ### Live Loss Graph (TensorBoard)
 - Start on Prime Intellect:
   - `bash scripts/run_tensorboard.sh` (defaults to `artifacts/m7c_125m/tb`, port 6006)
@@ -110,9 +117,17 @@ What it does automatically:
   - `configs/m7c_125m_80g.yaml`
 
 ## Expected Throughput (Rule‑of‑Thumb)
-- 2× RTX 4090 (24 GB): low tens of k toks/s (bf16, seq_len=4096, batch=2 global, accum=8)
-- 2× A100‑40G: higher; reduce accumulation (config auto‑select does this)
-- 2× A100‑80G: significantly higher; fewer accum steps
+- 2× RTX 4090 (24 GB): smoke only; use small batches and accumulation
+- 2× A100‑40G: PCIe‑bound; prefer small per‑GPU batch with accumulation
+- 2× A100‑80G PCIe Gen3: 35–40 toks/s at seq_len=2048 (production config)
+- 2× A100‑80G PCIe Gen4: 45–55 toks/s at seq_len=2048 (production config)
+
+Profiling and A/B
+- Quick comparison of old vs new selection path:
+  - `python scripts/profiler_comparison.py --steps 100 --warmup 10`
+- Single NVTX‑annotated smoke (synthetic):
+  - `NSA_NVTX=1 NSA_SEL_RANGES_V2=1 CONFIG=configs/m7c_125m_40g.yaml \
+     python -u scripts/train_showcase.py --dataset synthetic --steps 200`
 
 ## Handoff Checklist
 - Attach the following artifacts:
