@@ -78,6 +78,7 @@ varlen_results.csv
 fa2_*.txt
 triton_*.txt
 sanity.out
+uv.lock
 
 # Local bundles
 *.tar.gz
