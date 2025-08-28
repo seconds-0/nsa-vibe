@@ -20,4 +20,15 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: []
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest (fast core)
+        entry: bash -lc 'set -euo pipefail; if command -v uv >/dev/null 2>&1; then CMD="uv run -q pytest"; else CMD="pytest -q"; fi; PYTHONPATH=. $CMD -k "test_masks or test_block_math or test_equiv_small or test_decode_counters or test_group_consistency"'
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [commit]
+        # Enable/disable with PRECOMMIT_PYTEST=1; default on
+        condition: '"${PRECOMMIT_PYTEST:-1}" = "1"'
 
