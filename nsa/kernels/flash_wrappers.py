@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from nsa.core.debug import log
 
 
 def is_flash_available() -> bool:
@@ -75,6 +76,8 @@ def attention_bgh(
             )  # [B,G*h,S,Dv]
             o = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
             o = o.reshape(B, G, h, -1)
+            if not torch.isfinite(o).all():
+                log("warn.flash_bgh_nonfinite", path="fa2.dense")
             return torch.nan_to_num(o, nan=0.0)
         except Exception:
             pass

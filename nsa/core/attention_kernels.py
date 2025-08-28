@@ -23,6 +23,14 @@ from nsa.kernels.flash_wrappers import (
 _VARLEN_WS: dict[tuple, dict[str, torch.Tensor]] = {}
 _SEL_PACK_WS: dict[tuple, dict[str, torch.Tensor]] = {}
 
+def clear_varlen_workspaces() -> None:
+    """Optional memory cleanup: free varlen packing workspaces."""
+    _VARLEN_WS.clear()
+
+def clear_selection_pack_workspaces() -> None:
+    """Optional memory cleanup: free selection pack workspaces."""
+    _SEL_PACK_WS.clear()
+
 
 def _get_varlen_workspace(
     device: torch.device,
@@ -519,6 +527,7 @@ def sliding_window_attention_fa2(
                             end = t + 1
                             seg_k = K[b, g, start:end]  # [L,Dk]
                             seg_v = V[b, g, start:end]  # [L,Dv]
+                            assert (write_pos + L) <= total_k, "varlen K/V pack overflow"
                             k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
                             v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
                             write_pos += L
@@ -535,6 +544,7 @@ def sliding_window_attention_fa2(
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
+                    log("warn.fa2_win_varlen_nonfinite")
                     return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
@@ -589,6 +599,7 @@ def sliding_window_attention_fa2(
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
+                    log("warn.fa2_win_bucket_nonfinite")
                     return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
@@ -714,6 +725,7 @@ def compressed_attention_fa2(
                         if L > 0:
                             seg_k = K_cmp[b, g, :L]
                             seg_v = V_cmp[b, g, :L]
+                            assert (write_pos + L) <= total_k, "varlen cmp K/V pack overflow"
                             k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
                             v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
                             write_pos += L
@@ -730,6 +742,7 @@ def compressed_attention_fa2(
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
+                    log("warn.fa2_cmp_varlen_nonfinite")
                     return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
@@ -828,6 +841,8 @@ def sliding_window_attention_fa2_decode(
         min_len = int(os.getenv("NSA_FA2_MIN_LEN_WIN", "16"))
     except Exception:
         min_len = 16
+    if min_len < 1:
+        min_len = 1
     if win_len < min_len:
         start = end - win_len
         return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
@@ -864,6 +879,8 @@ def compressed_attention_fa2_decode(
         min_len = int(os.getenv("NSA_FA2_MIN_LEN_CMP", "16"))
     except Exception:
         min_len = 16
+    if min_len < 1:
+        min_len = 1
     if L < min_len:
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     k = K_cmp[:, :, :L]

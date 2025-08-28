@@ -65,8 +65,18 @@ source .venv/bin/activate
 pip install -U pip uv
 uv pip sync -r requirements-gpu-cu121-torch24.txt
 
-# Optional: FlashAttention 2 (enables selection varlen FA-2 fast path)
-pip install flash-attn --no-build-isolation || true
+# Required: FlashAttention 2 (FA‑2) for selection varlen fast path at S=2048)
+pip install -U pip wheel ninja packaging
+pip install --no-cache-dir --no-build-isolation flash-attn
+
+# Probe FA‑2 availability (must print 'FA2 varlen OK')
+python - << 'PY'
+try:
+    from flash_attn import flash_attn_varlen_func
+    print('FA2 varlen OK')
+except Exception as e:
+    raise SystemExit(f'FA2 missing: {e}')
+PY
 
 # Quick version check
 python - << 'PY'
@@ -88,7 +98,7 @@ No file edits are required; runtime env sets `NSA_BATCH_SIZE=1` and `NSA_ACCUM=4
 
 ## 4) Single‑GPU Smoke (200 steps)
 
-This validates kernels and the data pipeline before a long run.
+This validates kernels and the data pipeline before a long run. FA‑2 is mandatory; abort if probe fails.
 
 ```bash
 source .venv/bin/activate
@@ -119,6 +129,9 @@ export PYTHONUNBUFFERED=1
 
 # Run 200 steps
 PYTHONPATH=. python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 0 --steps 200 | tee artifacts/smoke_single_a100.log
+
+# Acceptance gate: require >= 300 toks/s average (rough check)
+awk '/toks\/s/{sum+=$(NF); n++} END{if(n>0){avg=sum/n; printf("avg_toks_per_s=%.1f\n",avg); exit (avg>=300)?0:1} else {exit 1}}' artifacts/smoke_single_a100.log
 ```
 
 Expected in logs:
@@ -147,9 +160,7 @@ Artifacts:
 
 ## 6) Monitoring & Expectations
 
-- Throughput (toks/s): depends on FA-2 availability. Reasonable brackets for 125M @ S=2048, batch=1:
-  - Conservative: 300–500 toks/s
-  - With FA-2/dataloader solid: 500–800 toks/s
+- Throughput (toks/s) with FA‑2: 500–800 toks/s typical for 125M @ S=2048, batch=1. Minimum acceptance: 300 toks/s on smoke.
 - Fetch times: aim for `fetch_p95 < 80–100 ms`; if higher, increase `NSA_FWE_DOC_BATCH=128` and/or `NSA_FWE_Q=8`.
 - Memory: 80GB is sufficient at batch=1; if near OOM, unset `NSA_SDPA_AUDIT` and lower `NSA_ACCUM` to 2.
 - Stability: no rising fallback counters; gate stats not collapsed (entropy_mean > 0.5 early on).
@@ -166,7 +177,7 @@ Artifacts:
 
 - Loader stalls early: ensure `pip install datasets` (comes via requirements), and instance has outbound network. Try `--dataset fineweb_edu_local --local-path /data/fineweb.jsonl` as a fallback.
 - OOM: confirm batch=1, reduce `NSA_ACCUM` to 2, unset `NSA_SDPA_AUDIT`, keep `PYTORCH_CUDA_ALLOC_CONF` as provided.
-- Low toks/s with small fetch times: compute‑bound; confirm FA-2 is installed; otherwise acceptable.
+- Low toks/s with small fetch times: compute‑bound; confirm FA‑2 is installed and accepted by the probe; otherwise reduce S or proceed acknowledging lower throughput.
 
 ## 9) Reporting
 
