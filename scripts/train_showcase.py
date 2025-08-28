@@ -11,6 +11,8 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union, Dict, Any
+import queue
+import collections
 
 import torch
 import torch.nn as nn
@@ -317,15 +319,11 @@ def main():
             if rank == 0:
                 print(f"[debug] failed to enable anomaly detection: {_e}")
 
-    # DDP init
+    # DDP init: decide DDP, set device first (idiomatic), then init process group with timeout
     want_ddp = cli_args.ddp
     env_ws = int(os.environ.get("WORLD_SIZE", "1"))
     ddp = (env_ws > 1) if want_ddp < 0 else bool(want_ddp)
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
-    if ddp and torch.distributed.is_available() and not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(backend=os.environ.get("TORCH_BACKEND", "nccl"))
-    world_size = torch.distributed.get_world_size() if (ddp and torch.distributed.is_initialized()) else 1
-    rank = torch.distributed.get_rank() if (ddp and torch.distributed.is_initialized()) else 0
 
     # Device
     device = torch.device("cpu")
@@ -335,6 +333,31 @@ def main():
             device = torch.device("cuda", local_rank % max(1, torch.cuda.device_count()))
         else:
             device = torch.device("cuda")
+    # Initialize process group after setting device
+    if ddp and torch.distributed.is_available() and not torch.distributed.is_initialized():
+        try:
+            from datetime import timedelta
+        except Exception:
+            timedelta = None  # type: ignore
+        pg_timeout_min = int(os.environ.get("NSA_PG_TIMEOUT_MIN", "15") or 15)
+        pg_kwargs = {"backend": os.environ.get("TORCH_BACKEND", "nccl")}
+        try:
+            if timedelta is not None:
+                pg_kwargs["timeout"] = timedelta(minutes=pg_timeout_min)
+        except Exception:
+            pass
+        torch.distributed.init_process_group(**pg_kwargs)
+    world_size = torch.distributed.get_world_size() if (ddp and torch.distributed.is_initialized()) else 1
+    rank = torch.distributed.get_rank() if (ddp and torch.distributed.is_initialized()) else 0
+    if ddp and torch.distributed.is_initialized() and rank == 0:
+        try:
+            print(
+                f"[ddp] process group ready | backend={os.environ.get('TORCH_BACKEND','nccl')} "
+                f"world_size={world_size} timeout_min={int(os.environ.get('NSA_PG_TIMEOUT_MIN','15') or 15)}",
+                flush=True,
+            )
+        except Exception:
+            pass
     dtype = torch.float32
     if str(cfg.runtime.precision).lower() in ("bf16", "bfloat16"):
         dtype = torch.bfloat16
@@ -408,15 +431,41 @@ def main():
     # Keep prior behavior: cast model weights to chosen dtype if not fp32
     if dtype != torch.float32:
         model = model.to(dtype=dtype)
-    # Optionally disable gradient checkpointing in DDP to avoid hook complexity
-    if ddp and os.getenv("NSA_DDP_DISABLE_GC", "1").lower() in ("1", "true", "yes"):
-        try:
-            if hasattr(model, "grad_checkpointing") and getattr(model, "grad_checkpointing"):
-                setattr(model, "grad_checkpointing", False)
+    # Gradient checkpointing policy under DDP
+    if ddp:
+        disable_gc = os.getenv("NSA_DDP_DISABLE_GC", "1").lower() in ("1", "true", "yes")
+        safe_gc_layers = os.getenv("NSA_DDP_SAFE_GC_LAYERS", "").strip()
+        if safe_gc_layers:
+            # Progressive GC: enable checkpointing only for a given layer range A:B
+            try:
+                a, b = 0, int(cfg.model.get("n_layers", 0))
+                parts = safe_gc_layers.split(":")
+                if parts and parts[0] != "":
+                    a = int(parts[0])
+                if len(parts) > 1 and parts[1] != "":
+                    b = int(parts[1])
+                # Clamp bounds
+                a = max(0, a)
+                b = max(a, b)
+                if hasattr(model, "grad_checkpointing"):
+                    setattr(model, "grad_checkpointing", True)
+                # Respect TinyLM internal range attribute if present
+                if hasattr(model, "_gc_range"):
+                    setattr(model, "_gc_range", (a, b))
                 if rank == 0:
-                    print("[ddp-safe] Disabled gradient checkpointing under DDP", flush=True)
-        except Exception:
-            pass
+                    print(f"[ddp-safe] Progressive GC enabled under DDP for layers [{a}:{b})", flush=True)
+            except Exception as _e:
+                if rank == 0:
+                    print(f"[ddp-safe] Failed to enable progressive GC: {safe_gc_layers} ({_e})", flush=True)
+        elif disable_gc:
+            # Disable all checkpointing for maximal DDP stability
+            try:
+                if hasattr(model, "grad_checkpointing") and getattr(model, "grad_checkpointing"):
+                    setattr(model, "grad_checkpointing", False)
+                    if rank == 0:
+                        print("[ddp-safe] Disabled gradient checkpointing under DDP", flush=True)
+            except Exception:
+                pass
     if rank == 0:
         print(f"[train] gradient_checkpointing={'on' if getattr(model, 'grad_checkpointing', False) else 'off'}", flush=True)
         if os.getenv("NSA_SDPA_FLASH_ONLY"):
@@ -481,17 +530,16 @@ def main():
                 return default
         ddp_kwargs = {
             "device_ids": [device.index] if device.type == "cuda" else None,
-            # Allow disabling find_unused for static graphs
-            "find_unused_parameters": _env_bool("NSA_DDP_FIND_UNUSED", True),
+            # Prefer static graphs and avoid unused-parameter scans by default
+            "find_unused_parameters": _env_bool("NSA_DDP_FIND_UNUSED", False),
+            "broadcast_buffers": _env_bool("NSA_DDP_BROADCAST_BUFFERS", False),
+            "gradient_as_bucket_view": _env_bool("NSA_DDP_GRAD_AS_BUCKET_VIEW", True),
+            "static_graph": _env_bool("NSA_DDP_STATIC_GRAPH", False),
         }
         # Optional DDP tuning: bucket size, broadcast buffers, grad-as-bucket-view
         bucket_mb = _env_int("NSA_DDP_BUCKET_MB", 0)
         if bucket_mb > 0:
             ddp_kwargs["bucket_cap_mb"] = bucket_mb
-        if os.getenv("NSA_DDP_BROADCAST_BUFFERS") is not None:
-            ddp_kwargs["broadcast_buffers"] = _env_bool("NSA_DDP_BROADCAST_BUFFERS", True)
-        if os.getenv("NSA_DDP_GRAD_AS_BUCKET_VIEW") is not None:
-            ddp_kwargs["gradient_as_bucket_view"] = _env_bool("NSA_DDP_GRAD_AS_BUCKET_VIEW", True)
         if ddp_safe:
             # Avoid buffer broadcasts and large buckets; disable grad-as-bucket-view
             ddp_kwargs.update(
@@ -528,9 +576,8 @@ def main():
         except Exception as _e:
             if rank == 0:
                 print(f"[ddp] could not register compression hook: {_e}", flush=True)
-        # Optional: allow static graph only if explicitly requested
-        _use_static = os.getenv("NSA_DDP_STATIC_GRAPH", "0").lower() in ("1", "true", "yes")
-        if _use_static:
+        # Backward-compatible static-graph hint if supported on this PT version
+        if ddp_kwargs.get("static_graph", False):
             try:
                 model._set_static_graph()
             except Exception:
@@ -609,7 +656,23 @@ def main():
         pass
     warmup = int(cfg.train.get("warmup_steps", 0))
 
-    opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=float(cfg.train.get("weight_decay", 0.0)))
+    # Optimizer: optionally enable fused AdamW when supported (opt-in via env)
+    use_fused_opt = os.getenv("NSA_OPT_FUSED", "0").lower() in ("1", "true", "yes")
+    opt = None
+    try:
+        if use_fused_opt and use_cuda:
+            opt = optim.AdamW(
+                model.parameters(), lr=lr, weight_decay=float(cfg.train.get("weight_decay", 0.0)), fused=True
+            )
+            if rank == 0:
+                print("[opt] AdamW fused=True enabled", flush=True)
+        else:
+            opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=float(cfg.train.get("weight_decay", 0.0)))
+    except TypeError:
+        # Older PyTorch may not support fused kwarg; fall back safely
+        opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=float(cfg.train.get("weight_decay", 0.0)))
+        if rank == 0 and use_fused_opt and use_cuda:
+            print("[opt] fused AdamW not supported; using standard AdamW", flush=True)
     total_steps = steps
     def lr_lambda(step):
         if warmup > 0 and step < warmup:
@@ -700,33 +763,65 @@ def main():
     halt_path = out_dir / ".HALT"
     if use_fwe:
         try:
-            from nsa.data_pipeline import fineweb_stream_batches, Shard  # type: ignore
+            from nsa.data_pipeline import fineweb_stream_batches, fineweb_stream_batches_batched, Shard  # type: ignore
         except Exception as e:
             raise RuntimeError("FineWeb‑Edu pipeline missing; ensure repository is intact and optional deps installed (datasets)") from e
+        # Tokenizer setup (prefer fast tokenizer)
         if use_bpe:
-            from transformers import GPT2Tokenizer  # type: ignore
-            tok = GPT2Tokenizer.from_pretrained("gpt2")
-            def encode_bytes(s: str):
-                tokens = tok.encode(s)
-                if len(tokens) > S - 1:
-                    tokens = tokens[: S - 1]
-                return tokens
+            try:
+                from transformers import GPT2TokenizerFast  # type: ignore
+                tok = GPT2TokenizerFast.from_pretrained("gpt2")
+                tok.model_max_length = 1_000_000
+                def encode_one(s: str):
+                    ids = tok.encode(s, add_special_tokens=False)
+                    return ids[: S - 1] if len(ids) > (S - 1) else ids
+                def encode_batch(texts: list[str]) -> list[list[int]]:
+                    out = tok(texts, add_special_tokens=False, return_attention_mask=False)
+                    ids_list = out["input_ids"]
+                    return [ids[: S - 1] if len(ids) > (S - 1) else ids for ids in ids_list]
+            except Exception:
+                from transformers import GPT2Tokenizer  # type: ignore
+                tok = GPT2Tokenizer.from_pretrained("gpt2")
+                def encode_one(s: str):
+                    ids = tok.encode(s)
+                    return ids[: S - 1] if len(ids) > (S - 1) else ids
+                def encode_batch(texts: list[str]) -> list[list[int]]:
+                    return [encode_one(t) for t in texts]
         else:
-            def encode_bytes(s: str):
-                tokens = list(s.encode("utf-8", errors="ignore"))
-                if len(tokens) > S - 1:
-                    tokens = tokens[: S - 1]
-                return tokens
+            def encode_one(s: str):
+                ids = list(s.encode("utf-8", errors="ignore"))
+                return ids[: S - 1] if len(ids) > (S - 1) else ids
+            def encode_batch(texts: list[str]) -> list[list[int]]:
+                out = []
+                for t in texts:
+                    ids = list(t.encode("utf-8", errors="ignore"))
+                    out.append(ids[: S - 1] if len(ids) > (S - 1) else ids)
+                return out
         os.environ["NSA_FWE_REPORT_DOCS"] = str(int(cli_args.fwe_report_docs))
-        print("[train] streaming FineWeb‑Edu via datasets (sharded per rank)", flush=True)
+        print("[train] streaming FineWeb‑Edu via datasets (sharded)", flush=True)
         if world_size > 1:
             shard = Shard(mod=world_size, rem=rank)
-            fwe_train = fineweb_stream_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, shard=shard, report_docs=int(cli_args.fwe_report_docs))
-            fwe_val = fineweb_stream_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, shard=shard, report_docs=int(cli_args.fwe_report_docs))
+            _doc_batch = int(os.getenv("NSA_FWE_DOC_BATCH", "64"))
+            if _doc_batch > 1:
+                fwe_train = fineweb_stream_batches_batched(encode_batch=encode_batch, seq_len=S, batch_size=B_global, shard=shard, report_docs=int(cli_args.fwe_report_docs), doc_batch=_doc_batch)
+                fwe_val = fineweb_stream_batches_batched(encode_batch=encode_batch, seq_len=S, batch_size=B_global, shard=shard, report_docs=int(cli_args.fwe_report_docs), doc_batch=_doc_batch)
+            else:
+                fwe_train = fineweb_stream_batches(encode=encode_one, seq_len=S, batch_size=B_global, shard=shard, report_docs=int(cli_args.fwe_report_docs))
+                fwe_val = fineweb_stream_batches(encode=encode_one, seq_len=S, batch_size=B_global, shard=shard, report_docs=int(cli_args.fwe_report_docs))
+            # Each rank already receives a full per-rank batch of size B_global.
+            # Align B_local to avoid empty batches on secondary ranks when B_global < world_size.
+            B_local = B_global
         else:
-            # Use a simple modulo split to simulate train/val separation
-            fwe_train = fineweb_stream_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, shard=Shard(mod=100, rem=1), report_docs=int(cli_args.fwe_report_docs))
-            fwe_val = fineweb_stream_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, shard=Shard(mod=100, rem=0), report_docs=int(cli_args.fwe_report_docs))
+            # Single-GPU: train on full stream; val uses small modulo sample
+            shard_train = Shard(mod=1, rem=0)
+            shard_val = Shard(mod=100, rem=0)
+            _doc_batch = int(os.getenv("NSA_FWE_DOC_BATCH", "64"))
+            if _doc_batch > 1:
+                fwe_train = fineweb_stream_batches_batched(encode_batch=encode_batch, seq_len=S, batch_size=B_global, shard=shard_train, report_docs=int(cli_args.fwe_report_docs), doc_batch=_doc_batch)
+                fwe_val = fineweb_stream_batches_batched(encode_batch=encode_batch, seq_len=S, batch_size=B_global, shard=shard_val, report_docs=int(cli_args.fwe_report_docs), doc_batch=_doc_batch)
+            else:
+                fwe_train = fineweb_stream_batches(encode=encode_one, seq_len=S, batch_size=B_global, shard=shard_train, report_docs=int(cli_args.fwe_report_docs))
+                fwe_val = fineweb_stream_batches(encode=encode_one, seq_len=S, batch_size=B_global, shard=shard_val, report_docs=int(cli_args.fwe_report_docs))
 
         # Smoke test: try to fetch one batch with timeout to detect stalls early
         def _pull_one_batch(result_box: Dict[str, Any]) -> None:
@@ -765,6 +860,38 @@ def main():
                 yield first
                 yield from iterator
             fwe_train = _chain_batches(first_batch, fwe_train)
+        # Optional prefetch of pinned CPU tensors
+        _prefetch = os.getenv("NSA_FWE_PREFETCH", "1").lower() in ("1", "true", "yes")
+        _qsize = int(os.getenv("NSA_FWE_Q", "4"))
+        def _prefetch_iter(it, device):
+            q: "queue.Queue[Optional[torch.Tensor]]" = queue.Queue(maxsize=max(1, _qsize))
+            SENTINEL = object()
+            def _worker():
+                try:
+                    for b in it:
+                        cpu = torch.as_tensor(b, dtype=torch.long)
+                        if device.type == "cuda":
+                            try:
+                                cpu = cpu.pin_memory()
+                            except Exception:
+                                pass
+                        q.put(cpu)
+                finally:
+                    q.put(SENTINEL)
+            threading.Thread(target=_worker, daemon=True).start()
+            while True:
+                item = q.get()
+                if item is SENTINEL:
+                    break
+                yield item
+        if _prefetch:
+            fwe_train = _prefetch_iter(fwe_train, device)
+        # Ensure all ranks are aligned before entering the training loop
+        if ddp and world_size > 1 and torch.distributed.is_initialized():
+            try:
+                torch.distributed.barrier()
+            except Exception:
+                pass
 
     elif use_fwe_local:
         pth = cli_args.local_path
@@ -811,6 +938,8 @@ def main():
     tokens_total = 0
     last_log_time = t0
     last_log_tokens = 0
+    # Fetch timing observability
+    _fetch_times = collections.deque(maxlen=200)
 
     # Watchdog to dump stacks if heartbeat stalls > 180s
     def _watchdog():
@@ -858,14 +987,9 @@ def main():
             val_losses = []
             for _ in range(10):
                 if use_fwe:
+                    # Per-rank sharded iterator already returns a full per-rank batch
                     batch = next(fwe_val)
-                    if world_size > 1:
-                        start = sum([B_global // world_size + (1 if r < (B_global % world_size) else 0) for r in range(rank)])
-                        count = B_local
-                        sub = [batch[i] for i in range(start, start + count)] if count > 0 else []
-                        xv = torch.tensor(sub, dtype=torch.long, device=device)
-                    else:
-                        xv = torch.tensor(batch, dtype=torch.long, device=device)
+                    xv = torch.tensor(batch, dtype=torch.long, device=device)
                     yv = xv[:, 1:].contiguous()
                 else:
                     xv = torch.randint(low=0, high=vocab, size=(B_local, S), device=device)
@@ -915,15 +1039,28 @@ def main():
             try:
                 _t0_fetch = time.time()
                 batch = next(fwe_train)
-                if world_size > 1:
-                    start = sum([B_global // world_size + (1 if r < (B_global % world_size) else 0) for r in range(rank)])
-                    count = B_local
-                    sub = [batch[i] for i in range(start, start + count)] if count > 0 else []
-                    x = torch.tensor(sub, dtype=torch.long, device=device)
+                # Pinned CPU tensor path (from prefetcher) or Python list fallback
+                if isinstance(batch, torch.Tensor):
+                    if device.type == "cuda":
+                        x = batch.to(device, non_blocking=True)
+                    else:
+                        x = batch
                 else:
-                    x = torch.tensor(batch, dtype=torch.long, device=device)
+                    if device.type == "cuda":
+                        cpu = torch.as_tensor(batch, dtype=torch.long)
+                        try:
+                            cpu = cpu.pin_memory()
+                        except Exception:
+                            pass
+                        x = cpu.to(device, non_blocking=True)
+                    else:
+                        x = torch.as_tensor(batch, dtype=torch.long)
                 y = x[:, 1:].contiguous()
                 dt_fetch_last = time.time() - _t0_fetch
+                try:
+                    _fetch_times.append(float(dt_fetch_last))
+                except Exception:
+                    pass
             except StopIteration:
                 x = torch.randint(low=0, high=vocab, size=(B_local, S), device=device)
                 y = x[:, 1:].contiguous()
@@ -963,12 +1100,28 @@ def main():
         else:
             raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1)))
         loss = raw_loss / max(1, accum)
-        # Early abort on NaN/Inf
-        if not torch.isfinite(loss):
+        # Early abort on NaN/Inf — coherently across all ranks to avoid DDP hangs
+        stop_local = 1 if (not torch.isfinite(loss)) else 0
+        should_stop = (stop_local == 1)
+        if ddp and world_size > 1 and torch.distributed.is_initialized():
+            try:
+                _flag = torch.tensor([stop_local], device=device, dtype=torch.int32)
+                torch.distributed.all_reduce(_flag, op=torch.distributed.ReduceOp.SUM)
+                should_stop = int(_flag.item()) > 0
+            except Exception:
+                # If all_reduce fails, fall back to local decision
+                should_stop = (stop_local == 1)
+        if should_stop:
             if rank == 0:
                 print("[train][FATAL] non-finite loss detected — aborting run.", flush=True)
                 (out_dir / ".anomaly_type").write_text("nan_loss\n")
                 (out_dir / ".HALT").write_text("halt: nan_loss\n")
+            # Best-effort barrier so all ranks exit cleanly
+            if ddp and world_size > 1 and torch.distributed.is_initialized():
+                try:
+                    torch.distributed.barrier()
+                except Exception:
+                    pass
             break
 
         # Backward with optional DDP no_sync during gradient accumulation to avoid
@@ -1022,7 +1175,16 @@ def main():
             dt = max(1e-6, now - last_log_time)
             toks = tokens_total - last_log_tokens
             toks_per_s_local = toks / dt
-            toks_per_s_global = toks_per_s_local * (world_size if ddp else 1)
+            # Use all-reduce to account for uneven per-rank batches
+            if ddp and world_size > 1 and torch.distributed.is_initialized():
+                try:
+                    _toks = torch.tensor([toks], device=device, dtype=torch.float64)
+                    torch.distributed.all_reduce(_toks, op=torch.distributed.ReduceOp.SUM)
+                    toks_per_s_global = float(_toks.item()) / dt
+                except Exception:
+                    toks_per_s_global = toks_per_s_local * world_size
+            else:
+                toks_per_s_global = toks_per_s_local
             if rank == 0:
                 # Optional grad-norm logging (enable with NSA_LOG_GRAD_NORM=1)
                 gn_val = None
@@ -1037,17 +1199,36 @@ def main():
                         gn_val = total
                 except Exception:
                     gn_val = None
-                print(
-                    (
-                        f"step {step:04d} | loss {log_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e} | "
-                        f"toks/s {toks_per_s_global:.0f}"
-                        + (f" | grad_norm {gn_val:.2f}" if gn_val is not None else "")
-                    ),
-                    flush=True,
+                # Compose log line with optional fetch stats
+                _log = (
+                    f"step {step:04d} | loss {log_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e} | "
+                    f"toks/s {toks_per_s_global:.0f}"
+                    + (f" | grad_norm {gn_val:.2f}" if gn_val is not None else "")
                 )
+                if dt_fetch_last is not None:
+                    _log += f" | fetch {dt_fetch_last*1000.0:.0f}ms"
+                if len(_fetch_times) >= 20:
+                    try:
+                        arr = sorted(_fetch_times)
+                        p50 = arr[len(arr)//2]
+                        p95 = arr[int(0.95*(len(arr)-1))]
+                        _log += f" | fetch_p50 {p50*1000.0:.0f}ms | fetch_p95 {p95*1000.0:.0f}ms"
+                    except Exception:
+                        pass
+                print(_log, flush=True)
                 hb_extra = {"loss": log_loss, "toks_per_s": toks_per_s_global}
                 if dt_fetch_last is not None:
                     hb_extra["dt_fetch_s"] = float(dt_fetch_last)
+                # Fetch p50/p95 over last window
+                if len(_fetch_times) >= 20:
+                    try:
+                        arr = sorted(_fetch_times)
+                        p50 = arr[len(arr)//2]
+                        p95 = arr[int(0.95*(len(arr)-1))]
+                        hb_extra["fetch_p50_ms"] = float(p50*1000.0)
+                        hb_extra["fetch_p95_ms"] = float(p95*1000.0)
+                    except Exception:
+                        pass
                 if gn_val is not None:
                     hb_extra["grad_norm"] = gn_val
                 
