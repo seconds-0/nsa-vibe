@@ -3,6 +3,10 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize]
+    paths-ignore:
+      # Avoid running when this PR modifies the review workflows themselves.
+      - ".github/workflows/claude-code-review.yml"
+      - ".github/workflows/claude.yml"
     # Optional: Only run on specific file changes
     # paths:
     #   - "src/**/*.ts"
