@@ -26,6 +26,7 @@ pygments
 exceptiongroup
 iniconfig
 sortedcontainers
+attrs
 
 # CI dependencies
 antlr4-python3-runtime
