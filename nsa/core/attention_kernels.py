@@ -473,12 +473,13 @@ def sliding_window_attention_fa2(
         use_timing = os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes")
         force_varlen = _env_bool("NSA_FA2_FORCE_VARLEN", False)
         force_dense = _env_bool("NSA_FA2_FORCE_DENSE", False)
+        force_win_dense = _env_bool("NSA_WIN_FORCE_DENSE", False)
         # Log histogram of lengths
         if buckets:
             uniq, counts = torch.unique(lengths, return_counts=True)
             log("fa2.win.hist", uniq=uniq.tolist(), counts=counts.tolist())
         # Try a single varlen call across all rows
-        if (is_flash_varlen_available() and not force_dense) or force_varlen:
+        if (is_flash_varlen_available() and not (force_dense or force_win_dense)) or force_varlen:
             rows = []
             len_rows = []
             for t in range(S):
@@ -545,6 +546,31 @@ def sliding_window_attention_fa2(
                             k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
                             v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
                             write_pos += L
+                # Optional integrity checks (debug only)
+                if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+                    try:
+                        assert cuq.numel() == (N + 1), "cuq length mismatch"
+                        assert cuk.numel() == (N + 1), "cuk length mismatch"
+                        assert int(cuk[-1].item()) == int(total_k), "cuk total_k mismatch"
+                        if total_k > 0 and N > 0:
+                            probe = [0, N // 2, N - 1] if N >= 3 else [0]
+                            for i in probe:
+                                L_i = int(len_rows[i])
+                                b_i, t_i, g_i = rows[i]
+                                s_i = int(max(0, (t_i + 1) - w))
+                                e_i = int(t_i + 1)
+                                if L_i > 0:
+                                    ks = k_pack[cuk[i] : cuk[i + 1]]  # [L,h,Dk]
+                                    kv = K[b_i, g_i, s_i:e_i].unsqueeze(1).expand(-1, h, -1)
+                                    if ks.shape != kv.shape:
+                                        log("warn.fa2_win_pack_shape", row=i, ks=ks.shape, kv=kv.shape)
+                                    else:
+                                        md = float((ks - kv).abs().max().item())
+                                        if md > 1e-3:
+                                            log("warn.fa2_win_pack_mismatch", row=i, L=L_i, max_diff=md)
+                    except Exception:
+                        pass
+
                 if use_timing:
                     t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
@@ -555,7 +581,7 @@ def sliding_window_attention_fa2(
                     cuk,
                     max_seqlen_q=1,
                     max_seqlen_k=max_len,
-                    causal=True,
+                    causal=False,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
                     log("warn.fa2_win_varlen_nonfinite")
@@ -593,7 +619,7 @@ def sliding_window_attention_fa2(
             Qb = torch.stack(rows_q, dim=0)  # [N,h,Dk]
             Kb = torch.stack(rows_k, dim=0)  # [N,L,Dk]
             Vb = torch.stack(rows_v, dim=0)  # [N,L,Dv]
-            if is_flash_varlen_available() and not force_dense:
+            if is_flash_varlen_available() and not (force_dense or force_win_dense):
                 # Pack varlen (constant L here, but use API for generality)
                 q_pack = Qb  # [N,h,Dk]
                 k_pack = Kb.reshape(N * L, Dk).unsqueeze(1).expand(-1, h, -1).reshape(N * L, h, Dk)
@@ -610,7 +636,7 @@ def sliding_window_attention_fa2(
                     cuk,
                     max_seqlen_q=1,
                     max_seqlen_k=L,
-                    causal=True,
+                    causal=False,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
                     log("warn.fa2_win_bucket_nonfinite")
@@ -625,7 +651,7 @@ def sliding_window_attention_fa2(
                 v_rows = Vb.unsqueeze(2).expand(N, L, h, Dv)
                 if use_timing:
                     t0 = time.perf_counter()
-                Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(
+                Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=False).squeeze(
                     1
                 )  # [N,h,Dv]
                 if use_timing:
@@ -760,7 +786,7 @@ def compressed_attention_fa2(
                     cuk,
                     max_seqlen_q=1,
                     max_seqlen_k=max_len,
-                    causal=True,
+                    causal=False,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
                     log("warn.fa2_cmp_varlen_nonfinite")
@@ -812,7 +838,7 @@ def compressed_attention_fa2(
                     cuk,
                     max_seqlen_q=1,
                     max_seqlen_k=L,
-                    causal=True,
+                    causal=False,
                 )  # [N,h,Dv]
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
@@ -882,7 +908,7 @@ def sliding_window_attention_fa2_decode(
     k_rows = k.reshape(N, win_len, Dk).unsqueeze(2).expand(N, win_len, h, Dk)
     v_rows = v.reshape(N, win_len, v.shape[-1]).unsqueeze(2).expand(N, win_len, h, v.shape[-1])
     try:
-        o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True)  # [N,1,h,Dv]
+        o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=False)  # [N,1,h,Dv]
         o = o.squeeze(1).reshape(B, G, h, -1)
         if not torch.isfinite(o).all():
             return attention_bgh(q_t, k, v, causal=True)
@@ -925,7 +951,7 @@ def compressed_attention_fa2_decode(
     k_rows = k.reshape(N, L, Dk).unsqueeze(2).expand(N, L, h, Dk)
     v_rows = v.reshape(N, L, v.shape[-1]).unsqueeze(2).expand(N, L, h, v.shape[-1])
     try:
-        o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True)
+        o = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=False)
         o = o.squeeze(1).reshape(B, G, h, -1)
         if not torch.isfinite(o).all():
             return attention_bgh(q_t, k, v, causal=True)
