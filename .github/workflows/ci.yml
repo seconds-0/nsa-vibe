@@ -15,14 +15,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-            python-version: '3.10'
+            python-version: '3.11'
 
-      - name: Create venv and install deps
+      - name: Install uv and deps
         run: |
-          python -m venv .venv
-          . ./.venv/bin/activate
-          pip install -U pip wheel setuptools
-          pip install -r requirements-cpu.txt
+          python -m pip install -U pip
+          python -m pip install -U uv
+          uv venv -p 3.11 .venv
+          uv pip sync requirements-cpu.txt
 
       - name: Environment diagnostics
         run: |
@@ -71,14 +71,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-            python-version: '3.10'
+            python-version: '3.11'
 
-      - name: Create venv and install deps
+      - name: Install uv and deps
         run: |
-          python -m venv .venv
-          . ./.venv/bin/activate
-          pip install -U pip wheel setuptools
-          pip install -r requirements-cpu.txt
+          python -m pip install -U pip
+          python -m pip install -U uv
+          uv venv -p 3.11 .venv
+          uv pip sync requirements-cpu.txt
 
       - name: Run batched prefill smoke (CPU)
         env:
