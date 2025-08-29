@@ -16,11 +16,10 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Skip for Mentat-authored PRs; keep enabled for others
+    if: |
+      github.event.pull_request.user.login != 'mentatbot[bot]' &&
+      github.event.pull_request.user.type == 'User'
     
     runs-on: ubuntu-latest
     permissions:
