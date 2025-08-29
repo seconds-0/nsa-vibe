@@ -10,17 +10,30 @@ from .block_index import BlockMeta
 def compute_pcmp(Q: torch.Tensor, K_cmp: torch.Tensor, scale: float) -> torch.Tensor:
     # Q: [G,h,Dk]; K_cmp: [B,G,S_cmp,Dk] with implicit B=1 for this path
     if Q.dim() == 3:
+        # Q: [G,h,Dk]; K_cmp: [1,G,S_cmp,Dk] (implicit B=1)
         G, h, Dk = Q.shape
         S_cmp = K_cmp.shape[2]
         q = Q.reshape(G * h, 1, Dk)
-        k = K_cmp.reshape(1 * G, S_cmp, Dk).repeat_interleave(h, dim=0)
+        # Expand K over heads without materializing copies
+        k = (
+            K_cmp[0]
+            .unsqueeze(1)  # [G,1,S_cmp,Dk]
+            .expand(G, h, S_cmp, Dk)
+            .reshape(G * h, S_cmp, Dk)
+        )
         logits = torch.bmm(q, k.transpose(1, 2)).squeeze(1) * scale
         return F.softmax(logits, dim=-1).reshape(1, G, h, S_cmp)
     else:
+        # Q: [B,G,h,Dk]; K_cmp: [B,G,S_cmp,Dk]
         B, G, h, Dk = Q.shape
         S_cmp = K_cmp.shape[2]
         q = Q.reshape(B * G * h, 1, Dk)
-        k = K_cmp.reshape(B * G, S_cmp, Dk).repeat_interleave(h, dim=0)
+        # Expand K over heads without materializing copies
+        k = (
+            K_cmp.unsqueeze(2)  # [B,G,1,S_cmp,Dk]
+            .expand(B, G, h, S_cmp, Dk)
+            .reshape(B * G * h, S_cmp, Dk)
+        )
         logits = torch.bmm(q, k.transpose(1, 2)).squeeze(1) * scale
         p = F.softmax(logits, dim=-1)
         return p.reshape(B, G, h, S_cmp)
@@ -373,6 +386,9 @@ def convert_indices_to_ranges_batched(
                 last_s, last_e = None, None
                 prev = None
                 for bid in block_ids:
+                    # Skip invalid/out-of-range indices defensively
+                    if bid < 0 or bid >= sel_starts.numel():
+                        continue
                     if prev is not None and bid == prev:
                         continue
                     prev = bid
@@ -521,13 +537,24 @@ def convert_indices_to_ranges_batched_v2(
     # Start block ids per run, collected in row order
     start_blk_per_run = start_blk_flat  # length == total_runs
 
-    # Map block ids to token starts/ends
+    # Map block ids to token starts/ends (guard invalid/out-of-range)
     sel_starts = meta.sel_starts.to(device=device, dtype=torch.int32)
+    S_sel = int(sel_starts.numel())
     l_sel = int(meta.l_sel)
-    start_tok_flat = sel_starts[start_blk_per_run.clamp_min(0)]  # [total_runs]
-    end_tok_flat = sel_starts[max_blk.clamp_min(0)] + l_sel
+    valid_runs = (
+        (start_blk_per_run >= 0)
+        & (start_blk_per_run < S_sel)
+        & (max_blk >= 0)
+        & (max_blk < S_sel)
+    )
+    # Default zeros; fill only valid runs
+    start_tok_flat = torch.zeros_like(start_blk_per_run, dtype=torch.int32, device=device)
+    end_tok_flat = torch.zeros_like(max_blk, dtype=torch.int32, device=device)
+    if valid_runs.any():
+        start_tok_flat[valid_runs] = sel_starts[start_blk_per_run[valid_runs]]
+        end_tok_flat[valid_runs] = sel_starts[max_blk[valid_runs]] + l_sel
 
-    # Clamp end to t+1 per row
+    # Clamp end to t+1 per row (only meaningful for valid runs)
     # Row t positions: [S] repeated over B,G
     tpos = torch.arange(S, device=device, dtype=torch.int32)
     t_rows = tpos.view(1, S, 1).expand(B, S, G).reshape(N)  # [N]
@@ -549,8 +576,15 @@ def convert_indices_to_ranges_batched_v2(
     t = (rem // G).to(torch.int64)
     g = (rem % G).to(torch.int64)
     p = pos_in_row.to(torch.int64)
-    out[b, t, g, p, 0] = start_tok_flat.to(torch.int32)
-    out[b, t, g, p, 1] = end_tok_flat.to(torch.int32)
+    # Scatter only valid runs
+    if valid_runs.any():
+        vr = valid_runs.to(torch.bool)
+        b_v = b[vr]
+        t_v = t[vr]
+        g_v = g[vr]
+        p_v = p[vr]
+        out[b_v, t_v, g_v, p_v, 0] = start_tok_flat[vr].to(torch.int32)
+        out[b_v, t_v, g_v, p_v, 1] = end_tok_flat[vr].to(torch.int32)
 
     if _nvtx:
         try:
