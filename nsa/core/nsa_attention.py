@@ -1122,13 +1122,13 @@ class NSAAttention(nn.Module):
                     total_fails=self._fallback_counters["sliding_fa2_fails"],
                 )
                 # Fallback to masked SDPA
-                from nsa.core.attention_kernels import sliding_window_attention_masked
+                from nsa.core.attention_kernels import sliding_window_attention
 
-                O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
+                O_win = sliding_window_attention(Q, K_win, V_win, self.w)
         elif use_win_mask:
-            from nsa.core.attention_kernels import sliding_window_attention_masked
+            from nsa.core.attention_kernels import sliding_window_attention
 
-            O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
+            O_win = sliding_window_attention(Q, K_win, V_win, self.w)
         else:
             # Sliding per-t using the same kernel as sequential
             O_win = torch.zeros(
@@ -1154,9 +1154,9 @@ class NSAAttention(nn.Module):
                 v_t = V_win[:, :, start:end, :].contiguous()
                 O_win[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
         if strict_asserts and not torch.isfinite(O_win).all():
-            from nsa.core.attention_kernels import sliding_window_attention_masked
+            from nsa.core.attention_kernels import sliding_window_attention
             log("warn.prefill_win_nonfinite_fallback")
-            O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
+            O_win = sliding_window_attention(Q, K_win, V_win, self.w)
         log("prefill.win", O_win=O_win)
 
         # Gates and combine
