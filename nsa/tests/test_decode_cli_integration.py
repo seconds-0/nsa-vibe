@@ -43,9 +43,7 @@ def test_decode_cli_writes_csv(tmp_path):
         "--csv",
         str(csv_path),
     ]
-    proc = subprocess.run(
-        args, env=env, capture_output=True, text=True, timeout=60
-    )
+    proc = subprocess.run(args, env=env, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, f"bench failed: {proc.stderr}"
     assert csv_path.exists(), "CSV file not created"
     with csv_path.open("r", newline="") as f:

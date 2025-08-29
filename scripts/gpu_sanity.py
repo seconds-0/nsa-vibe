@@ -68,7 +68,6 @@ def main():
     meta = build_block_meta(seq_len=S + w, l=l, d=d, l_sel=l_sel, n_sel=n_sel, w=w)
     kv = make_empty_kv(B, n_kv_groups, d_k, d_v, meta)
     with torch.no_grad():
-
         attn = block.attn
         _, kv = attn(x, kv, prefill=True)
         for fb in ("cmp", "sel", "win"):

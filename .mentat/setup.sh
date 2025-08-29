@@ -44,7 +44,7 @@ if [[ ! -f "$REQ_FILE" ]]; then
 fi
 
 echo "==> Syncing deps from ${REQ_FILE}"
-uv pip sync -r "${REQ_FILE}"
+uv pip sync "${REQ_FILE}"
 
 cat <<'EOT'
 

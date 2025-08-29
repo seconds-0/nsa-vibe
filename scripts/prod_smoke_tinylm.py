@@ -12,7 +12,9 @@ import torch.nn as nn
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Production-like 12L TinyLM smoke (forward+backward) with telemetry")
+    p = argparse.ArgumentParser(
+        description="Production-like 12L TinyLM smoke (forward+backward) with telemetry"
+    )
     p.add_argument("--vocab", type=int, default=50257)
     p.add_argument("--dim", type=int, default=768)
     p.add_argument("--layers", type=int, default=12)
@@ -29,7 +31,9 @@ def parse_args():
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
-    p.add_argument("--grad-checkpointing", action="store_true", help="Enable gradient checkpointing")
+    p.add_argument(
+        "--grad-checkpointing", action="store_true", help="Enable gradient checkpointing"
+    )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--out-dir", type=str, default="artifacts/prod_smoke")
     p.add_argument("--tag", type=str, default="")
@@ -96,7 +100,15 @@ def main():
 
     # Save env
     with open(out_dir / "env.json", "w") as f:
-        json.dump({k: v for k, v in os.environ.items() if k.startswith("NSA_") or k in ("PYTORCH_CUDA_ALLOC_CONF",)}, f, indent=2)
+        json.dump(
+            {
+                k: v
+                for k, v in os.environ.items()
+                if k.startswith("NSA_") or k in ("PYTORCH_CUDA_ALLOC_CONF",)
+            },
+            f,
+            indent=2,
+        )
 
     # Synthetic data
     torch.manual_seed(42)
@@ -124,4 +136,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

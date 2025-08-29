@@ -49,7 +49,12 @@ def main():
     ap.add_argument("--n_sel", type=int, default=8)
     ap.add_argument("--w", type=int, default=4096)
     ap.add_argument("--rope_scale", type=float, default=8.0)
-    ap.add_argument("--prefill_tile", type=int, default=4096, help="Enable chunked prefill via decode path when >0")
+    ap.add_argument(
+        "--prefill_tile",
+        type=int,
+        default=4096,
+        help="Enable chunked prefill via decode path when >0",
+    )
     ap.add_argument("--use_fa2", type=int, default=1)
     args = ap.parse_args()
 
@@ -79,7 +84,9 @@ def main():
     # Memory estimate and warning
     bytes_est = args.B * args.S * args.dim * 4  # float32
     if bytes_est > 3 * (1024**3):  # >3GB for input alone
-        print(f"[warn] Large allocation: ~{bytes_est/1024**3:.1f} GB for x_ctx; consider reducing B/S/dim")
+        print(
+            f"[warn] Large allocation: ~{bytes_est / 1024**3:.1f} GB for x_ctx; consider reducing B/S/dim"
+        )
     x_ctx = torch.randn(args.B, args.S, args.dim, device=device)
     meta = build_block_meta(args.S + args.w, args.l, args.d, args.l_sel, n_sel=args.n_sel, w=args.w)
     kv = create_empty_kv(args.B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, meta)
@@ -96,8 +103,12 @@ def main():
     reads_total = int(kv.reads_act_total[-1].item()) if kv.reads_act_total.numel() else 0
     print("-- demo_64k summary --")
     print(f"device: {device}")
-    print(f"B={args.B} S={args.S} dim={args.dim} heads={args.heads} G={args.groups} dk={args.dk} dv={args.dv}")
-    print(f"rope_scale={args.rope_scale} prefill_tile={args.prefill_tile} w={args.w} n_sel={args.n_sel}")
+    print(
+        f"B={args.B} S={args.S} dim={args.dim} heads={args.heads} G={args.groups} dk={args.dk} dv={args.dv}"
+    )
+    print(
+        f"rope_scale={args.rope_scale} prefill_tile={args.prefill_tile} w={args.w} n_sel={args.n_sel}"
+    )
     print(f"prefill_time_ms={ms:.2f} reads_total={reads_total}")
 
 

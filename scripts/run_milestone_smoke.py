@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """M8 Milestone smoke tests - comprehensive validation suite."""
+
 import subprocess
 import sys
 
@@ -37,7 +38,7 @@ def main():
     rc_total = 0
     passed = 0
     failed = 0
-    
+
     for i, cmd in enumerate(SUITES, 1):
         print(f"\n[{i}/{len(SUITES)}] Running: {' '.join(cmd)}")
         rc = run(cmd)
@@ -48,14 +49,14 @@ def main():
             print(f"❌ Suite {i} FAILED (rc={rc})")
             failed += 1
         rc_total |= rc
-    
-    print(f"\n==============================")
+
+    print("\n==============================")
     print(f"Results: {passed} passed, {failed} failed")
     if rc_total == 0:
         print("🎉 All milestone smoke tests PASSED!")
     else:
         print("💥 Some milestone smoke tests FAILED!")
-    
+
     sys.exit(rc_total)
 
 

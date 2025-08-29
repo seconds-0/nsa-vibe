@@ -27,8 +27,7 @@ jobs:
           NSA_DEBUG_LOG: "1"
           NSA_LOG_LIMIT: "20"
         run: |
-          . .venv/bin/activate
-          pytest -q -k "triton_sel_parity or triton_sel_parity_gpu or triton_sel_fallback_logging"
+          PYTHONPATH=. uv run pytest -q -k "triton_sel_parity or triton_sel_parity_gpu or triton_sel_fallback_logging"
 
   sm89-guard:
     name: SM 8.9 Guard (ADR fallback)
@@ -49,6 +48,4 @@ jobs:
           NSA_TEST_TRITON_SEL: "1"
           NSA_USE_TRITON_SEL: "1"
         run: |
-          . .venv/bin/activate
-          pytest -q -k "triton_sel_parity or triton_sel_parity_gpu or triton_sel_fallback_logging"
-
+          PYTHONPATH=. uv run pytest -q -k "triton_sel_parity or triton_sel_parity_gpu or triton_sel_fallback_logging"

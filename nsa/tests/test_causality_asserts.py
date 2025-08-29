@@ -1,6 +1,7 @@
 import os
-import torch
+
 import pytest
+import torch
 
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
@@ -34,7 +35,9 @@ def test_decode_selection_causality_strict_asserts(monkeypatch):
     os.environ["NSA_STRICT_ASSERTS"] = "1"
     torch.manual_seed(0)
     B, dim = 1, 32
-    nsa = NSAAttention(dim=dim, n_heads=2, n_kv_groups=1, d_k=8, d_v=8, l=4, d=2, l_sel=4, n_sel=2, w=4)
+    nsa = NSAAttention(
+        dim=dim, n_heads=2, n_kv_groups=1, d_k=8, d_v=8, l=4, d=2, l_sel=4, n_sel=2, w=4
+    )
     device = torch.device("cpu")
     kv = _empty_kv(B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, device)
 
@@ -72,7 +75,9 @@ def test_prefill_batched_selection_causality_strict_asserts(monkeypatch):
     os.environ["NSA_PREFILL_BATCHED"] = "1"
     torch.manual_seed(0)
     B, dim, S = 1, 32, 3
-    nsa = NSAAttention(dim=dim, n_heads=2, n_kv_groups=1, d_k=8, d_v=8, l=4, d=2, l_sel=4, n_sel=2, w=4)
+    nsa = NSAAttention(
+        dim=dim, n_heads=2, n_kv_groups=1, d_k=8, d_v=8, l=4, d=2, l_sel=4, n_sel=2, w=4
+    )
     device = torch.device("cpu")
     kv = _empty_kv(B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, device)
 
@@ -112,10 +117,14 @@ def test_prefill_batched_compressed_bounds_ok_strict():
     old_strict = os.environ.get("NSA_STRICT_ASSERTS")
     old_batched = os.environ.get("NSA_PREFILL_BATCHED")
     os.environ["NSA_STRICT_ASSERTS"] = "1"
-    os.environ.pop("NSA_PREFILL_BATCHED", None)  # Use default sequential prefill to exercise logic safely
+    os.environ.pop(
+        "NSA_PREFILL_BATCHED", None
+    )  # Use default sequential prefill to exercise logic safely
     torch.manual_seed(0)
     B, dim, S = 1, 32, 8
-    nsa = NSAAttention(dim=dim, n_heads=2, n_kv_groups=1, d_k=8, d_v=8, l=4, d=2, l_sel=4, n_sel=2, w=4)
+    nsa = NSAAttention(
+        dim=dim, n_heads=2, n_kv_groups=1, d_k=8, d_v=8, l=4, d=2, l_sel=4, n_sel=2, w=4
+    )
     device = torch.device("cpu")
     kv = _empty_kv(B, nsa.n_kv_groups, nsa.d_k, nsa.d_v, device)
     x = torch.randn(B, S, dim, device=device)

@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -40,7 +40,11 @@ class GateMLP(nn.Module):
         nn.init.xavier_uniform_(self.fc2.weight, gain=0.1)
         nn.init.zeros_(self.fc2.bias)  # Keep bias at zero for initial balance
         # Cache environment variables at init to avoid hot path parsing
-        self._force_uniform_gate = os.getenv("NSA_FORCE_UNIFORM_GATE", "0").lower() in ("1", "true", "yes")
+        self._force_uniform_gate = os.getenv("NSA_FORCE_UNIFORM_GATE", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         self._force_branch = os.getenv("NSA_FORCE_BRANCH")
 
     def forward(self, q_group_pooled: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
@@ -48,7 +52,9 @@ class GateMLP(nn.Module):
         if self._force_uniform_gate:
             one_third = 1.0 / 3.0
             shape = (*q_group_pooled.shape[:-1], 3)
-            return torch.full(shape, one_third, device=q_group_pooled.device, dtype=q_group_pooled.dtype)
+            return torch.full(
+                shape, one_third, device=q_group_pooled.device, dtype=q_group_pooled.dtype
+            )
         fb = self._force_branch
         if fb:
             fb = fb.strip().lower()
@@ -78,10 +84,10 @@ class GateMLP(nn.Module):
 
 def _compute_gate_stats(gates: torch.Tensor) -> dict:
     """Compute gate health statistics for monitoring.
-    
+
     Args:
         gates: Gate probabilities [B, S, G, 3] or [B, G, 3]
-        
+
     Returns:
         Dict with gate statistics: entropy, max_gate, branch_shares
     """
@@ -89,27 +95,27 @@ def _compute_gate_stats(gates: torch.Tensor) -> dict:
         # Flatten to [*, 3] for consistent computation
         original_shape = gates.shape
         gates_flat = gates.view(-1, 3)
-        
+
         # Gate entropy (should be > 0.5 for healthy mixing)
         entropy = -(gates_flat * (gates_flat + 1e-8).log()).sum(dim=-1)
         mean_entropy = entropy.mean().item()
         min_entropy = entropy.min().item()
-        
+
         # Max gate value (should be < 0.9 to avoid collapse)
         max_gate = gates_flat.max(dim=-1)[0]
-        mean_max_gate = max_gate.mean().item() 
+        mean_max_gate = max_gate.mean().item()
         max_max_gate = max_gate.max().item()
-        
+
         # Branch usage shares (should be balanced)
         branch_shares = gates_flat.mean(dim=0).tolist()  # [cmp, sel, win]
-        
+
         # Gate collapse detection (entropy < 0.1 and max_gate > 0.95)
         collapsed = (entropy < 0.1) & (max_gate > 0.95)
         collapse_fraction = collapsed.float().mean().item()
-        
+
         return {
             "entropy_mean": mean_entropy,
-            "entropy_min": min_entropy, 
+            "entropy_min": min_entropy,
             "max_gate_mean": mean_max_gate,
             "max_gate_max": max_max_gate,
             "branch_shares": branch_shares,  # [cmp, sel, win]
@@ -175,23 +181,23 @@ class NSAAttention(nn.Module):
         self.w = w
         self.gate_temp = gate_temp
         self.phi_type = (phi or "avg").lower()
-        
+
         # Gate health tracking for M8 monitoring
         self._last_gate_stats = None
         # M8: Selection length stats for monitoring (updated each forward)
         self._last_sel_stats: Optional[dict] = None
-        
+
         # M8: Fallback counters for routing monitoring
         self._fallback_counters = {
             "selection_triton_fails": 0,
-            "selection_cuda_fails": 0, 
+            "selection_cuda_fails": 0,
             "selection_pack_fails": 0,
             "selection_mask_fails": 0,
             "compressed_fa2_fails": 0,
             "sliding_fa2_fails": 0,
             "total_fallbacks": 0,
         }
-        
+
         # RoPE scaling and prefill tiling for long-context demos (env-overridable)
         try:
             rs = float(os.getenv("NSA_ROPE_SCALE", "1.0"))
@@ -245,9 +251,10 @@ class NSAAttention(nn.Module):
 
     def _cache_env_vars(self) -> None:
         """Cache environment variables to avoid repeated parsing in hot path."""
+
         def parse_bool(val: str, default: str = "0") -> bool:
             return os.getenv(val, default).lower() in ("1", "true", "yes")
-        
+
         # Cache frequently accessed environment variables
         # Raw parsed flags
         self._env_cache = {
@@ -308,7 +315,6 @@ class NSAAttention(nn.Module):
                 "fa2_cmp_eff": fa2_cmp_eff,
             }
         )
-        
         # Parse numeric values
         try:
             self._rope_scale = float(os.getenv("NSA_ROPE_SCALE", "1.0"))
@@ -316,7 +322,7 @@ class NSAAttention(nn.Module):
                 self._rope_scale = 1.0
         except (ValueError, TypeError):
             self._rope_scale = 1.0
-            
+
         try:
             self._prefill_tile = int(os.getenv("NSA_PREFILL_TILE", "0"))
             if self._prefill_tile < 0:
@@ -337,15 +343,15 @@ class NSAAttention(nn.Module):
 
     def get_gate_stats(self) -> Optional[dict]:
         """Get the most recent gate statistics for monitoring.
-        
+
         Returns:
             Dict with gate health metrics or None if no recent computation
         """
         return self._last_gate_stats
-    
+
     def get_fallback_counters(self) -> dict:
         """Get fallback counters for routing monitoring.
-        
+
         Returns:
             Dict with fallback counts per implementation type
         """
@@ -363,10 +369,10 @@ class NSAAttention(nn.Module):
         - n_sel: configured top-n selection blocks (int)
         """
         return self._last_sel_stats
-    
+
     def reset_fallback_counters(self) -> dict:
         """Reset fallback counters and return the previous values.
-        
+
         Returns:
             Dict with fallback counts before reset
         """
@@ -374,7 +380,7 @@ class NSAAttention(nn.Module):
         for key in self._fallback_counters:
             self._fallback_counters[key] = 0
         return prev_counters
-    
+
     def _update_gate_stats(self, gates: torch.Tensor) -> None:
         """Update stored gate statistics for monitoring."""
         try:
@@ -455,7 +461,7 @@ class NSAAttention(nn.Module):
         assert self.n_heads % self.n_kv_groups == 0, "n_heads must be divisible by n_kv_groups"
         # Strict assertions may introduce GPU syncs; gate via env for tests/smokes
         strict_asserts = self._env_cache.get("strict_asserts", False)
-        
+
         # M8: Assert causal masking - enforce mode constraints
         if prefill:
             assert S > 0, f"Prefill mode requires S > 0, got S={S}"
@@ -587,26 +593,27 @@ class NSAAttention(nn.Module):
 
             for t in range(S):
                 p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all[:, t : t + 1], kv.meta)
-                
-                # M8: Optional Eq.9 verification in decode 
+
+                # M8: Optional Eq.9 verification in decode
                 if self._env_cache.get("verify_eq9", False):
                     is_equiv, details = verify_mapping_equivalence(p_cmp_all[:, t : t + 1], kv.meta)
                     if not is_equiv:
-                        log("error.eq9_verification_failed_decode",
+                        log(
+                            "error.eq9_verification_failed_decode",
                             msg="Eq.9 mapping verification failed in decode",
-                            step=t, **details)
+                            step=t,
+                            **details,
+                        )
                 p_grp = p_slc_all.sum(dim=3).squeeze(1)  # [B,G,S_sel]
                 current_pos = kv.K_sel.shape[2] - 1  # Current token position (0-indexed)
-                sel_ranges = select_topn_ranges(
-                    p_grp, kv.meta, self.n_sel, current_pos, True, 2
-                )
-                
+                sel_ranges = select_topn_ranges(p_grp, kv.meta, self.n_sel, current_pos, True, 2)
+
                 # M8: Assert causal masking - selection ranges cannot include future tokens
                 if strict_asserts and sel_ranges.numel() > 0:
                     # Only sync for strict asserts (debug mode)
                     max_end = sel_ranges[..., 1].max().item()  # GPU sync only in debug
                     assert max_end <= current_pos + 1, (
-                        f"Selection range violates causality: max_end={max_end} > current_pos+1={current_pos+1}. "
+                        f"Selection range violates causality: max_end={max_end} > current_pos+1={current_pos + 1}. "
                         f"Selection must not access future tokens."
                     )
                 # Update selection stats and observability: distance summary per step
@@ -647,8 +654,11 @@ class NSAAttention(nn.Module):
                         # M8: Fallback counter - Triton selection failed
                         self._fallback_counters["selection_triton_fails"] += 1
                         self._fallback_counters["total_fallbacks"] += 1
-                        log("warn.triton_selection_fallback", error=str(e), 
-                            total_fails=self._fallback_counters["selection_triton_fails"])
+                        log(
+                            "warn.triton_selection_fallback",
+                            error=str(e),
+                            total_fails=self._fallback_counters["selection_triton_fails"],
+                        )
                         # Fallback to packed SDPA
                         O_sel_bt = grouped_selection_attention_packed(
                             Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
@@ -666,8 +676,11 @@ class NSAAttention(nn.Module):
                         # M8: Fallback counter - CUDA selection failed
                         self._fallback_counters["selection_cuda_fails"] += 1
                         self._fallback_counters["total_fallbacks"] += 1
-                        log("warn.cuda_selection_fallback", error=str(e),
-                            total_fails=self._fallback_counters["selection_cuda_fails"])
+                        log(
+                            "warn.cuda_selection_fallback",
+                            error=str(e),
+                            total_fails=self._fallback_counters["selection_cuda_fails"],
+                        )
                         # Fallback to packed SDPA
                         O_sel_bt = grouped_selection_attention_packed(
                             Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
@@ -683,14 +696,14 @@ class NSAAttention(nn.Module):
                         # M8: Fallback counter - Packed selection failed
                         self._fallback_counters["selection_pack_fails"] += 1
                         self._fallback_counters["total_fallbacks"] += 1
-                        log("warn.packed_selection_fallback", error=str(e),
-                            total_fails=self._fallback_counters["selection_pack_fails"])
+                        log(
+                            "warn.packed_selection_fallback",
+                            error=str(e),
+                            total_fails=self._fallback_counters["selection_pack_fails"],
+                        )
                         # Fallback to gather SDPA
                         O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
-                elif (
-                    self._env_cache.get("use_sel_mask", False)
-                    and not force_parity
-                ):
+                elif self._env_cache.get("use_sel_mask", False) and not force_parity:
                     try:
                         O_sel_bt = grouped_selection_attention_masked(
                             Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
@@ -700,14 +713,17 @@ class NSAAttention(nn.Module):
                         # M8: Fallback counter - Masked selection failed
                         self._fallback_counters["selection_mask_fails"] += 1
                         self._fallback_counters["total_fallbacks"] += 1
-                        log("warn.masked_selection_fallback", error=str(e),
-                            total_fails=self._fallback_counters["selection_mask_fails"])
+                        log(
+                            "warn.masked_selection_fallback",
+                            error=str(e),
+                            total_fails=self._fallback_counters["selection_mask_fails"],
+                        )
                         # Fallback to gather SDPA
                         O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
                 else:
                     O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
                 win_len = min(self.w, kv.K_win.shape[2])
-                
+
                 # M8: Assert causal masking - sliding window bounds in decode
                 total_tokens = kv.K_win.shape[2]
                 start_idx = total_tokens - win_len
@@ -722,7 +738,7 @@ class NSAAttention(nn.Module):
                 assert win_len <= self.w, (
                     f"Window length exceeds max: win_len={win_len} > self.w={self.w}"
                 )
-                
+
                 K_w = kv.K_win[:, :, start_idx:end_idx, :]
                 V_w = kv.V_win[:, :, start_idx:end_idx, :]
                 use_flash = (
@@ -735,20 +751,23 @@ class NSAAttention(nn.Module):
                         # M8: Fallback counter - Sliding FA2 failed
                         self._fallback_counters["sliding_fa2_fails"] += 1
                         self._fallback_counters["total_fallbacks"] += 1
-                        log("warn.sliding_fa2_fallback", error=str(e),
-                            total_fails=self._fallback_counters["sliding_fa2_fails"])
+                        log(
+                            "warn.sliding_fa2_fallback",
+                            error=str(e),
+                            total_fails=self._fallback_counters["sliding_fa2_fails"],
+                        )
                         # Fallback to standard attention
                         O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
                 else:
                     O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
                 S_cmp_t = kv.K_cmp.shape[2]
-                
+
                 # M8: Assert causal masking - compressed bounds in decode
                 assert S_cmp_t >= 0, f"Compressed cache size negative: S_cmp_t={S_cmp_t}"
                 assert S_cmp_t <= kv.K_cmp.shape[2], (
                     f"Compressed range exceeds cache: S_cmp_t={S_cmp_t} > cache_size={kv.K_cmp.shape[2]}"
                 )
-                
+
                 if use_flash and (env["fa2_all_eff"] or env["fa2_cmp_eff"]):
                     try:
                         O_cmp = compressed_attention_fa2_decode(Q_t, kv.K_cmp, kv.V_cmp, S_cmp_t)
@@ -756,8 +775,11 @@ class NSAAttention(nn.Module):
                         # M8: Fallback counter - Compressed FA2 failed
                         self._fallback_counters["compressed_fa2_fails"] += 1
                         self._fallback_counters["total_fallbacks"] += 1
-                        log("warn.compressed_fa2_fallback", error=str(e),
-                            total_fails=self._fallback_counters["compressed_fa2_fails"])
+                        log(
+                            "warn.compressed_fa2_fallback",
+                            error=str(e),
+                            total_fails=self._fallback_counters["compressed_fa2_fails"],
+                        )
                         # Fallback to standard attention
                         O_cmp = attention_bgh(
                             Q_t.contiguous(),
@@ -777,10 +799,10 @@ class NSAAttention(nn.Module):
                 gates = self.gate(q_gp, tau=self.gate_temp)
                 if self._env_cache.get("stopgrad_gates", False):
                     gates = gates.detach()
-                
+
                 # Update gate statistics for M8 monitoring
                 self._update_gate_stats(gates)
-                
+
                 # Observability: gate stats
                 try:
                     log(
@@ -820,6 +842,7 @@ class NSAAttention(nn.Module):
         if _nvtx:
             try:
                 import torch as _t
+
                 _t.cuda.nvtx.range_push("projections+rope")
             except Exception:
                 _nvtx = False
@@ -876,9 +899,18 @@ class NSAAttention(nn.Module):
 
         # One-time SDPA backend audit (opt-in via env)
         try:
-            if (not self._sdpa_audited) and os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
-                self._audit_sdpa_backends_once(Q[:, :1], K_sel[:, :, : max(1, S // 8), :], V_sel[:, :, : max(1, S // 8), :],
-                                               K_win[:, :, : max(1, S // 8), :], V_win[:, :, : max(1, S // 8), :])
+            if (not self._sdpa_audited) and os.getenv("NSA_SDPA_AUDIT", "0").lower() in (
+                "1",
+                "true",
+                "yes",
+            ):
+                self._audit_sdpa_backends_once(
+                    Q[:, :1],
+                    K_sel[:, :, : max(1, S // 8), :],
+                    V_sel[:, :, : max(1, S // 8), :],
+                    K_win[:, :, : max(1, S // 8), :],
+                    V_win[:, :, : max(1, S // 8), :],
+                )
         except Exception:
             pass
 
@@ -892,18 +924,21 @@ class NSAAttention(nn.Module):
         p_cmp_all = compute_pcmp_all(Q, kv.K_cmp, scale)  # [B,S,G,h,S_cmp]
         if _nvtx:
             try:
-                _t.cuda.nvtx.range_pop(); _t.cuda.nvtx.range_push("map_pcmp_to_pslc")
+                _t.cuda.nvtx.range_pop()
+                _t.cuda.nvtx.range_push("map_pcmp_to_pslc")
             except Exception:
                 pass
         p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all, kv.meta)  # [B,S,G,h,S_sel]
-        
+
         # M8: Optional Eq.9 verification in batched prefill
         if self._env_cache.get("verify_eq9", False):
             is_equiv, details = verify_mapping_equivalence(p_cmp_all, kv.meta)
             if not is_equiv:
-                log("error.eq9_verification_failed_prefill", 
-                    msg="Eq.9 mapping verification failed in batched prefill", 
-                    **details)
+                log(
+                    "error.eq9_verification_failed_prefill",
+                    msg="Eq.9 mapping verification failed in batched prefill",
+                    **details,
+                )
         p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
         log(
             "prefill.scores",
@@ -924,7 +959,8 @@ class NSAAttention(nn.Module):
         )  # [B,S,G,n,2]
         if _nvtx:
             try:
-                _t.cuda.nvtx.range_pop(); _t.cuda.nvtx.range_push("branch_attn+gate")
+                _t.cuda.nvtx.range_pop()
+                _t.cuda.nvtx.range_push("branch_attn+gate")
             except Exception:
                 pass
         # Update selection statistics for this prefill batch
@@ -934,7 +970,7 @@ class NSAAttention(nn.Module):
                 _t.cuda.nvtx.range_pop()
             except Exception:
                 pass
-        
+
         # M8: Assert causal masking for batched selection (GPU-sync gated)
         strict_asserts = self._env_cache.get("strict_asserts", False)
         if strict_asserts and sel_ranges_all.numel() > 0:
@@ -943,7 +979,7 @@ class NSAAttention(nn.Module):
                 if t_ranges.numel() > 0:
                     max_end = t_ranges[..., 1].max().item()
                     assert max_end <= t + 1, (
-                        f"Batched selection violates causality at t={t}: max_end={max_end} > t+1={t+1}. "
+                        f"Batched selection violates causality at t={t}: max_end={max_end} > t+1={t + 1}. "
                         f"Selection ranges cannot access future tokens."
                     )
         log("prefill.select", n_sel=self.n_sel, l_sel=self.l_sel, ranges=sel_ranges_all)
@@ -961,10 +997,14 @@ class NSAAttention(nn.Module):
                 # M8: Fallback counter - Compressed FA2 failed in prefill
                 self._fallback_counters["compressed_fa2_fails"] += 1
                 self._fallback_counters["total_fallbacks"] += 1
-                log("warn.compressed_fa2_prefill_fallback", error=str(e),
-                    total_fails=self._fallback_counters["compressed_fa2_fails"])
+                log(
+                    "warn.compressed_fa2_prefill_fallback",
+                    error=str(e),
+                    total_fails=self._fallback_counters["compressed_fa2_fails"],
+                )
                 # Fallback to masked SDPA
                 from nsa.core.attention_kernels import batched_causal_attention_compressed_masked
+
                 O_cmp = batched_causal_attention_compressed_masked(
                     Q, kv.K_cmp, kv.V_cmp, self.l, self.d
                 )
@@ -984,7 +1024,7 @@ class NSAAttention(nn.Module):
             S_cmp_full = kv.K_cmp.shape[2]
             for t in range(S):
                 L = 0 if (t + 1) < self.l else min(((t + 1 - self.l) // self.d) + 1, S_cmp_full)
-                
+
                 # M8: Assert causal masking - compressed tokens must respect position bounds
                 if L > 0:
                     # Check that compressed range doesn't exceed causal bounds
@@ -998,7 +1038,7 @@ class NSAAttention(nn.Module):
                         f"Compressed range violates causality: L={L} > max_allowed_L={max_allowed_L} "
                         f"at t={t}. Compressed tokens represent future positions."
                     )
-                    
+
                     q_t = Q[:, t].contiguous()
                     k_t = kv.K_cmp[:, :, :L, :].contiguous()
                     v_t = kv.V_cmp[:, :, :L, :].contiguous()
@@ -1014,17 +1054,23 @@ class NSAAttention(nn.Module):
 
         # Selected ranges attention (prefer Triton if enabled; else packed/gather)
         use_sel_pack = self._env_cache.get("use_sel_pack", True) and not force_parity
-        use_triton_sel = self._env_cache.get("use_triton_sel", False) or self.use_triton_sel and not force_parity
+        use_triton_sel = (
+            self._env_cache.get("use_triton_sel", False) or self.use_triton_sel and not force_parity
+        )
         if use_triton_sel:
             try:
                 from nsa.kernels.triton_sel_kernel import selection_attention_triton
+
                 O_sel = selection_attention_triton(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
             except Exception as e:
                 # M8: Fallback counter - Triton selection failed in prefill
                 self._fallback_counters["selection_triton_fails"] += 1
                 self._fallback_counters["total_fallbacks"] += 1
-                log("warn.triton_selection_prefill_fallback", error=str(e),
-                    total_fails=self._fallback_counters["selection_triton_fails"])
+                log(
+                    "warn.triton_selection_prefill_fallback",
+                    error=str(e),
+                    total_fails=self._fallback_counters["selection_triton_fails"],
+                )
                 # Fallback to packed SDPA
                 O_sel = grouped_selection_attention_packed(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         elif use_sel_pack:
@@ -1034,8 +1080,11 @@ class NSAAttention(nn.Module):
                 # M8: Fallback counter - Packed selection failed in prefill
                 self._fallback_counters["selection_pack_fails"] += 1
                 self._fallback_counters["total_fallbacks"] += 1
-                log("warn.packed_selection_prefill_fallback", error=str(e),
-                    total_fails=self._fallback_counters["selection_pack_fails"])
+                log(
+                    "warn.packed_selection_prefill_fallback",
+                    error=str(e),
+                    total_fails=self._fallback_counters["selection_pack_fails"],
+                )
                 # Fallback to gather SDPA
                 O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         elif self._env_cache.get("use_sel_mask", False):
@@ -1045,8 +1094,11 @@ class NSAAttention(nn.Module):
                 # M8: Fallback counter - Masked selection failed in prefill
                 self._fallback_counters["selection_mask_fails"] += 1
                 self._fallback_counters["total_fallbacks"] += 1
-                log("warn.masked_selection_prefill_fallback", error=str(e),
-                    total_fails=self._fallback_counters["selection_mask_fails"])
+                log(
+                    "warn.masked_selection_prefill_fallback",
+                    error=str(e),
+                    total_fails=self._fallback_counters["selection_mask_fails"],
+                )
                 # Fallback to gather SDPA
                 O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         else:
@@ -1064,10 +1116,14 @@ class NSAAttention(nn.Module):
                 # M8: Fallback counter - Sliding FA2 failed in prefill
                 self._fallback_counters["sliding_fa2_fails"] += 1
                 self._fallback_counters["total_fallbacks"] += 1
-                log("warn.sliding_fa2_prefill_fallback", error=str(e),
-                    total_fails=self._fallback_counters["sliding_fa2_fails"])
+                log(
+                    "warn.sliding_fa2_prefill_fallback",
+                    error=str(e),
+                    total_fails=self._fallback_counters["sliding_fa2_fails"],
+                )
                 # Fallback to masked SDPA
                 from nsa.core.attention_kernels import sliding_window_attention_masked
+
                 O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
         elif use_win_mask:
             from nsa.core.attention_kernels import sliding_window_attention_masked
@@ -1083,16 +1139,16 @@ class NSAAttention(nn.Module):
             for t in range(S):
                 end = t + 1
                 start = max(0, end - self.w)
-                
+
                 # M8: Assert causal masking - sliding window must not exceed current position
                 assert end <= t + 1, (
-                    f"Sliding window violates causality: end={end} > t+1={t+1} at position t={t}. "
+                    f"Sliding window violates causality: end={end} > t+1={t + 1} at position t={t}. "
                     f"This indicates window is accessing future tokens."
                 )
                 assert start <= end, (
                     f"Sliding window has invalid range: start={start} > end={end} at position t={t}."
                 )
-                
+
                 q_t = Q[:, t].contiguous()
                 k_t = K_win[:, :, start:end, :].contiguous()
                 v_t = V_win[:, :, start:end, :].contiguous()
@@ -1109,7 +1165,7 @@ class NSAAttention(nn.Module):
         if self._env_cache.get("stopgrad_gates", False):
             gates = gates.detach()
         gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
-        
+
         # Update gate statistics for M8 monitoring
         self._update_gate_stats(gates)
         w_cmp = gates[..., 0:1].unsqueeze(3)
@@ -1130,13 +1186,13 @@ class NSAAttention(nn.Module):
                 S_cmp = kv.K_cmp.shape[2]
                 for t in range(S):
                     L = 0 if (t + 1) < self.l else min(((t + 1 - self.l) // self.d) + 1, S_cmp)
-                    
+
                     # M8: Assert causal masking in debug recompute
                     if L > 0:
                         assert L <= S_cmp, (
                             f"Debug compressed range exceeds cache: L={L} > S_cmp={S_cmp} at t={t}"
                         )
-                        
+
                         q_t = Q[:, t].contiguous()
                         k_t = kv.K_cmp[:, :, :L, :].contiguous()
                         v_t = kv.V_cmp[:, :, :L, :].contiguous()
@@ -1189,7 +1245,12 @@ class NSAAttention(nn.Module):
         # Prepare a small representative slice per branch
         q = Q[:, 0]  # [B,G,h,Dk]
         # Ensure contiguity
-        q = q.contiguous(); ks = K_sel.contiguous(); vs = V_sel.contiguous(); kw = K_win.contiguous(); vw = V_win.contiguous()
+        q = q.contiguous()
+        ks = K_sel.contiguous()
+        vs = V_sel.contiguous()
+        kw = K_win.contiguous()
+        vw = V_win.contiguous()
+
         def _probe(tag: str, k: torch.Tensor, v: torch.Tensor) -> str:
             try:
                 with sdpa_kernel(enable_flash=True, enable_mem_efficient=False, enable_math=False):
@@ -1202,6 +1263,7 @@ class NSAAttention(nn.Module):
                 return "flash"
             except Exception:
                 return "fallback"
+
         try:
             b_sel = _probe("cmp/win(sel)", ks, vs)
             b_win = _probe("win", kw, vw)
@@ -1210,7 +1272,9 @@ class NSAAttention(nn.Module):
             pass
         self._sdpa_audited = True
 
-    def _forward_prefill_via_decode(self, x: torch.Tensor, kv: NSA_KV) -> tuple[torch.Tensor, NSA_KV]:
+    def _forward_prefill_via_decode(
+        self, x: torch.Tensor, kv: NSA_KV
+    ) -> tuple[torch.Tensor, NSA_KV]:
         """Prefill by stepping decode one token at a time.
 
         This path avoids recursion back into prefill and guarantees progress.
@@ -1269,7 +1333,7 @@ class NSAAttention(nn.Module):
         p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
 
         outs = []
-        sel_ranges_accum: list[torch.Tensor] = []
+        sel_ranges_accum: List[torch.Tensor] = []
         for t in range(S):
             p_grp = p_grp_all[:, t]  # [B,G,S_sel]
             sel_ranges = select_topn_ranges(p_grp, kv.meta, self.n_sel, t, True, 2)
@@ -1293,10 +1357,10 @@ class NSAAttention(nn.Module):
             gates = self.gate(q_gp, tau=self.gate_temp)
             if self._env_cache.get("stopgrad_gates", False):
                 gates = gates.detach()
-            
+
             # Update gate statistics for M8 monitoring (accumulate across steps)
             self._update_gate_stats(gates)
-            
+
             w_cmp = gates[..., 0:1].unsqueeze(-1)
             w_sel = gates[..., 1:2].unsqueeze(-1)
             w_win = gates[..., 2:3].unsqueeze(-1)
@@ -1387,7 +1451,9 @@ class NSAAttention(nn.Module):
         Dv = V.shape[-1]
         outs = []
         S_kv = K.shape[2]
-        strict_asserts = self._env_cache.get("strict_asserts", False) if hasattr(self, '_env_cache') else False
+        strict_asserts = (
+            self._env_cache.get("strict_asserts", False) if hasattr(self, "_env_cache") else False
+        )
         for b in range(B):
             row = []
             for g in range(G):
@@ -1400,7 +1466,7 @@ class NSAAttention(nn.Module):
                     e = r[:, 1].clamp_(0, S_kv)
                     valid = e > s
                     valid_pairs = torch.stack([s[valid], e[valid]], dim=-1)
-                    
+
                     # M8: Assert bounds for gathered ranges (GPU-sync gated)
                     if strict_asserts and valid_pairs.numel() > 0:
                         max_end = valid_pairs[:, 1].max().item()
@@ -1419,8 +1485,16 @@ class NSAAttention(nn.Module):
                     idx = m.nonzero(as_tuple=False).squeeze(-1)
                 else:
                     idx = torch.empty((0,), dtype=torch.int64, device=K.device)
-                k = K[b, g, idx] if idx.numel() > 0 else torch.zeros((1, Dk), device=K.device, dtype=K.dtype)
-                v = V[b, g, idx] if idx.numel() > 0 else torch.zeros((1, Dv), device=K.device, dtype=V.dtype)
+                k = (
+                    K[b, g, idx]
+                    if idx.numel() > 0
+                    else torch.zeros((1, Dk), device=K.device, dtype=K.dtype)
+                )
+                v = (
+                    V[b, g, idx]
+                    if idx.numel() > 0
+                    else torch.zeros((1, Dv), device=K.device, dtype=V.dtype)
+                )
                 q = Q[b, g]  # [h,Dk]
                 attn = F.scaled_dot_product_attention(
                     q.unsqueeze(0).contiguous(),

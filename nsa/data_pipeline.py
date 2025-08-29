@@ -5,13 +5,13 @@ Provides a FineWeb-Edu IterableDataset and simple local JSONL/TXT loaders.
 This module is optional; scripts/train_showcase.py currently uses a simpler
 loader in scripts/datasets. Migrate incrementally as needed.
 """
+
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator, List, Optional
-
 
 Tokenizer = Callable[[str], List[int]]
 
@@ -30,7 +30,7 @@ def fineweb_stream_batches(
     report_docs: int = 1000,
 ) -> Iterator[List[List[int]]]:
     try:
-        from datasets import load_dataset, Features, Value  # type: ignore
+        from datasets import Features, Value, load_dataset  # type: ignore
     except Exception as e:
         raise RuntimeError("datasets package required. Install with: pip install datasets") from e
 
@@ -53,6 +53,7 @@ def fineweb_stream_batches(
     batch: List[List[int]] = []
     seen = 0
     import time as _t
+
     t0 = _t.time()
     last = t0
     for ex in ds:

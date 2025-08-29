@@ -1,4 +1,5 @@
 import os
+
 import torch
 
 from nsa.core.block_index import build_block_meta
@@ -34,7 +35,7 @@ def test_select_topn_ranges_tie_break_prefers_lower_index_across_dtypes():
     # So we just verify all dtypes produce identical results
     for r in (r16, rbf):
         # Check that all dtypes produce the same selection as float32
-        assert torch.equal(r, r32), f"Deterministic selection failed across dtypes"
+        assert torch.equal(r, r32), "Deterministic selection failed across dtypes"
 
 
 def test_select_topn_ranges_batched_tie_break_prefers_lower_index_across_dtypes():
@@ -54,7 +55,7 @@ def test_select_topn_ranges_batched_tie_break_prefers_lower_index_across_dtypes(
     # All dtypes should return same deterministic selections
     for r in (r16, rbf):
         # Check that all dtypes produce the same selection as float32
-        assert torch.equal(r, r32), f"Deterministic batched selection failed across dtypes"
+        assert torch.equal(r, r32), "Deterministic batched selection failed across dtypes"
 
 
 def test_validate_selection_determinism_helper_true_when_enabled(monkeypatch):

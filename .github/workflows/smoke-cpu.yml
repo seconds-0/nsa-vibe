@@ -16,21 +16,22 @@ jobs:
           python-version: '3.11'
       - name: Install deps (CPU)
         run: |
-          python -m pip install -U pip wheel
-          pip install -r requirements-cpu.txt
-          pip install pytest
+          python -m pip install -U pip
+          python -m pip install -U uv
+          uv venv -p 3.11 .venv
+          uv pip sync requirements-cpu.txt
       - name: Unit tests (determinism + causality)
         env:
           NSA_STRICT_ASSERTS: '1'
         run: |
-          PYTHONPATH=. pytest -q nsa/tests/test_selection_tiebreak.py nsa/tests/test_causality_asserts.py
+          PYTHONPATH=. uv run pytest -q nsa/tests/test_selection_tiebreak.py nsa/tests/test_causality_asserts.py
       - name: Quick synthetic smoke (200 steps)
         env:
           CONFIG: configs/train_showcase.yaml
           PYTHONUNBUFFERED: '1'
           PYTHONPATH: .
         run: |
-          python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 200
+          uv run python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 200
       - name: Validate training CSV exists
         run: |
           test -f artifacts/train_showcase/training.csv || (echo 'training.csv missing' && exit 1)

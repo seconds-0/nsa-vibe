@@ -1,5 +1,9 @@
 # CPU/CI baseline (Torch 2.3)
-torch==2.3.*
+# Install CPU-only torch from PyTorch index
+# Note: On Linux CI this will get CPU torch, on macOS it will get regular torch
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1
+# Note: triton is not needed for CPU-only, but kept for compatibility
 triton>=2.3,<3.1 ; platform_system == "Linux"
 
 # Common tools
@@ -21,3 +25,13 @@ typing-extensions
 pygments
 exceptiongroup
 iniconfig
+sortedcontainers
+attrs
+
+# Torch dependencies
+sympy
+mpmath
+
+# CI dependencies
+antlr4-python3-runtime
+pyyaml

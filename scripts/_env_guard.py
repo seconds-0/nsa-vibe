@@ -2,7 +2,7 @@
 import json
 import os
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Optional, Tuple
 
 
@@ -23,7 +23,9 @@ def configure_env(dtype: str | None = None) -> EnvReport:
     try:
         import torch
     except Exception as e:
-        return EnvReport(False, f"torch not importable: {e}", None, False, None, None, None, None, None)
+        return EnvReport(
+            False, f"torch not importable: {e}", None, False, None, None, None, None, None
+        )
 
     cuda_ok = torch.cuda.is_available()
     name = None
@@ -51,7 +53,17 @@ def configure_env(dtype: str | None = None) -> EnvReport:
             dtype_policy = "bf16"
             # bf16 needs Ampere+ (sm80)
             if cap and (cap[0] < 8 or (cap[0] == 8 and cap[1] < 0)):
-                return EnvReport(False, f"bf16 requested but device capability {cap} < sm80", torch.__version__, cuda_ok, name, cap, getattr(torch.backends.cuda.matmul, 'allow_tf32', None), getattr(torch.backends.cudnn, 'allow_tf32', None), dtype_policy)
+                return EnvReport(
+                    False,
+                    f"bf16 requested but device capability {cap} < sm80",
+                    torch.__version__,
+                    cuda_ok,
+                    name,
+                    cap,
+                    getattr(torch.backends.cuda.matmul, "allow_tf32", None),
+                    getattr(torch.backends.cudnn, "allow_tf32", None),
+                    dtype_policy,
+                )
         elif d in ("fp16", "float16"):
             dtype_policy = "fp16"
         else:
@@ -60,9 +72,29 @@ def configure_env(dtype: str | None = None) -> EnvReport:
     # Guard against known-problematic consumer Ada defaults (sm89) if requested via env
     if cap == (8, 9) and os.getenv("NSA_ALLOW_ADA", "0") not in ("1", "true", "yes"):
         # Not a hard error — training may still run; warn via reason
-        return EnvReport(True, "consumer Ada (sm89) detected; prefer A100/H100 for training", torch.__version__, cuda_ok, name, cap, getattr(torch.backends.cuda.matmul, 'allow_tf32', None), getattr(torch.backends.cudnn, 'allow_tf32', None), dtype_policy)
+        return EnvReport(
+            True,
+            "consumer Ada (sm89) detected; prefer A100/H100 for training",
+            torch.__version__,
+            cuda_ok,
+            name,
+            cap,
+            getattr(torch.backends.cuda.matmul, "allow_tf32", None),
+            getattr(torch.backends.cudnn, "allow_tf32", None),
+            dtype_policy,
+        )
 
-    return EnvReport(True, None, torch.__version__, cuda_ok, name, cap, getattr(torch.backends.cuda.matmul, 'allow_tf32', None), getattr(torch.backends.cudnn, 'allow_tf32', None), dtype_policy)
+    return EnvReport(
+        True,
+        None,
+        torch.__version__,
+        cuda_ok,
+        name,
+        cap,
+        getattr(torch.backends.cuda.matmul, "allow_tf32", None),
+        getattr(torch.backends.cudnn, "allow_tf32", None),
+        dtype_policy,
+    )
 
 
 def main() -> int:
@@ -74,4 +106,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

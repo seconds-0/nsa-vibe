@@ -481,8 +481,8 @@ def main():
             return
         try:
             mod = m.module if hasattr(m, "module") else m
-            dcounts: dict[str, int] = {}
-            lines: list[str] = []
+            dcounts: Dict[str, int] = {}
+            lines: List[str] = []
             for name, p in mod.named_parameters():
                 dt = str(p.dtype)
                 dcounts[dt] = dcounts.get(dt, 0) + int(p.numel())
@@ -864,7 +864,7 @@ def main():
         _prefetch = os.getenv("NSA_FWE_PREFETCH", "1").lower() in ("1", "true", "yes")
         _qsize = int(os.getenv("NSA_FWE_Q", "4"))
         def _prefetch_iter(it, device):
-            q: "queue.Queue[Optional[torch.Tensor]]" = queue.Queue(maxsize=max(1, _qsize))
+            q: queue.Queue = queue.Queue(maxsize=max(1, _qsize))
             SENTINEL = object()
             def _worker():
                 try:

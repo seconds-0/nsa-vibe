@@ -1,12 +1,13 @@
+from typing import List, Tuple
 
 import torch
 
 
 def collate_token_batch(
-    sequences: list[list[int]],
+    sequences: List[List[int]],
     *,
     pad_id: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Collate token id sequences (var-length) into padded tensors and masks with label shift.
 

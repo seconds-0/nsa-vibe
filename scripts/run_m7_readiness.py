@@ -12,6 +12,7 @@ Usage examples:
   PYTHONPATH=. python scripts/run_m7_readiness.py
   PYTHONPATH=. python scripts/run_m7_readiness.py --out artifacts/run_$(date +%Y%m%d-%H%M) --enable-triton --enable-fa2
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,10 +23,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
-def run_cmd(cmd: List[str], outfile: Path, env: Dict[str, str] | None = None) -> Tuple[int, float]:
+def run_cmd(cmd: List[str], outfile: Path, env: Optional[Dict[str, str]] = None) -> Tuple[int, float]:
     outfile.parent.mkdir(parents=True, exist_ok=True)
     ts = time.time()
     with open(outfile, "w", encoding="utf-8", errors="ignore") as f:
@@ -86,9 +87,15 @@ def is_sm89() -> bool:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", type=str, default="artifacts/run", help="Base output directory for artifacts")
-    ap.add_argument("--enable-triton", action="store_true", help="Run Triton selection parity tests if possible")
-    ap.add_argument("--enable-fa2", action="store_true", help="Run FA-2 varlen parity tests if available")
+    ap.add_argument(
+        "--out", type=str, default="artifacts/run", help="Base output directory for artifacts"
+    )
+    ap.add_argument(
+        "--enable-triton", action="store_true", help="Run Triton selection parity tests if possible"
+    )
+    ap.add_argument(
+        "--enable-fa2", action="store_true", help="Run FA-2 varlen parity tests if available"
+    )
     ap.add_argument("--skip-long", action="store_true", help="Skip long-context demo/tests")
     args = ap.parse_args()
 
@@ -106,7 +113,14 @@ def main():
     # 1) CPU correctness suite
     step = {"name": "cpu-correctness"}
     rc, dt = run_cmd(
-        [sys.executable, "-m", "pytest", "-q", "-k", "test_equiv_small or test_block_math or test_masks or test_group_consistency or test_decode_counters or test_selection_packed"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-k",
+            "test_equiv_small or test_block_math or test_masks or test_group_consistency or test_decode_counters or test_selection_packed",
+        ],
         tr_dir / "cpu-correctness.txt",
         env=env_base,
     )
@@ -118,7 +132,9 @@ def main():
     # 2) GPU routing + optional Triton/FA-2
     gpu = cuda_available()
     step = {"name": "gpu-routing"}
-    rc, dt = run_cmd([sys.executable, "scripts/print_routing.py"], tr_dir / "routing.json", env=env_base)
+    rc, dt = run_cmd(
+        [sys.executable, "scripts/print_routing.py"], tr_dir / "routing.json", env=env_base
+    )
     step["exit_code"] = rc
     step["duration_s"] = round(dt, 2)
     step["status"] = "ok" if rc == 0 else "failed"
@@ -131,15 +147,27 @@ def main():
         if is_sm89():
             env_tri["NSA_TRITON_SEL_FORCE"] = "1"
         step = {"name": "triton-fwd"}
-        rc, dt = run_cmd([sys.executable, "-m", "pytest", "-q", "nsa/tests/test_triton_sel_parity_gpu.py"], tr_dir / "triton_fwd.txt", env=env_tri)
-        step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+        rc, dt = run_cmd(
+            [sys.executable, "-m", "pytest", "-q", "nsa/tests/test_triton_sel_parity_gpu.py"],
+            tr_dir / "triton_fwd.txt",
+            env=env_tri,
+        )
+        step.update(
+            {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+        )
         summary["steps"].append(step)
 
         env_tri_b = env_tri.copy()
         env_tri_b["NSA_SEL_TRITON_ALLOW_GRAD"] = "1"
         step = {"name": "triton-bwd"}
-        rc, dt = run_cmd([sys.executable, "-m", "pytest", "-q", "nsa/tests/test_triton_sel_backward_gpu.py"], tr_dir / "triton_bwd.txt", env=env_tri_b)
-        step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+        rc, dt = run_cmd(
+            [sys.executable, "-m", "pytest", "-q", "nsa/tests/test_triton_sel_backward_gpu.py"],
+            tr_dir / "triton_bwd.txt",
+            env=env_tri_b,
+        )
+        step.update(
+            {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+        )
         summary["steps"].append(step)
     else:
         summary["steps"].append({"name": "triton-fwd", "status": "skipped"})
@@ -159,8 +187,14 @@ def main():
         env_fa2 = env_base.copy()
         env_fa2["NSA_TEST_FA2"] = "1"
         env_fa2["NSA_USE_FA2"] = "1"
-        rc, dt = run_cmd([sys.executable, "-m", "pytest", "-q", "-k", "fa2_gpu_varlen"], tr_dir / "fa2_varlen.txt", env=env_fa2)
-        step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+        rc, dt = run_cmd(
+            [sys.executable, "-m", "pytest", "-q", "-k", "fa2_gpu_varlen"],
+            tr_dir / "fa2_varlen.txt",
+            env=env_fa2,
+        )
+        step.update(
+            {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+        )
         summary["steps"].append(step)
     else:
         summary["steps"].append({"name": "fa2-parity", "status": "skipped"})
@@ -168,13 +202,44 @@ def main():
     # 3) Long-context probes (64k)
     if not args.skip_long and gpu:
         step = {"name": "demo-64k"}
-        rc, dt = run_cmd([sys.executable, "scripts/demo_64k.py", "--S", "65536", "--prefill_tile", "4096", "--rope_scale", "8.0", "--use_fa2", "0"], tr_dir / "demo_64k.txt", env=env_base)
-        step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+        rc, dt = run_cmd(
+            [
+                sys.executable,
+                "scripts/demo_64k.py",
+                "--S",
+                "65536",
+                "--prefill_tile",
+                "4096",
+                "--rope_scale",
+                "8.0",
+                "--use_fa2",
+                "0",
+            ],
+            tr_dir / "demo_64k.txt",
+            env=env_base,
+        )
+        step.update(
+            {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+        )
         summary["steps"].append(step)
 
         step = {"name": "needle-64k"}
-        rc, dt = run_cmd([sys.executable, "-m", "pytest", "-q", "nsa/tests/test_long_context_needle.py", "-k", "needle"], tr_dir / "needle_64k.txt", env=env_base)
-        step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+        rc, dt = run_cmd(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "nsa/tests/test_long_context_needle.py",
+                "-k",
+                "needle",
+            ],
+            tr_dir / "needle_64k.txt",
+            env=env_base,
+        )
+        step.update(
+            {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+        )
         summary["steps"].append(step)
     else:
         summary["steps"].append({"name": "demo-64k", "status": "skipped"})
@@ -184,8 +249,14 @@ def main():
     step = {"name": "train-single"}
     env_train = env_base.copy()
     env_train["CONFIG"] = "configs/train_showcase.yaml"
-    rc, dt = run_cmd([sys.executable, "scripts/train_showcase.py"], train_dir / "train_showcase.txt", env=env_train)
-    step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+    rc, dt = run_cmd(
+        [sys.executable, "scripts/train_showcase.py"],
+        train_dir / "train_showcase.txt",
+        env=env_train,
+    )
+    step.update(
+        {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+    )
     summary["steps"].append(step)
 
     # DDP only if >= 2 GPUs
@@ -199,11 +270,19 @@ def main():
             cmd += ["--dataset", "fineweb_edu"]
         rc, dt = run_cmd(cmd, train_dir / "m7c_ddp.txt", env=env_ddp)
         if rc != 0:
-            cmd = [sys.executable, "-m", "torch.distributed.run", "--nproc_per_node=2", "scripts/train_showcase.py"]
+            cmd = [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                "--nproc_per_node=2",
+                "scripts/train_showcase.py",
+            ]
             if has_module("datasets") and has_module("transformers"):
                 cmd += ["--dataset", "fineweb_edu"]
             rc, dt = run_cmd(cmd, train_dir / "m7c_ddp.txt", env=env_ddp)
-        step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+        step.update(
+            {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+        )
         summary["steps"].append(step)
     else:
         summary["steps"].append({"name": "train-ddp-m7c", "status": "skipped"})
@@ -211,14 +290,37 @@ def main():
     # 5) Bench/telemetry
     bench_csv = bench_dir / "decode.csv"
     step = {"name": "bench-decode"}
-    rc, dt = run_cmd([sys.executable, "bench/bench_decode.py", "--S_list", "512,1024,2048,4096", "--iters", "32", "--warmup", "8", "--csv", str(bench_csv)], bench_dir / "decode.txt", env=env_base)
-    step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+    rc, dt = run_cmd(
+        [
+            sys.executable,
+            "bench/bench_decode.py",
+            "--S_list",
+            "512,1024,2048,4096",
+            "--iters",
+            "32",
+            "--warmup",
+            "8",
+            "--csv",
+            str(bench_csv),
+        ],
+        bench_dir / "decode.txt",
+        env=env_base,
+    )
+    step.update(
+        {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+    )
     summary["steps"].append(step)
     # Summarize CSV if present
     step = {"name": "bench-decode-summary"}
     if bench_csv.exists():
-        rc, dt = run_cmd([sys.executable, "scripts/summarize_bench.py", str(bench_csv)], bench_dir / "decode_summary.txt", env=env_base)
-        step.update({"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"})
+        rc, dt = run_cmd(
+            [sys.executable, "scripts/summarize_bench.py", str(bench_csv)],
+            bench_dir / "decode_summary.txt",
+            env=env_base,
+        )
+        step.update(
+            {"exit_code": rc, "duration_s": round(dt, 2), "status": "ok" if rc == 0 else "failed"}
+        )
     else:
         step.update({"status": "skipped"})
     summary["steps"].append(step)

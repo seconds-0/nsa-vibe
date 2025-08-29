@@ -10,6 +10,7 @@ Notes:
   - Synthetic byte-token data; optimizer AdamW; fp16/bf16 via --precision.
   - Respects key NSA_* env toggles (e.g., NSA_PREFILL_BATCHED, SDPA flags).
 """
+
 import argparse
 import os
 from pathlib import Path
@@ -22,13 +23,40 @@ from nsa.model.llama_block_nsa import LlamaBlockNSA, RMSNorm
 
 
 class TinyOneBlock(nn.Module):
-    def __init__(self, vocab: int, dim: int, n_layers: int, n_heads: int, n_kv_groups: int, d_k: int, d_v: int, l: int, d: int, l_sel: int, n_sel: int, w: int):
+    def __init__(
+        self,
+        vocab: int,
+        dim: int,
+        n_layers: int,
+        n_heads: int,
+        n_kv_groups: int,
+        d_k: int,
+        d_v: int,
+        l: int,
+        d: int,
+        l_sel: int,
+        n_sel: int,
+        w: int,
+    ):
         super().__init__()
         self.embed = nn.Embedding(vocab, dim)
-        self.blocks = nn.ModuleList([
-            LlamaBlockNSA(dim=dim, n_heads=n_heads, n_kv_groups=n_kv_groups, d_k=d_k, d_v=d_v, l=l, d=d, l_sel=l_sel, n_sel=n_sel, w=w)
-            for _ in range(n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                LlamaBlockNSA(
+                    dim=dim,
+                    n_heads=n_heads,
+                    n_kv_groups=n_kv_groups,
+                    d_k=d_k,
+                    d_v=d_v,
+                    l=l,
+                    d=d,
+                    l_sel=l_sel,
+                    n_sel=n_sel,
+                    w=w,
+                )
+                for _ in range(n_layers)
+            ]
+        )
         self.norm_f = RMSNorm(dim)
         self.lm_head = nn.Linear(dim, vocab, bias=False)
 
@@ -69,7 +97,20 @@ def main() -> int:
     torch.backends.cudnn.allow_tf32 = True
 
     vocab = 256
-    model = TinyOneBlock(vocab, args.dim, args.layers, args.heads, args.kv_groups, args.d_k, args.d_v, args.l, args.d, args.l_sel, args.n_sel, args.w).to(device)
+    model = TinyOneBlock(
+        vocab,
+        args.dim,
+        args.layers,
+        args.heads,
+        args.kv_groups,
+        args.d_k,
+        args.d_v,
+        args.l,
+        args.d,
+        args.l_sel,
+        args.n_sel,
+        args.w,
+    ).to(device)
     if dtype != torch.float32:
         model = model.to(dtype=dtype)
     model.train()
@@ -83,7 +124,8 @@ def main() -> int:
         logits = model(x)
         loss = loss_fn(logits[:, :-1, :].contiguous().view(1 * (S - 1), vocab), y.view(1 * (S - 1)))
         loss.backward()
-        opt.step(); opt.zero_grad(set_to_none=True)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
         print(f"[repro] step {step} ok | loss {float(loss):.4f}")
     print("[repro] completed")
     return 0
@@ -91,4 +133,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

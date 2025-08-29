@@ -19,6 +19,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, List, Dict
 
 import paramiko
 import requests
@@ -30,7 +31,7 @@ class BenchmarkResult:
 
     device: str
     sequence_length: int
-    window_size: int | None
+    window_size: Optional[int]
     masked_time_ms: float
     fa2_time_ms: float
     speedup: float
@@ -46,13 +47,13 @@ class ThresholdRecommendation:
     device_name: str
     torch_version: str
     cuda_version: str
-    results: list[BenchmarkResult]
+    results: List[BenchmarkResult]
 
 
 class PrimeIntellectBenchmark:
     """Manages GPU benchmarking on Prime Intellect platform."""
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: Optional[str] = None):
         """Initialize with API key from env or parameter."""
         self.api_key = api_key or os.environ.get("PRIME_API_KEY")
         if not self.api_key:
@@ -68,7 +69,7 @@ class PrimeIntellectBenchmark:
         self.pod_id = None
         self.ssh_client = None
 
-    def find_cheapest_gpu(self, gpu_type: str, regions: list[str] | None = None) -> dict:
+    def find_cheapest_gpu(self, gpu_type: str, regions: Optional[List[str]] = None) -> dict:
         """
         Find cheapest available GPU of specified type.
 
@@ -146,7 +147,7 @@ class PrimeIntellectBenchmark:
         return cheapest
 
     def create_benchmark_pod(
-        self, gpu_type: str = "RTX4090_24GB", max_price: float | None = None
+        self, gpu_type: str = "RTX4090_24GB", max_price: Optional[float] = None
     ) -> str:
         """
         Create pod for benchmarking.
@@ -282,9 +283,7 @@ class PrimeIntellectBenchmark:
 
         return {"user": user, "host": host, "port": int(port)}
 
-    def setup_ssh(
-        self, ssh_info: dict, private_key_path: str | None = None
-    ) -> paramiko.SSHClient:
+    def setup_ssh(self, ssh_info: dict, private_key_path: Optional[str] = None) -> paramiko.SSHClient:
         """
         Setup SSH connection to pod.
 
@@ -321,7 +320,10 @@ class PrimeIntellectBenchmark:
         elif "PRIME_SSH_PASSWORD" in os.environ:
             connect_kwargs["password"] = os.environ["PRIME_SSH_PASSWORD"]
             auth_configured = True
-        elif os.environ.get("SSH_KEY_PATH") and Path(os.environ["SSH_KEY_PATH"]).expanduser().exists():
+        elif (
+            os.environ.get("SSH_KEY_PATH")
+            and Path(os.environ["SSH_KEY_PATH"]).expanduser().exists()
+        ):
             # Use SSH_KEY_PATH environment variable
             connect_kwargs["key_filename"] = str(Path(os.environ["SSH_KEY_PATH"]).expanduser())
             auth_configured = True

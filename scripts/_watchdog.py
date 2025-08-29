@@ -17,6 +17,7 @@ Environment variables:
 
 On anomaly, writes `.anomaly_type` and touches `.HALT` if --halt is truthy.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,9 +25,10 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Optional, Dict, Tuple
 
 
-def read_last_heartbeat(path: Path) -> dict | None:
+def read_last_heartbeat(path: Path) -> Optional[Dict]:
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -44,9 +46,9 @@ def read_last_heartbeat(path: Path) -> dict | None:
     return None
 
 
-def read_last_csv_row(path: Path) -> tuple[int, float, float, float] | None:
+def read_last_csv_row(path: Path) -> Optional[Tuple[int, float, float, float]]:
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             lines = f.read().strip().splitlines()
             if not lines:
                 return None
@@ -61,7 +63,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", type=str, default="artifacts/train_showcase")
     ap.add_argument("--halt", type=int, default=int(os.getenv("NSA_WATCH_HALT", "1")))
-    ap.add_argument("--interval", type=float, default=float(os.getenv("NSA_WATCH_INTERVAL_S", "30")))
+    ap.add_argument(
+        "--interval", type=float, default=float(os.getenv("NSA_WATCH_INTERVAL_S", "30"))
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.dir)
@@ -125,7 +129,7 @@ def main() -> int:
             gate_entropy_mean = hb.get("gate_entropy_mean")
             gate_max_gate = hb.get("gate_max_gate")
             gate_collapse_frac = hb.get("gate_collapse_frac", 0.0)
-            
+
             # Check for gate collapse: low entropy OR high max gate OR high collapse fraction
             if gate_entropy_mean is not None and gate_entropy_mean < GATE_ENTROPY_MIN:
                 gate_collapsed = True
@@ -133,12 +137,12 @@ def main() -> int:
                 gate_collapsed = True
             elif gate_collapse_frac > 0.5:  # More than 50% of gates collapsed
                 gate_collapsed = True
-            
+
             if gate_collapsed:
                 gate_collapse_count += 1
             else:
                 gate_collapse_count = 0
-                
+
             if gate_collapse_count >= GATE_COLLAPSE_N:
                 anomaly_path.write_text("gate_collapse\n")
                 if args.halt:
@@ -152,7 +156,9 @@ def main() -> int:
                 }
                 with open(out_dir / "gate_collapse_details.json", "w") as f:
                     json.dump(details, f, indent=2)
-                print(f"[watch] anomaly: gate collapse → HALT (entropy={gate_entropy_mean:.3f}, max_gate={gate_max_gate:.3f})")
+                print(
+                    f"[watch] anomaly: gate collapse → HALT (entropy={gate_entropy_mean:.3f}, max_gate={gate_max_gate:.3f})"
+                )
                 continue
 
         # Optional zero grad detection if present in heartbeat
@@ -167,4 +173,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

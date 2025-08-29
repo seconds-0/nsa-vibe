@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import List, Tuple
 
 import torch
 
@@ -23,7 +24,7 @@ class BlockMeta:
 
 def build_block_starts(
     seq_len: int, l: int, d: int, l_sel: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     if d <= 0 or l <= 0 or l_sel <= 0:
         raise ValueError("Block parameters must be positive")
     # compression blocks (overlapped)
@@ -41,16 +42,16 @@ def _overlap_len(a0: int, a1: int, b0: int, b1: int) -> int:
 
 def build_M_csl_csr(
     seq_len: int, l: int, d: int, l_sel: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Build CSR with fractional-overlap weights from cmp blocks to sel blocks
     cmp_starts, sel_starts = build_block_starts(seq_len, l, d, l_sel)
     indptr = [0]
-    indices: list[int] = []
-    values: list[float] = []
+    indices: List[int] = []
+    values: List[float] = []
     for cmp_i, s in enumerate(cmp_starts.tolist()):
         a0, a1 = s, s + l
         total = 0
-        row_pairs: list[tuple[int, int]] = []
+        row_pairs: List[Tuple[int, int]] = []
         for sel_j, t in enumerate(sel_starts.tolist()):
             b0, b1 = t, t + l_sel
             ov = _overlap_len(a0, a1, b0, b1)
@@ -77,7 +78,7 @@ def build_block_meta(seq_len: int, l: int, d: int, l_sel: int, n_sel: int, w: in
     cmp_starts, sel_starts = build_block_starts(seq_len, l, d, l_sel)
     indptr, indices, values = build_M_csl_csr(seq_len, l, d, l_sel)
     # Build COO from CSR
-    rows: list[int] = []
+    rows: List[int] = []
     for r in range(len(cmp_starts)):
         start, end = int(indptr[r].item()), int(indptr[r + 1].item())
         rows.extend([r] * (end - start))

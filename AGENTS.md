@@ -97,7 +97,7 @@ Guidance for coding agents (Codex CLI, Cursor, Claude Code) contributing to this
 
 ## Commands (uv workflow)
 
-- Setup: `uv venv -p 3.11 .venv && uv pip sync -r requirements.txt`
+- Setup: `uv venv -p 3.11 .venv && uv pip sync requirements-cpu.txt`
 - Test (fast): `uv run -q pytest`
 - Long tests: `uv run -q pytest -m long`
 - Lint: `uv run ruff check .`

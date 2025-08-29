@@ -15,46 +15,45 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-            python-version: '3.10'
+            python-version: '3.11'
 
-      - name: Create venv and install deps
+      - name: Install uv and deps
         run: |
-          python -m venv .venv
-          . ./.venv/bin/activate
-          pip install -U pip wheel setuptools
-          pip install -r requirements-cpu.txt
+          python -m pip install -U pip
+          python -m pip install -U uv
+          uv venv -p 3.11 .venv
+          uv pip sync requirements-cpu.txt
 
       - name: Environment diagnostics
         run: |
-          ./.venv/bin/python -V
-          ./.venv/bin/python -m pip list
-          ./.venv/bin/python -c "import sys; print('PYTHONPATH', sys.path[0])"
-          ./.venv/bin/python -c "import tomli; print('tomli imported OK')" || true
-          ./.venv/bin/python -m pytest --version || true
+          uv run python -V
+          uv run python -c "import sys; print('sys.executable', sys.executable)"
+          uv run python -c "import sys; print('PYTHONPATH', sys.path[0])"
+          uv run python -c "print('diagnostics ok')" || true
 
       - name: Lint (ruff)
         run: |
-          ./.venv/bin/python -m ruff --version || true
-          ./.venv/bin/python -m ruff check . || true
+          uv run ruff --version || true
+          uv run ruff check . || true
 
       - name: Type check (mypy)
         run: |
-          ./.venv/bin/python -m mypy --version || true
-          ./.venv/bin/python -m mypy nsa || true
+          uv run mypy --version || true
+          uv run mypy nsa || true
 
       - name: Collect tests (CPU)
         env:
           PYTHONPATH: "."
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          ./.venv/bin/python -m pytest --collect-only -q || true
+          uv run python -m pytest --collect-only -q || true
 
       - name: Run tests (CPU)
         env:
           PYTHONPATH: "."
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          ./.venv/bin/python -m pytest -q -vv | tee test-output.txt
+          uv run python -m pytest -q -vv | tee test-output.txt
 
       - name: Upload test log
         if: always()
@@ -71,14 +70,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-            python-version: '3.10'
+            python-version: '3.11'
 
-      - name: Create venv and install deps
+      - name: Install uv and deps
         run: |
-          python -m venv .venv
-          . ./.venv/bin/activate
-          pip install -U pip wheel setuptools
-          pip install -r requirements-cpu.txt
+          python -m pip install -U pip
+          python -m pip install -U uv
+          uv venv -p 3.11 .venv
+          uv pip sync requirements-cpu.txt
 
       - name: Run batched prefill smoke (CPU)
         env:
@@ -86,7 +85,7 @@ jobs:
           PYTHONPATH: '.'
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          ./.venv/bin/python -m pytest -q -vv \
+          uv run python -m pytest -q -vv \
             nsa/tests/test_equiv_small.py \
             nsa/tests/test_equiv_full_coverage.py \
             nsa/tests/test_decode_reads_trend.py \

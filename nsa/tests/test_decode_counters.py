@@ -1,5 +1,3 @@
-
-
 def num_cmp(S: int, l: int, d: int) -> int:
     return 0 if S < l else (S - l) // d + 1
 

@@ -27,7 +27,31 @@ description = "Native Sparse Attention (NSA) with CPU fallbacks, FA-2 wrappers, 
 requires-python = ">=3.11"
 authors = [{ name = "NSA Authors" }]
 readme = "README.md"
-dependencies = []
+dependencies = [
+  "numpy",
+  "hydra-core",
+  "omegaconf",
+  "pydantic",
+]
+
+[project.optional-dependencies]
+# Developer tooling and test deps (CPU-safe)
+dev = [
+  "pytest",
+  "hypothesis",
+  "ruff",
+  "mypy",
+  "tensorboard",
+]
+# CPU baseline (keep GPU-specific wheels out of default env)
+cpu = [
+  "torch==2.3.*",
+  "triton>=2.3,<3.1 ; platform_system == \"Linux\"",
+]
+# Optional FlashAttention-2 (Linux GPU environments)
+fa2 = [
+  "flash-attn==2.* ; platform_system == \"Linux\"",
+]
 
 [tool.setuptools]
 packages = ["nsa"]

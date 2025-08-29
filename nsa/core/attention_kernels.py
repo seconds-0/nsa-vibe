@@ -1,5 +1,6 @@
 import os
 import time
+from typing import Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -20,8 +21,8 @@ from nsa.kernels.flash_wrappers import (
 )
 
 # Simple grow-on-demand workspaces for varlen packing to avoid frequent allocations
-_VARLEN_WS: dict[tuple, dict[str, torch.Tensor]] = {}
-_SEL_PACK_WS: dict[tuple, dict[str, torch.Tensor]] = {}
+_VARLEN_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
+_SEL_PACK_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 
 def clear_varlen_workspaces() -> None:
     """Optional memory cleanup: free varlen packing workspaces."""
@@ -378,7 +379,10 @@ def grouped_selection_attention_masked(
         neg_inf,
     )
 
-    Qf = Qf.contiguous(); Kf = Kf.contiguous(); Vf = Vf.contiguous(); Mf = Mf.contiguous()
+    Qf = Qf.contiguous()
+    Kf = Kf.contiguous()
+    Vf = Vf.contiguous()
+    Mf = Mf.contiguous()
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     Of = Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
     # Guard against rows with no allowed keys (all -inf mask) → zero them
