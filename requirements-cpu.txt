@@ -21,3 +21,4 @@ typing-extensions
 pygments
 exceptiongroup
 iniconfig
+sortedcontainers
