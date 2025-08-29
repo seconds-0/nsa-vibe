@@ -17,6 +17,7 @@ from nsa.kernels.flash_wrappers import (
     attention_fa2_dense_batch,
     attention_fa2_varlen,
     fa2_supported,
+    fa2_supported_verbose,
     is_flash_varlen_available,
 )
 
@@ -434,6 +435,8 @@ def sliding_window_attention_fa2(
     device = Q.device
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(device) and not _fa2_forced():
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win", reason="sm89_guard", forced=bool(_fa2_forced()))
         return sliding_window_attention_masked(Q, K, V, w)
     # Compute effective per-row window lengths and buckets
     lengths = compute_sliding_lengths(S, w, device)
@@ -452,9 +455,14 @@ def sliding_window_attention_fa2(
             _ = build_cu_seqlens_for_buckets(blens)
     # Small-length auto-switch to masked SDPA
     if max_len < min_len_for_fa2:
+        if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win", reason="below_min_len", max_len=int(max_len), min_len=int(min_len_for_fa2))
         return sliding_window_attention_masked(Q, K, V, w)
     # Capability check
-    if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
+    ok, why = fa2_supported_verbose(device, Q.dtype, Dk)
+    if not ok or not is_flash_varlen_available():
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win", reason=why, has_varlen=is_flash_varlen_available())
         return sliding_window_attention_masked(Q, K, V, w)
     # Attempt FA-2 across all rows using varlen first, then dense per-bucket. Fallback to masked SDPA on error.
     try:
@@ -644,6 +652,8 @@ def compressed_attention_fa2(
     device = Q.device
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(device) and not _fa2_forced():
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="cmp", reason="sm89_guard", forced=bool(_fa2_forced()))
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     S_cmp = K_cmp.shape[2]
     if S_cmp == 0:
@@ -661,8 +671,13 @@ def compressed_attention_fa2(
             blens = num_cmp[idx]
             _ = build_cu_seqlens_for_buckets(blens)
     if max_len < min_len_for_fa2:
+        if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="cmp", reason="below_min_len", max_len=int(max_len), min_len=int(min_len_for_fa2))
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
-    if not fa2_supported(device, Q.dtype, Dk) or not is_flash_varlen_available():
+    ok, why = fa2_supported_verbose(device, Q.dtype, Dk)
+    if not ok or not is_flash_varlen_available():
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="cmp", reason=why, has_varlen=is_flash_varlen_available())
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     try:
         Dv = V_cmp.shape[-1]
@@ -826,6 +841,8 @@ def sliding_window_attention_fa2_decode(
     B, G, h, Dk = q_t.shape
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(q_t.device) and not _fa2_forced():
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win.decode", reason="sm89_guard", forced=bool(_fa2_forced()))
         end = K_win.shape[2]
         win_len = min(w, end)
         if win_len == 0:
@@ -837,7 +854,10 @@ def sliding_window_attention_fa2_decode(
     if win_len == 0:
         return torch.zeros((B, G, h, V_win.shape[-1]), dtype=V_win.dtype, device=V_win.device)
     # CPU or unsupported: direct SDPA for parity
-    if not fa2_supported(q_t.device, q_t.dtype, Dk):
+    ok, why = fa2_supported_verbose(q_t.device, q_t.dtype, Dk)
+    if not ok:
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win.decode", reason=why)
         start = end - win_len
         return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
     # Small-length auto-switch for decode
@@ -848,6 +868,8 @@ def sliding_window_attention_fa2_decode(
     if min_len < 1:
         min_len = 1
     if win_len < min_len:
+        if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win.decode", reason="below_min_len", win_len=int(win_len), min_len=int(min_len))
         start = end - win_len
         return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
     start = end - win_len
@@ -876,8 +898,13 @@ def compressed_attention_fa2_decode(
     B, G, h, Dk = q_t.shape
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(q_t.device) and not _fa2_forced():
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="cmp.decode", reason="sm89_guard", forced=bool(_fa2_forced()))
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
-    if not fa2_supported(q_t.device, q_t.dtype, Dk):
+    ok, why = fa2_supported_verbose(q_t.device, q_t.dtype, Dk)
+    if not ok:
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="cmp.decode", reason=why)
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     try:
         min_len = int(os.getenv("NSA_FA2_MIN_LEN_CMP", "16"))
@@ -886,6 +913,8 @@ def compressed_attention_fa2_decode(
     if min_len < 1:
         min_len = 1
     if L < min_len:
+        if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="cmp.decode", reason="below_min_len", L=int(L), min_len=int(min_len))
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     k = K_cmp[:, :, :L]
     v = V_cmp[:, :, :L]
