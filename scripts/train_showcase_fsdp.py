@@ -3,8 +3,9 @@
 # FSDP Implementation to replace DDP + gradient checkpointing incompatibility
 
 import argparse
-import json
 import contextlib
+import json
+import logging
 import os
 import signal
 import sys
@@ -12,23 +13,20 @@ import threading
 import time
 import traceback
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, Union, Dict, Any
 from functools import partial
-import logging
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from omegaconf import OmegaConf
+from torch.distributed.fsdp import BackwardPrefetch, MixedPrecision, ShardingStrategy
 
 # FSDP imports
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardingStrategy
+from torch.distributed.fsdp.api import FullStateDictConfig, StateDictType
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from torch.distributed.fsdp import MixedPrecision
-from torch.distributed.fsdp import BackwardPrefetch
-from torch.distributed.fsdp.api import StateDictType, FullStateDictConfig
 
 try:
     from torch.utils.tensorboard import SummaryWriter  # type: ignore
@@ -95,6 +93,7 @@ class TinyLM(nn.Module):
 
 def set_seed(seed: int):
     import random
+
     import numpy as np
 
     random.seed(seed)
@@ -485,7 +484,7 @@ def main():
             extra.append(f"auto_wrap={auto_wrap_on}")
             if backward_prefetch is not None:
                 extra.append(f"backward_prefetch={backward_prefetch.name}")
-            print(f"[train] FSDP wrapped | " + " ".join(extra), flush=True)
+            print("[train] FSDP wrapped | " + " ".join(extra), flush=True)
 
     # Dtype audit
     def _dump_dtypes_report(m: nn.Module, out_dir: Path, rank: int) -> None:
@@ -578,7 +577,7 @@ def main():
 
     if use_fwe:
         try:
-            from nsa.data_pipeline import fineweb_stream_batches, Shard  # type: ignore
+            from nsa.data_pipeline import Shard, fineweb_stream_batches  # type: ignore
         except Exception as e:
             raise RuntimeError("FineWeb‑Edu pipeline missing") from e
 

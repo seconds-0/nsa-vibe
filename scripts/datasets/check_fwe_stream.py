@@ -2,7 +2,7 @@
 import sys
 
 try:
-    from nsa.data_pipeline import fineweb_stream_batches, Shard  # type: ignore
+    from nsa.data_pipeline import Shard, fineweb_stream_batches  # type: ignore
 except Exception as e:
     print(f"ERR: pipeline import failed: {e}")
     sys.exit(2)

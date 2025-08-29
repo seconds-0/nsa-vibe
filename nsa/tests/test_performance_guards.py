@@ -6,10 +6,11 @@ reintroduction of Python bottlenecks.
 
 import ast
 import os
+from pathlib import Path
+from typing import List, Set, Tuple
+
 import pytest
 import torch
-from pathlib import Path
-from typing import Set, List, Tuple
 
 # Hot path modules that must avoid Python loops and .item()/.cpu() calls
 HOT_PATH_MODULES = [
@@ -113,7 +114,7 @@ def check_module_for_violations(module_path: str) -> List[Tuple[int, str]]:
     if not os.path.exists(module_path):
         return []
 
-    with open(module_path, "r") as f:
+    with open(module_path) as f:
         try:
             tree = ast.parse(f.read())
         except SyntaxError:
@@ -192,7 +193,7 @@ class TestPerformanceGuards:
         repo_root = Path(__file__).parent.parent.parent
         scorer_path = repo_root / "nsa/core/selection_scorer.py"
 
-        with open(scorer_path, "r") as f:
+        with open(scorer_path) as f:
             content = f.read()
 
         # Check for NVTX annotations in v2 function
@@ -204,7 +205,7 @@ class TestPerformanceGuards:
         repo_root = Path(__file__).parent.parent.parent
         attention_path = repo_root / "nsa/core/nsa_attention.py"
 
-        with open(attention_path, "r") as f:
+        with open(attention_path) as f:
             lines = f.readlines()
 
         # Find SDPA calls and check for .contiguous() before them
@@ -225,7 +226,7 @@ class TestPerformanceGuards:
         repo_root = Path(__file__).parent.parent.parent
         train_path = repo_root / "scripts/train_showcase.py"
 
-        with open(train_path, "r") as f:
+        with open(train_path) as f:
             content = f.read()
 
         # Check for DDP compression implementation
@@ -236,12 +237,13 @@ class TestPerformanceGuards:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_v2_performance_improvement(self):
         """Quick performance smoke test to ensure v2 is faster than v1."""
+        import time
+
+        from nsa.core.block_index import build_block_meta
         from nsa.core.selection_scorer import (
             convert_indices_to_ranges_batched,
             convert_indices_to_ranges_batched_v2,
         )
-        from nsa.core.block_index import build_block_meta
-        import time
 
         # Setup test data
         B, S, G, K = 2, 256, 4, 32

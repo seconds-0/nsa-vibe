@@ -3,13 +3,13 @@
 Execute CPU tests for NSA DDP/GC diagnostic evidence collection
 """
 
-import os
-import sys
-import subprocess
 import json
+import os
+import subprocess
+import sys
 import time
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Setup environment
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256"
@@ -71,7 +71,7 @@ def run_test(test_name, cmd, timeout=30):
 
         # Extract traces
         traces_file = test_dir / "traces.log"
-        with open(output_file, "r") as f:
+        with open(output_file) as f:
             content = f.read()
             traces = []
             for line in content.split("\n"):
@@ -100,7 +100,7 @@ def run_test(test_name, cmd, timeout=30):
         status = "HANG"
         with open(test_dir / "result.txt", "w") as f:
             f.write(status)
-        log(f"  Result: HANG (timeout)")
+        log("  Result: HANG (timeout)")
         return status, []
     except Exception as e:
         status = "ERROR"
@@ -175,7 +175,7 @@ for test_dir in base_dir.iterdir():
     if test_dir.is_dir():
         traces_file = test_dir / "traces.log"
         if traces_file.exists():
-            with open(traces_file, "r") as f:
+            with open(traces_file) as f:
                 for line in f:
                     if "MISSING:" in line:
                         param = line.split("MISSING:")[-1].strip()
@@ -228,7 +228,7 @@ for test_dir in base_dir.iterdir():
     if test_dir.name == "gradient_tracing":
         output_file = test_dir / "output.log"
         if output_file.exists():
-            with open(output_file, "r") as f:
+            with open(output_file) as f:
                 for line in f:
                     if "[GRAD-TRACE]" in line:
                         grad_trace_info = line.strip()
@@ -329,7 +329,7 @@ Awaiting GPU execution for:
 with open(results_file, "w") as f:
     f.write(report)
 
-log(f"\n✅ Evidence collection complete!")
+log("\n✅ Evidence collection complete!")
 log(f"Report saved to: {results_file}")
 
 # Print summary

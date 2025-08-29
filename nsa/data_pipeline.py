@@ -13,7 +13,6 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator, List, Optional
 
-
 Tokenizer = Callable[[str], List[int]]
 
 
@@ -31,7 +30,7 @@ def fineweb_stream_batches(
     report_docs: int = 1000,
 ) -> Iterator[List[List[int]]]:
     try:
-        from datasets import load_dataset, Features, Value  # type: ignore
+        from datasets import Features, Value, load_dataset  # type: ignore
     except Exception as e:
         raise RuntimeError("datasets package required. Install with: pip install datasets") from e
 

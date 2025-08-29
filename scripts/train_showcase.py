@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import contextlib
+import json
 import os
 import signal
 import sys
@@ -10,7 +10,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union, Dict, Any
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -155,7 +155,8 @@ def _dump_env_info(out_dir: Path, extra: Optional[Dict[str, Any]] = None) -> Non
             json.dump(info, f, indent=2)
         # Best-effort constraints snapshot for reproducibility
         try:
-            import subprocess, shlex  # noqa: F401
+            import shlex  # noqa: F401
+            import subprocess
 
             env_dir = out_dir / ".." / "env"
             env_dir = env_dir.resolve()
@@ -589,7 +590,9 @@ def main():
         model = DDP(model, **ddp_kwargs)
         # Optional: gradient compression hook to reduce PCIe bandwidth
         try:
-            from torch.distributed.algorithms.ddp_comm_hooks import default as ddp_hooks  # type: ignore
+            from torch.distributed.algorithms.ddp_comm_hooks import (
+                default as ddp_hooks,  # type: ignore
+            )
 
             _compress = os.getenv("NSA_DDP_COMPRESS", "bf16").strip().lower()
             if _compress in ("bf16", "fp16"):
@@ -793,7 +796,7 @@ def main():
     halt_path = out_dir / ".HALT"
     if use_fwe:
         try:
-            from nsa.data_pipeline import fineweb_stream_batches, Shard  # type: ignore
+            from nsa.data_pipeline import Shard, fineweb_stream_batches  # type: ignore
         except Exception as e:
             raise RuntimeError(
                 "FineWeb‑Edu pipeline missing; ensure repository is intact and optional deps installed (datasets)"

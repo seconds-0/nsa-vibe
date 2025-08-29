@@ -39,7 +39,7 @@ def main():
         encode = encode_bytes
 
     try:
-        from nsa.data_pipeline import fineweb_stream_batches, Shard  # type: ignore
+        from nsa.data_pipeline import Shard, fineweb_stream_batches  # type: ignore
     except Exception as e:
         raise SystemExit(f"failed to import data pipeline: {e}")
 

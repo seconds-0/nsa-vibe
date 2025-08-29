@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 
 import torch
-from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
+from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 
 
 def main() -> int:
@@ -60,7 +60,8 @@ def main() -> int:
         profile_memory=True,
     ) as prof:
         # Import here to ensure env vars are in place
-        import subprocess, sys
+        import subprocess
+        import sys
 
         cmd = [
             sys.executable,

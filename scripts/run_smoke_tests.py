@@ -20,7 +20,7 @@ def read_training_csv(csv_path: Path) -> List[Dict]:
     """Read training CSV and return list of records."""
     records = []
     try:
-        with open(csv_path, "r") as f:
+        with open(csv_path) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 records.append(
@@ -41,7 +41,7 @@ def read_heartbeat_jsonl(hb_path: Path) -> List[Dict]:
     """Read heartbeat JSONL and return list of records."""
     records = []
     try:
-        with open(hb_path, "r") as f:
+        with open(hb_path) as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -143,7 +143,7 @@ def load_baseline_metrics(baseline_path: Path) -> Optional[Dict]:
     try:
         if not baseline_path.exists():
             return None
-        with open(baseline_path, "r") as f:
+        with open(baseline_path) as f:
             baseline = json.load(f)
         print(f"[baseline] Loaded baseline from {baseline_path}")
         return baseline
@@ -239,14 +239,15 @@ def compare_with_baseline(
 def check_selection_determinism() -> Tuple[bool, str]:
     """Check selection determinism with identical inputs."""
     try:
-        import torch
-        import sys
         import os
+        import sys
+
+        import torch
 
         sys.path.append(".")
 
-        from nsa.core.selection_scorer import select_topn_ranges
         from nsa.core.block_index import build_block_meta
+        from nsa.core.selection_scorer import select_topn_ranges
 
         # Create test scenario with potential ties
         torch.manual_seed(12345)
@@ -333,7 +334,7 @@ def run_synthetic_smoke(steps: int = 1000, timeout: int = 300) -> bool:
         "synthetic",
         "--ddp",
         "0",
-        f"--steps",
+        "--steps",
         str(steps),
     ]
 
@@ -377,7 +378,7 @@ def run_fineweb_smoke(steps: int = 1000, timeout: int = 600) -> bool:
         "--loader-timeout",
         "120",
         "--synthetic-on-fail",  # Fallback to synthetic if streaming fails
-        f"--steps",
+        "--steps",
         str(steps),
     ]
 
@@ -487,7 +488,7 @@ def main() -> int:
         baseline_issues = []
 
         if args.save_baseline and current_metrics:
-            print(f"\n[baseline] Current metrics:")
+            print("\n[baseline] Current metrics:")
             for key, value in current_metrics.items():
                 if isinstance(value, float):
                     print(f"  {key}: {value:.4f}")
@@ -530,9 +531,9 @@ def main() -> int:
                 exit_code = 1
 
         if exit_code == 0:
-            print(f"\n🎉 All smoke tests PASSED!")
+            print("\n🎉 All smoke tests PASSED!")
         else:
-            print(f"\n💥 Some smoke tests FAILED!")
+            print("\n💥 Some smoke tests FAILED!")
 
     return exit_code
 

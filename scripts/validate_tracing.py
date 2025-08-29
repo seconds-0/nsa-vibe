@@ -6,6 +6,7 @@ This can run on CPU to verify the setup before GPU testing.
 
 import os
 import sys
+
 import torch
 import torch.nn as nn
 
@@ -103,7 +104,7 @@ def test_gradient_tracing():
     all_params = {name for name, p in model.named_parameters() if p.requires_grad}
     missing = all_params - set(grad_seen.keys())
 
-    print(f"\n[GRAD-TRACE] after_backward")
+    print("\n[GRAD-TRACE] after_backward")
     print(f"  Total parameters: {len(all_params)}")
     print(f"  Gradients arrived: {len(grad_seen)}")
     print(f"  Missing gradients: {len(missing)}")

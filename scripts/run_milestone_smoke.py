@@ -50,7 +50,7 @@ def main():
             failed += 1
         rc_total |= rc
 
-    print(f"\n==============================")
+    print("\n==============================")
     print(f"Results: {passed} passed, {failed} failed")
     if rc_total == 0:
         print("🎉 All milestone smoke tests PASSED!")

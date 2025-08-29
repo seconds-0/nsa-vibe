@@ -1,7 +1,8 @@
+import os
+
 import torch
 import torch.nn.functional as F
 
-import os
 from .block_index import BlockMeta
 
 
@@ -625,7 +626,7 @@ def verify_mapping_equivalence(
         (is_equivalent, details): True if paths match, plus diagnostic info
     """
     # Only run verification if explicitly requested via env flag
-    if not os.getenv("NSA_VERIFY_EQ9_MAPPING", "0").lower() in ("1", "true", "yes"):
+    if os.getenv("NSA_VERIFY_EQ9_MAPPING", "0").lower() not in ("1", "true", "yes"):
         return True, {"status": "skipped", "reason": "NSA_VERIFY_EQ9_MAPPING not set"}
 
     with torch.no_grad():
@@ -681,7 +682,7 @@ def validate_selection_determinism(
         True if all trials produce identical results
     """
     # Only run validation if explicitly requested via env flag
-    if not os.getenv("NSA_VALIDATE_SELECTION_DETERMINISM", "0").lower() in ("1", "true", "yes"):
+    if os.getenv("NSA_VALIDATE_SELECTION_DETERMINISM", "0").lower() not in ("1", "true", "yes"):
         return True
 
     if p_grp.requires_grad:

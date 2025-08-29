@@ -47,7 +47,7 @@ def read_last_heartbeat(path: Path) -> dict | None:
 
 def read_last_csv_row(path: Path) -> tuple[int, float, float, float] | None:
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             lines = f.read().strip().splitlines()
             if not lines:
                 return None

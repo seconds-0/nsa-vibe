@@ -11,10 +11,10 @@ Or on remote:
 """
 
 import json
-import time
 import sys
-from pathlib import Path
+import time
 from datetime import datetime
+from pathlib import Path
 
 
 def monitor_memory(heartbeat_file="artifacts/train_showcase/heartbeat_rank0.jsonl", interval=5):
@@ -41,7 +41,7 @@ def monitor_memory(heartbeat_file="artifacts/train_showcase/heartbeat_rank0.json
         while True:
             try:
                 # Read last line of heartbeat
-                with open(heartbeat_file, "r") as f:
+                with open(heartbeat_file) as f:
                     for line in f:
                         pass  # Read to last line
                     if line:
@@ -73,7 +73,7 @@ def monitor_memory(heartbeat_file="artifacts/train_showcase/heartbeat_rank0.json
 
                             last_step = step
 
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 pass  # File might be being written to
 
             time.sleep(interval)

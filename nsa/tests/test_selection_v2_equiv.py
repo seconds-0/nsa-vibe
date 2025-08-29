@@ -5,11 +5,12 @@ Python loop implementation across various edge cases.
 """
 
 import os
-import torch
-import pytest
 from typing import Optional
 
-from nsa.core.block_index import build_block_meta, BlockMeta
+import pytest
+import torch
+
+from nsa.core.block_index import BlockMeta, build_block_meta
 from nsa.core.selection_scorer import (
     convert_indices_to_ranges_batched,
     convert_indices_to_ranges_batched_v2,

@@ -19,7 +19,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
+
 import torch
 
 
@@ -245,7 +246,7 @@ def main():
     with open(results_json, "w") as f:
         json.dump(results, f, indent=2)
 
-    print(f"\n=== Comparison complete ===")
+    print("\n=== Comparison complete ===")
     print(f"Report: {report_path}")
     print(f"Raw data: {results_json}")
 

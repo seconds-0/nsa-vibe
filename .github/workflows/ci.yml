@@ -23,6 +23,9 @@ jobs:
           python -m pip install -U uv
           uv venv -p 3.11 .venv
           uv pip sync requirements-cpu.txt
+      - name: Force CPU torch wheel
+        run: |
+          uv run pip install --index-url https://download.pytorch.org/whl/cpu torch -U
 
       - name: Environment diagnostics
         run: |
@@ -79,6 +82,9 @@ jobs:
           python -m pip install -U uv
           uv venv -p 3.11 .venv
           uv pip sync requirements-cpu.txt
+      - name: Force CPU torch wheel
+        run: |
+          uv run pip install --index-url https://download.pytorch.org/whl/cpu torch -U
 
       - name: Run batched prefill smoke (CPU)
         env:

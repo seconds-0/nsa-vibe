@@ -63,7 +63,7 @@ class TestWatchdog:
 
     def test_watchdog_import(self):
         """Test that watchdog can be imported."""
-        from scripts._watchdog import read_last_heartbeat, read_last_csv_row
+        from scripts._watchdog import read_last_csv_row, read_last_heartbeat
 
         assert callable(read_last_heartbeat)
         assert callable(read_last_csv_row)
@@ -148,7 +148,7 @@ class TestDataPipeline:
 
     def test_data_pipeline_import(self):
         """Test that data pipeline can be imported."""
-        from nsa.data_pipeline import fineweb_stream_batches, local_jsonl_or_txt_batches, Shard
+        from nsa.data_pipeline import Shard, fineweb_stream_batches, local_jsonl_or_txt_batches
 
         assert callable(fineweb_stream_batches)
         assert callable(local_jsonl_or_txt_batches)
@@ -233,9 +233,9 @@ class TestTrainerIntegration:
         """Test that trainer can import M8 components."""
         # This tests the integration without running full training
         try:
+            from nsa.data_pipeline import fineweb_stream_batches
             from scripts._env_guard import configure_env
             from scripts._watchdog import read_last_heartbeat
-            from nsa.data_pipeline import fineweb_stream_batches
 
             # Basic smoke test - can we call these functions?
             env_report = configure_env()
@@ -284,7 +284,7 @@ class TestTrainerIntegration:
             assert hb_file.exists()
 
             # Check content
-            with open(hb_file, "r") as f:
+            with open(hb_file) as f:
                 line = f.readline().strip()
                 data = json.loads(line)
                 assert data["step"] == 1

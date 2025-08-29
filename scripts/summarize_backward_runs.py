@@ -5,17 +5,17 @@ Analyzes test results and generates comprehensive report
 """
 
 import argparse
+import glob
 import json
 import os
-from pathlib import Path
 from datetime import datetime
-import glob
+from pathlib import Path
 
 
 def parse_result_file(result_path):
     """Parse a single test result file"""
     try:
-        with open(result_path, "r") as f:
+        with open(result_path) as f:
             data = json.load(f)
         return data
     except:
@@ -39,13 +39,13 @@ def analyze_test_dir(test_dir):
     # Check for .result file (from matrix runner)
     result_status_file = Path(test_dir).parent / f"{test_name}.result"
     if result_status_file.exists():
-        with open(result_status_file, "r") as f:
+        with open(result_status_file) as f:
             status = f.read().strip()
             result["status"] = status
 
     # Parse environment
     if env_file.exists():
-        with open(env_file, "r") as f:
+        with open(env_file) as f:
             env_data = json.load(f)
             result["config"] = env_data.get("args", {})
 
@@ -81,14 +81,14 @@ def generate_summary_report(results_dir, output_file=None):
     failed = sum(1 for r in all_results if r.get("result") == "FAIL" or r.get("status") == "FAIL")
     hung = sum(1 for r in all_results if r.get("result") == "HANG" or r.get("status") == "HANG")
 
-    report.append(f"\n## Overall Results")
+    report.append("\n## Overall Results")
     report.append(f"- ✅ Passed: {passed}")
     report.append(f"- ❌ Failed: {failed}")
     report.append(f"- ⏱️ Hung: {hung}")
     report.append(f"- ❓ Unknown: {len(all_results) - passed - failed - hung}")
 
     # Memory scaling analysis
-    report.append(f"\n## Memory Scaling Analysis")
+    report.append("\n## Memory Scaling Analysis")
 
     scaling_tests = [r for r in all_results if "seq" in r.get("name", "").lower()]
     if scaling_tests:
@@ -113,7 +113,7 @@ def generate_summary_report(results_dir, output_file=None):
             )
 
     # Branch analysis
-    report.append(f"\n## Branch Analysis")
+    report.append("\n## Branch Analysis")
 
     branch_tests = [
         r for r in all_results if any(b in r.get("name", "").lower() for b in ["win", "sel", "cmp"])
@@ -150,7 +150,7 @@ def generate_summary_report(results_dir, output_file=None):
             report.append(f"| {branch} | {backend} | {status_emoji} {status} | {time} | {mem_mb} |")
 
     # Critical findings
-    report.append(f"\n## Critical Findings")
+    report.append("\n## Critical Findings")
 
     # Check for quadratic scaling
     if scaling_tests:
@@ -168,7 +168,7 @@ def generate_summary_report(results_dir, output_file=None):
             if mem_128 and mem_512:
                 scaling_factor = mem_512 / mem_128
                 if scaling_factor > 8:  # 4x sequence should be ~16x memory for O(S²)
-                    report.append(f"\n⚠️ **Quadratic Memory Scaling Detected**")
+                    report.append("\n⚠️ **Quadratic Memory Scaling Detected**")
                     report.append(f"- seq_len=128: {mem_128:.1f} MB")
                     report.append(f"- seq_len=512: {mem_512:.1f} MB")
                     report.append(
@@ -189,7 +189,7 @@ def generate_summary_report(results_dir, output_file=None):
             report.append(f"\n❌ **Branch '{branch}' consistently fails/hangs**")
 
     # Recommendations
-    report.append(f"\n## Recommendations")
+    report.append("\n## Recommendations")
 
     if hung > 0:
         report.append("\n### For Hang Issues:")

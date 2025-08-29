@@ -212,7 +212,7 @@ def run_test(args):
     t0 = time.time()
 
     if args.profile:
-        from torch.profiler import profile, ProfilerActivity
+        from torch.profiler import ProfilerActivity, profile
 
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
