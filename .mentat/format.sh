@@ -14,18 +14,9 @@ run() {
   fi
 }
 
-echo "==> Running autofixers (ruff-format, ruff --fix, isort, black)"
-# ruff format and fixes
+echo "==> Running autofixers (ruff-format, ruff --fix)"
+# ruff format and fixes (fast path; black/isort handled by pre-commit)
 run ruff format .
 run ruff --fix .
-
-# Keep isort/black in sync with repo's pre-commit config
-if command -v uv >/dev/null 2>&1; then
-  run isort --profile black .
-  run black .
-else
-  if command -v isort >/dev/null 2>&1; then isort --profile black .; fi
-  if command -v black >/dev/null 2>&1; then black .; fi
-fi
 
 echo "==> Format script completed"

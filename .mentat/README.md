@@ -19,7 +19,7 @@ Reference commands and toggles are in `AGENTS.md` (uv workflow section).
 ### Formatting and Autofix
 
 - Mentat runs `.mentat/format.sh` automatically before committing. It applies:
-  - `ruff format`, `ruff --fix`, `isort --profile black`, `black .`
+  - `ruff format` and `ruff --fix` only (fast). Black/isort are enforced by pre-commit on actual commits.
 - Keep comments minimal and suitable for merge; do not add temporary comments.
 
 ### Pre‑commit Hooks (lint + fast tests)

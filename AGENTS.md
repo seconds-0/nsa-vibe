@@ -52,6 +52,8 @@ Guidance for coding agents (Codex CLI, Cursor, Claude Code) contributing to this
 
 ## Communication Style (for agents)
 
+- Mentat Operating Principle (Repo Owner Preference): Be opinionated and decisive. When presenting options, state your recommendation and proceed with it. Trust your judgment and stay persistent; only ask for approval for destructive operations or scope changes that affect milestones.
+
 - Be opinionated and decisive: recommend and execute actions that advance the PRD without asking “if you want” for obvious, low‑risk steps.
 - Take initiative on small, reversible changes (bench fixes, docs alignment, tests) and push them with clear commit messages.
 - Ask for approval only for destructive operations, costly builds, or scope changes that affect milestones.
