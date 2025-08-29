@@ -26,6 +26,30 @@ _VARLEN_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 _SEL_PACK_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.getenv(name, str(default)))
+        return v
+    except Exception:
+        return default
+
+
+def _env_int_bounded(name: str, default: int, min_val: int = 0, max_val: int = 10**8) -> int:
+    """Read integer from environment with bounds checking to prevent excessive memory allocation."""
+    try:
+        v = int(os.getenv(name, str(default)))
+        if v < min_val:
+            return min_val
+        if v > max_val:
+            # Log warning if value exceeds max
+            import warnings
+            warnings.warn(f"{name}={v} exceeds maximum {max_val}, clamping to {max_val}")
+            return max_val
+        return v
+    except Exception:
+        return default
+
+
 def clear_varlen_workspaces() -> None:
     """Optional memory cleanup: free varlen packing workspaces."""
     _VARLEN_WS.clear()
@@ -61,8 +85,12 @@ def _get_varlen_workspace(
             or cuk.numel() < (cap_N + 1)
         )
     if need_new:
-        new_N = max(cap_N, 1)
-        new_K = max(cap_total_k, 1)
+        # Allow pre-sizing via env to avoid growth reallocations on long runs
+        # Bounded to prevent excessive memory allocation (max 1M rows, 100M total K/V)
+        reserve_N = _env_int_bounded("NSA_VARLEN_RESERVE_N", 0, 0, 10**6)
+        reserve_K = _env_int_bounded("NSA_VARLEN_RESERVE_K", 0, 0, 10**8)
+        new_N = max(cap_N, reserve_N, 1)
+        new_K = max(cap_total_k, reserve_K, 1)
         ws = {
             "q": torch.empty((new_N, h, d_k), dtype=dtype_q, device=device),
             "k": torch.empty((new_K, h, d_k), dtype=dtype_k, device=device),
@@ -321,34 +349,41 @@ def grouped_selection_attention_packed(
             need_new = (
                 ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
             )
-            if need_new:
-                Qb = torch.empty((N, h, Dk), dtype=Q.dtype, device=device)
-                Kb = torch.empty((N, L, Dk), dtype=K.dtype, device=device)
-                Vb = torch.empty((N, L, V.shape[-1]), dtype=V.dtype, device=device)
-                _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
-            else:
-                Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
-                Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
-                Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
-            map_rows = []
-            for j, ridx in enumerate(bucket_idx):
-                b, t, g, idx = rows[ridx]
-                Qb[j] = Q[b, t, g]  # [h,Dk]
-                Kb[j] = K[b, g, idx]  # [L,Dk]
-                Vb[j] = V[b, g, idx]  # [L,Dv]
-                map_rows.append((b, t, g))
-            # SDPA per bucket: expand per-head
-            q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
-            q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
-            k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
-            v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
-            attn = F.scaled_dot_product_attention(
-                q_btgh, k_btgh, v_btgh, is_causal=True
-            )  # [N,h,1,Dv]
-            Ob = attn.squeeze(2)  # [N,h,Dv]
-            # Scatter back
-            for j, (b, t, g) in enumerate(map_rows):
-                out[b, t, g] = Ob[j]
+        if need_new:
+            # Allow pre-sizing via env to reduce reallocations
+            # Bounded to prevent excessive memory allocation (max 100K rows, 10K length)
+            reserve_N = _env_int_bounded("NSA_SEL_PACK_RESERVE_N", 0, 0, 10**5)
+            reserve_L = _env_int_bounded("NSA_SEL_PACK_RESERVE_L", 0, 0, 10**4)
+            new_N = max(N, reserve_N)
+            new_L = max(L, reserve_L)
+            Qb = torch.empty((new_N, h, Dk), dtype=Q.dtype, device=device)
+            Kb = torch.empty((new_N, new_L, Dk), dtype=K.dtype, device=device)
+            Vb = torch.empty((new_N, new_L, V.shape[-1]), dtype=V.dtype, device=device)
+            _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
+        else:
+            Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
+            Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
+            Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
+        # Populate workspace buffers and perform SDPA (execute for both new and reused workspaces)
+        map_rows = []
+        for j, ridx in enumerate(bucket_idx):
+            b, t, g, idx = rows[ridx]
+            Qb[j] = Q[b, t, g]  # [h,Dk]
+            Kb[j] = K[b, g, idx]  # [L,Dk]
+            Vb[j] = V[b, g, idx]  # [L,Dv]
+            map_rows.append((b, t, g))
+        # SDPA per bucket: expand per-head
+        q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
+        q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
+        k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
+        v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
+        attn = F.scaled_dot_product_attention(
+            q_btgh, k_btgh, v_btgh, is_causal=True
+        )  # [N,h,1,Dv]
+        Ob = attn.squeeze(2)  # [N,h,Dv]
+        # Scatter back
+        for j, (b, t, g) in enumerate(map_rows):
+            out[b, t, g] = Ob[j]
     return out
 
 
