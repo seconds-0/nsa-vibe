@@ -30,7 +30,7 @@ export NSA_FORCE_PARITY=0
 export NSA_SEL_RANGES_V2_MIN_S=1024
 export NSA_SEL_RANGES_V2=1
 export NSA_USE_FA2=1
-export NSA_USE_FA2_WIN=1
+export NSA_USE_FA2_WIN=0  # Sliding FA-2 disabled: API causal semantics mismatch with pre-extracted windows
 export NSA_USE_FA2_CMP=1
 
 # Data loader perf

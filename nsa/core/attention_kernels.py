@@ -435,11 +435,20 @@ def sliding_window_attention_fa2(
     """
     B, S, G, h, Dk = Q.shape
     device = Q.device
+    # Policy: sliding FA-2 is disabled by default due to API semantics
+    # limitation (causal mask assumes start at 0). Allow only if explicitly
+    # enabled via NSA_ALLOW_SLIDING_FA2 or forced flags.
+    allow_sliding_fa2 = _env_bool("NSA_ALLOW_SLIDING_FA2", False)
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(device) and not _fa2_forced():
         if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
             log("fa2.gate_skip", branch="win", reason="sm89_guard", forced=bool(_fa2_forced()))
-        return sliding_window_attention_masked(Q, K, V, w)
+        return sliding_window_attention(Q, K, V, w)
+    # Policy guard
+    if not allow_sliding_fa2 and not (_env_bool("NSA_FA2_FORCE_VARLEN", False) or _env_bool("NSA_FA2_FORCE_DENSE", False)):
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win", reason="unsupported_sliding_semantics", forced=False)
+        return sliding_window_attention(Q, K, V, w)
     # Compute effective per-row window lengths and buckets
     lengths = compute_sliding_lengths(S, w, device)
     max_len = int(lengths.max().item()) if lengths.numel() > 0 else 0
@@ -459,13 +468,13 @@ def sliding_window_attention_fa2(
     if max_len < min_len_for_fa2:
         if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
             log("fa2.gate_skip", branch="win", reason="below_min_len", max_len=int(max_len), min_len=int(min_len_for_fa2))
-        return sliding_window_attention_masked(Q, K, V, w)
+        return sliding_window_attention(Q, K, V, w)
     # Capability check
     ok, why = fa2_supported_verbose(device, Q.dtype, Dk)
     if not ok or not is_flash_varlen_available():
         if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
             log("fa2.gate_skip", branch="win", reason=why, has_varlen=is_flash_varlen_available())
-        return sliding_window_attention_masked(Q, K, V, w)
+        return sliding_window_attention(Q, K, V, w)
     # Attempt FA-2 across all rows using varlen first, then dense per-bucket. Fallback to masked SDPA on error.
     try:
         B, S, G, h, Dk = Q.shape
@@ -585,7 +594,7 @@ def sliding_window_attention_fa2(
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
                     log("warn.fa2_win_varlen_nonfinite")
-                    return sliding_window_attention_masked(Q, K, V, w)
+                    return sliding_window_attention(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.varlen_all", N=int(N), total_k=int(total_k), ms=dt)
@@ -640,7 +649,7 @@ def sliding_window_attention_fa2(
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
                     log("warn.fa2_win_bucket_nonfinite")
-                    return sliding_window_attention_masked(Q, K, V, w)
+                    return sliding_window_attention(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.win.bucket", path="varlen", L=L, N=int(N), ms=dt)
