@@ -121,19 +121,35 @@ def sliding_window_attention(
     w: int,
 ) -> torch.Tensor:  # [B,S,G,h,Dv]
     B, S, G, h, Dk = Q.shape
-    if w <= 0 or K.shape[2] == 0:
+    # Empty or zero window → zeros
+    if w <= 0 or K.shape[2] == 0 or S == 0:
         return torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=V.device)
-    # Parity-first: per-t attention via attention_bgh
-    out = torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=V.device)
-    for t in range(S):
-        end = t + 1
-        start = max(0, end - w)
-        q_t = Q[:, t]
-        k_t = K[:, :, start:end, :]
-        v_t = V[:, :, start:end, :]
-        out[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
-        log("win.step", t=int(t), start=int(start), end=int(end))
-    return out
+    device = Q.device
+    # Build banded causal mask once: allowed keys per row t are [t-w+1 .. t]
+    row = torch.arange(S, device=device).view(S, 1)
+    col = torch.arange(S, device=device).view(1, S)
+    allowed = (col <= row) & (col >= (row - (w - 1)))  # [S,S]
+    # Disallowed True means masked for SDPA boolean mask
+    disallowed = ~allowed  # [S,S]
+    # Prepare SDPA tensors: [B, G*h, S, D*]
+    Qf = Q.reshape(B, S, G * h, Dk).transpose(1, 2).contiguous()  # [B,G*h,S,Dk]
+    Kf = (
+        K.unsqueeze(2)
+        .expand(B, G, h, S, Dk)
+        .reshape(B, G * h, S, Dk)
+        .contiguous()
+    )
+    Vf = (
+        V.unsqueeze(2)
+        .expand(B, G, h, S, V.shape[-1])
+        .reshape(B, G * h, S, V.shape[-1])
+        .contiguous()
+    )
+    # Broadcast mask to [B,G*h,S,S]
+    Mf = disallowed.view(1, 1, S, S).expand(B, G * h, S, S)
+    Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
+    Of = Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
+    return Of
 
 
 def grouped_selection_attention(
