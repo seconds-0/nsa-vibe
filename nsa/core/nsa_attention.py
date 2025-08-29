@@ -35,9 +35,10 @@ class GateMLP(nn.Module):
         hidden = hidden or max(1, d_k // 2)
         self.fc1 = nn.Linear(d_k, hidden)
         self.fc2 = nn.Linear(hidden, 3)
-        # zero-init last layer per PRD
-        nn.init.zeros_(self.fc2.weight)
-        nn.init.zeros_(self.fc2.bias)
+        # Initialize fc2 with small random values to break symmetry and enable learning
+        # Use Xavier uniform with reduced scale to start near uniform but allow differentiation
+        nn.init.xavier_uniform_(self.fc2.weight, gain=0.1)
+        nn.init.zeros_(self.fc2.bias)  # Keep bias at zero for initial balance
         # Cache environment variables at init to avoid hot path parsing
         self._force_uniform_gate = os.getenv("NSA_FORCE_UNIFORM_GATE", "0").lower() in (
             "1",
@@ -255,6 +256,7 @@ class NSAAttention(nn.Module):
             return os.getenv(val, default).lower() in ("1", "true", "yes")
 
         # Cache frequently accessed environment variables
+        # Raw parsed flags
         self._env_cache = {
             "static": parse_bool("NSA_ENV_STATIC", "0"),
             "force_uniform_gate": parse_bool("NSA_FORCE_UNIFORM_GATE", "0"),
@@ -277,6 +279,42 @@ class NSAAttention(nn.Module):
             "debug_compare": parse_bool("NSA_DEBUG_COMPARE", "0"),
         }
 
+        # Detect whether env overrides were explicitly provided so we can honor hard-disable
+        fa2_all_set = "NSA_USE_FA2" in os.environ
+        fa2_win_set = "NSA_USE_FA2_WIN" in os.environ
+        fa2_cmp_set = "NSA_USE_FA2_CMP" in os.environ
+        self._env_cache.update(
+            {
+                "fa2_all_set": fa2_all_set,
+                "fa2_win_set": fa2_win_set,
+                "fa2_cmp_set": fa2_cmp_set,
+            }
+        )
+
+        # Compute effective FA-2 gating with sensible defaults and hard-disable semantics
+        fa2_all_env = self._env_cache["fa2_all"]
+        fa2_win_env = self._env_cache["fa2_win"]
+        fa2_cmp_env = self._env_cache["fa2_cmp"]
+
+        # If NSA_USE_FA2 not set, fall back to model default; else honor explicit value
+        fa2_all_eff = self.use_flash_default if not fa2_all_set else fa2_all_env
+
+        # If global is explicitly set to 0, that hard-disables branch flags too
+        if fa2_all_set and not fa2_all_env:
+            fa2_win_eff = False
+            fa2_cmp_eff = False
+        else:
+            # Branch-specific flags only take effect if explicitly set; otherwise default off
+            fa2_win_eff = fa2_win_env if fa2_win_set else False
+            fa2_cmp_eff = fa2_cmp_env if fa2_cmp_set else False
+
+        self._env_cache.update(
+            {
+                "fa2_all_eff": fa2_all_eff,
+                "fa2_win_eff": fa2_win_eff,
+                "fa2_cmp_eff": fa2_cmp_eff,
+            }
+        )
         # Parse numeric values
         try:
             self._rope_scale = float(os.getenv("NSA_ROPE_SCALE", "1.0"))
@@ -704,9 +742,9 @@ class NSAAttention(nn.Module):
                 K_w = kv.K_win[:, :, start_idx:end_idx, :]
                 V_w = kv.V_win[:, :, start_idx:end_idx, :]
                 use_flash = (
-                    env["fa2_all"] or env["fa2_win"] or env["fa2_cmp"]
+                    env["fa2_all_eff"] or env["fa2_win_eff"] or env["fa2_cmp_eff"]
                 ) and not force_parity
-                if use_flash and (env["fa2_all"] or env["fa2_win"]):
+                if use_flash and (env["fa2_all_eff"] or env["fa2_win_eff"]):
                     try:
                         O_win = sliding_window_attention_fa2_decode(Q_t, kv.K_win, kv.V_win, self.w)
                     except Exception as e:
@@ -719,9 +757,9 @@ class NSAAttention(nn.Module):
                             total_fails=self._fallback_counters["sliding_fa2_fails"],
                         )
                         # Fallback to standard attention
-                        O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
+                        O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
                 else:
-                    O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
+                    O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
                 S_cmp_t = kv.K_cmp.shape[2]
 
                 # M8: Assert causal masking - compressed bounds in decode
@@ -730,7 +768,7 @@ class NSAAttention(nn.Module):
                     f"Compressed range exceeds cache: S_cmp_t={S_cmp_t} > cache_size={kv.K_cmp.shape[2]}"
                 )
 
-                if use_flash and (env["fa2_all"] or env["fa2_cmp"]):
+                if use_flash and (env["fa2_all_eff"] or env["fa2_cmp_eff"]):
                     try:
                         O_cmp = compressed_attention_fa2_decode(Q_t, kv.K_cmp, kv.V_cmp, S_cmp_t)
                     except Exception as e:
@@ -744,14 +782,17 @@ class NSAAttention(nn.Module):
                         )
                         # Fallback to standard attention
                         O_cmp = attention_bgh(
-                            Q_t,
-                            kv.K_cmp[:, :, :S_cmp_t, :],
-                            kv.V_cmp[:, :, :S_cmp_t, :],
+                            Q_t.contiguous(),
+                            kv.K_cmp[:, :, :S_cmp_t, :].contiguous(),
+                            kv.V_cmp[:, :, :S_cmp_t, :].contiguous(),
                             causal=True,
                         )
                 else:
                     O_cmp = attention_bgh(
-                        Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True
+                        Q_t.contiguous(),
+                        kv.K_cmp[:, :, :S_cmp_t, :].contiguous(),
+                        kv.V_cmp[:, :, :S_cmp_t, :].contiguous(),
+                        causal=True,
                     )
                 # Preserve dtype for gate input
                 q_gp = Q_t.mean(dim=2, dtype=Q_t.dtype)
@@ -945,9 +986,9 @@ class NSAAttention(nn.Module):
 
         # Branch attentions in parallel (parity-first for cmp/win, with optional masked SDPA gates)
         force_parity = self._env_cache.get("force_parity", False)
-        fa2_all = self._env_cache.get("fa2_all", False) or self.use_flash_default
-        fa2_win = self._env_cache.get("fa2_win", False)
-        fa2_cmp = self._env_cache.get("fa2_cmp", False)
+        fa2_all = self._env_cache.get("fa2_all_eff", False)
+        fa2_win = self._env_cache.get("fa2_win_eff", False)
+        fa2_cmp = self._env_cache.get("fa2_cmp_eff", False)
         use_cmp_mask = self._env_cache.get("use_cmp_mask", True) and not force_parity
         if (fa2_all or fa2_cmp) and not force_parity:
             try:
@@ -998,10 +1039,17 @@ class NSAAttention(nn.Module):
                         f"at t={t}. Compressed tokens represent future positions."
                     )
 
-                    q_t = Q[:, t]
-                    k_t = kv.K_cmp[:, :, :L, :]
-                    v_t = kv.V_cmp[:, :, :L, :]
+                    q_t = Q[:, t].contiguous()
+                    k_t = kv.K_cmp[:, :, :L, :].contiguous()
+                    v_t = kv.V_cmp[:, :, :L, :].contiguous()
                     O_cmp[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
+        # Strict finite check and fallback
+        if strict_asserts and not torch.isfinite(O_cmp).all():
+            from nsa.core.attention_kernels import batched_causal_attention_compressed_masked
+            log("warn.prefill_cmp_nonfinite_fallback")
+            O_cmp = batched_causal_attention_compressed_masked(
+                Q, kv.K_cmp, kv.V_cmp, self.l, self.d
+            )
         log("prefill.cmp", O_cmp=O_cmp)
 
         # Selected ranges attention (prefer Triton if enabled; else packed/gather)
@@ -1055,6 +1103,9 @@ class NSAAttention(nn.Module):
                 O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         else:
             O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+        if strict_asserts and not torch.isfinite(O_sel).all():
+            log("warn.prefill_sel_nonfinite_fallback")
+            O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         log("prefill.sel", O_sel=O_sel)
 
         use_win_mask = self._env_cache.get("use_win_mask", True) and not force_parity
@@ -1098,10 +1149,14 @@ class NSAAttention(nn.Module):
                     f"Sliding window has invalid range: start={start} > end={end} at position t={t}."
                 )
 
-                q_t = Q[:, t]
-                k_t = K_win[:, :, start:end, :]
-                v_t = V_win[:, :, start:end, :]
+                q_t = Q[:, t].contiguous()
+                k_t = K_win[:, :, start:end, :].contiguous()
+                v_t = V_win[:, :, start:end, :].contiguous()
                 O_win[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
+        if strict_asserts and not torch.isfinite(O_win).all():
+            from nsa.core.attention_kernels import sliding_window_attention_masked
+            log("warn.prefill_win_nonfinite_fallback")
+            O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
         log("prefill.win", O_win=O_win)
 
         # Gates and combine
@@ -1138,9 +1193,9 @@ class NSAAttention(nn.Module):
                             f"Debug compressed range exceeds cache: L={L} > S_cmp={S_cmp} at t={t}"
                         )
 
-                        q_t = Q[:, t]
-                        k_t = kv.K_cmp[:, :, :L, :]
-                        v_t = kv.V_cmp[:, :, :L, :]
+                        q_t = Q[:, t].contiguous()
+                        k_t = kv.K_cmp[:, :, :L, :].contiguous()
+                        v_t = kv.V_cmp[:, :, :L, :].contiguous()
                         O_cmp_seq[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
                 cmp_mae = (O_cmp - O_cmp_seq).abs().mean().item()
                 print(f"NSA-DBG cmp_mae={cmp_mae:.6e}")
@@ -1150,9 +1205,9 @@ class NSAAttention(nn.Module):
                 for t in range(S):
                     end = t + 1
                     start = max(0, end - self.w)
-                    q_t = Q[:, t]
-                    k_t = K_win[:, :, start:end, :]
-                    v_t = V_win[:, :, start:end, :]
+                    q_t = Q[:, t].contiguous()
+                    k_t = K_win[:, :, start:end, :].contiguous()
+                    v_t = V_win[:, :, start:end, :].contiguous()
                     O_win_seq[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
                 win_mae = (O_win - O_win_seq).abs().mean().item()
                 print(f"NSA-DBG win_mae={win_mae:.6e}")
@@ -1290,10 +1345,13 @@ class NSAAttention(nn.Module):
             win_len = min(self.w, t + 1)
             K_w = kv.K_win[:, :, t + 1 - win_len : t + 1, :]
             V_w = kv.V_win[:, :, t + 1 - win_len : t + 1, :]
-            O_win = attention_bgh(Q_t, K_w, V_w, causal=True)
+            O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
             S_cmp_t = 0 if (t + 1) < self.l else (t + 1 - self.l) // self.d + 1
             O_cmp = attention_bgh(
-                Q_t, kv.K_cmp[:, :, :S_cmp_t, :], kv.V_cmp[:, :, :S_cmp_t, :], causal=True
+                Q_t.contiguous(),
+                kv.K_cmp[:, :, :S_cmp_t, :].contiguous(),
+                kv.V_cmp[:, :, :S_cmp_t, :].contiguous(),
+                causal=True,
             )
             q_gp = Q_t.mean(dim=2, dtype=Q_t.dtype)
             gates = self.gate(q_gp, tau=self.gate_temp)
@@ -1439,7 +1497,10 @@ class NSAAttention(nn.Module):
                 )
                 q = Q[b, g]  # [h,Dk]
                 attn = F.scaled_dot_product_attention(
-                    q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0), is_causal=True
+                    q.unsqueeze(0).contiguous(),
+                    k.unsqueeze(0).contiguous(),
+                    v.unsqueeze(0).contiguous(),
+                    is_causal=True,
                 )
                 row.append(attn.squeeze(0))  # [h,Dv]
             outs.append(torch.stack(row, dim=0))  # [G,h,Dv]
