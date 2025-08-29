@@ -886,6 +886,71 @@ def main():
                 yield item
         if _prefetch:
             fwe_train = _prefetch_iter(fwe_train, device)
+
+        # Optional warmup: prefill CPU queue with a minimum number of batches
+        # before step 1 to avoid initial GPU idle.
+        try:
+            _warm_batches = int(os.getenv("NSA_FWE_WARMUP_BATCHES", "0"))
+        except Exception:
+            _warm_batches = 0
+        try:
+            _warm_timeout = float(os.getenv("NSA_FWE_WARMUP_TIMEOUT", "0"))
+        except Exception:
+            _warm_timeout = 0.0
+        if _warm_batches > 0 and _warm_timeout > 0:
+            import queue as _q
+
+            pre_buf: list = []
+            start_ts = time.time()
+            qwarm: _q.Queue = _q.Queue()
+            _SENT = object()
+
+            def _warm_worker() -> None:
+                try:
+                    for _ in range(_warm_batches):
+                        try:
+                            item = next(fwe_train)
+                        except StopIteration:
+                            break
+                        qwarm.put(item)
+                finally:
+                    qwarm.put(_SENT)
+
+            threading.Thread(target=_warm_worker, daemon=True).start()
+            # Drain with timeout until filled or timeout
+            while len(pre_buf) < _warm_batches:
+                left = _warm_timeout - (time.time() - start_ts)
+                if left <= 0:
+                    break
+                try:
+                    item = qwarm.get(timeout=min(0.1, left))
+                except Exception:
+                    continue
+                if item is _SENT:
+                    break
+                pre_buf.append(item)
+
+            wait_ms = (time.time() - start_ts) * 1000.0
+            try:
+                hb.write(
+                    0,
+                    "fineweb_loader_warmup",
+                    {
+                        "requested": int(_warm_batches),
+                        "filled": int(len(pre_buf)),
+                        "wait_ms": float(wait_ms),
+                    },
+                )
+            except Exception:
+                pass
+
+            def _chain_pre(pre_list, iterator):
+                for p in pre_list:
+                    yield p
+                yield from iterator
+
+            if pre_buf:
+                fwe_train = _chain_pre(pre_buf, fwe_train)
         # Ensure all ranks are aligned before entering the training loop
         if ddp and world_size > 1 and torch.distributed.is_initialized():
             try:

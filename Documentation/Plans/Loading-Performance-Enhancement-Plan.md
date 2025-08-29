@@ -27,8 +27,8 @@
 - [x] Phase 1 toggles wired and documented: `NSA_FWE_DOC_BATCH`, `NSA_FWE_PREFETCH`, `NSA_FWE_Q`, `NSA_FWE_REPORT_DOCS` are consumed in `scripts/train_showcase.py`/`scripts/train_showcase_fsdp.py`; prefetcher uses pinned CPU when available. Launch/runbooks set sane defaults.
 - [x] Instrumentation: Per‑step `dt_fetch_s` and rolling `fetch_p50_ms`/`fetch_p95_ms` emitted to heartbeat; loader readiness event logged with first‑batch latency. Smoke/run scripts consume heartbeat to gate health.
 - [x] Local bootstrap read path supported: `--dataset fineweb_edu_local --local-path /data/fwe_bootstrap.jsonl` loads JSONL/TXT via `nsa.data_pipeline`.
+- [x] Phase 2 warmup controls: `NSA_FWE_WARMUP_BATCHES`/`NSA_FWE_WARMUP_TIMEOUT` implemented with heartbeat event `fineweb_loader_warmup{requested,filled,wait_ms}` in both `train_showcase.py` and `train_showcase_fsdp.py`.
 - [ ] Phase 0 measurements captured as artifacts (cold vs warm) — execute and attach logs.
-- [ ] Phase 2 warmup controls: add `NSA_FWE_WARMUP_BATCHES`/`NSA_FWE_WARMUP_TIMEOUT` gating to `_prefetch_iter` and emit `fetch_warmup_*` heartbeat fields.
 - [ ] Automation: small helper `scripts/automation/fwe_bootstrap.py` to pre‑stage ~5GB JSONL.
 - [ ] Rollout: enable Phase 1 toggles in CI/prod defaults and tune per‑node values (doc batch, queue depth).
 
