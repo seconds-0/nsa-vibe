@@ -20,8 +20,9 @@ jobs:
           python -m pip install -U uv
           uv venv -p 3.11 .venv
           uv pip sync requirements-cpu.txt
-          uv run pip install --index-url https://download.pytorch.org/whl/cpu torch -U
-          uv run pip install pytest
+          uv pip install --index-url https://download.pytorch.org/whl/cpu torch -U
+          uv pip install antlr4-python3-runtime
+          uv pip install pytest
       - name: Unit tests (determinism + causality)
         env:
           NSA_STRICT_ASSERTS: '1'
