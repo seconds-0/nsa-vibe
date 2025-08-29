@@ -344,55 +344,57 @@ def grouped_selection_attention_masked(
 ) -> torch.Tensor:  # [B,S,G,h,Dv]
     """
     Fully batched selection attention using an additive -inf mask.
-    Constructs an allowed mask from ranges for each (B,S,G) and runs a single
-    SDPA per (B,G*h).
+    Vectorized ranges→mask construction via prefix-sum trick (no Python loops).
     """
     B, S, G, h, Dk = Q.shape
     S_kv = K.shape[2]
     device = Q.device
+    if S_kv == 0:
+        return torch.zeros((B, S, G, h, V.shape[-1]), dtype=V.dtype, device=device)
 
-    # Build allowed mask [B,S,G,S_kv] from ranges
-    allowed = torch.zeros((B, S, G, S_kv), dtype=torch.bool, device=device)
+    # Vectorized allowed mask [B,S,G,S_kv] from ranges using difference array
     n = ranges.shape[3]
-    for b in range(B):
-        for t in range(S):
-            for g in range(G):
-                for i in range(n):
-                    s0 = int(ranges[b, t, g, i, 0].item())
-                    e0 = int(ranges[b, t, g, i, 1].item())
-                    if e0 > s0:
-                        allowed[b, t, g, s0:e0] = True
+    starts = ranges[..., 0].to(torch.int64).clamp_(0, S_kv)  # [B,S,G,n]
+    ends = ranges[..., 1].to(torch.int64).clamp_(0, S_kv)    # [B,S,G,n]
+    BSG = B * S * G
+    starts_f = starts.reshape(BSG, n)
+    ends_f = ends.reshape(BSG, n)
+    diff = torch.zeros((BSG, S_kv + 1), dtype=torch.int32, device=device)
+    one = torch.ones_like(starts_f, dtype=diff.dtype, device=device)
+    diff.scatter_add_(1, starts_f, one)
+    diff.scatter_add_(1, ends_f, -one)
+    allowed = diff[:, :-1].cumsum(dim=1).gt(0).reshape(B, S, G, S_kv)
 
     # Prepare SDPA tensors: [B,G*h,S, D*] and mask [B,G*h,S,S_kv]
-    Qf = Q.reshape(B, S, G * h, Dk).transpose(1, 2)  # [B,G*h,S,Dk]
-    Kf = K.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(B, G * h, S_kv, Dk)
-    Vf = V.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(B, G * h, S_kv, V.shape[-1])
+    Qf = Q.reshape(B, S, G * h, Dk).transpose(1, 2).contiguous()  # [B,G*h,S,Dk]
+    Kf = (
+        K.unsqueeze(2)
+        .expand(-1, -1, h, -1, -1)
+        .reshape(B, G * h, S_kv, Dk)
+        .contiguous()
+    )
+    Vf = (
+        V.unsqueeze(2)
+        .expand(-1, -1, h, -1, -1)
+        .reshape(B, G * h, S_kv, V.shape[-1])
+        .contiguous()
+    )
     zeros = torch.zeros((B, G * h, S, S_kv), dtype=Qf.dtype, device=device)
     neg_inf = torch.full((B, G * h, S, S_kv), float("-inf"), dtype=Qf.dtype, device=device)
     Mf = torch.where(
-        allowed.reshape(B, S, G, S_kv)
-        .transpose(1, 2)
-        .reshape(B, G, S, S_kv)
+        allowed.transpose(1, 2)  # [B,G,S,S_kv]
         .unsqueeze(2)
         .expand(-1, -1, h, -1, -1)
         .reshape(B, G * h, S, S_kv),
         zeros,
         neg_inf,
-    )
+    ).contiguous()
 
-    Qf = Qf.contiguous()
-    Kf = Kf.contiguous()
-    Vf = Vf.contiguous()
-    Mf = Mf.contiguous()
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     Of = Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
     # Guard against rows with no allowed keys (all -inf mask) → zero them
     row_has_any = allowed.any(dim=-1)  # [B,S,G]
-    Of = torch.where(
-        row_has_any.unsqueeze(-1).unsqueeze(-1),
-        Of,
-        torch.zeros_like(Of),
-    )
+    Of = torch.where(row_has_any.unsqueeze(-1).unsqueeze(-1), Of, torch.zeros_like(Of))
     return Of
 
 
