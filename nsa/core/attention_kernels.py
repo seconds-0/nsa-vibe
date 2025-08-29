@@ -43,6 +43,7 @@ def _env_int_bounded(name: str, default: int, min_val: int = 0, max_val: int = 1
         if v > max_val:
             # Log warning if value exceeds max
             import warnings
+
             warnings.warn(f"{name}={v} exceeds maximum {max_val}, clamping to {max_val}")
             return max_val
         return v
@@ -349,41 +350,341 @@ def grouped_selection_attention_packed(
             need_new = (
                 ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
             )
-        if need_new:
-            # Allow pre-sizing via env to reduce reallocations
-            # Bounded to prevent excessive memory allocation (max 100K rows, 10K length)
-            reserve_N = _env_int_bounded("NSA_SEL_PACK_RESERVE_N", 0, 0, 10**5)
-            reserve_L = _env_int_bounded("NSA_SEL_PACK_RESERVE_L", 0, 0, 10**4)
-            new_N = max(N, reserve_N)
-            new_L = max(L, reserve_L)
-            Qb = torch.empty((new_N, h, Dk), dtype=Q.dtype, device=device)
-            Kb = torch.empty((new_N, new_L, Dk), dtype=K.dtype, device=device)
-            Vb = torch.empty((new_N, new_L, V.shape[-1]), dtype=V.dtype, device=device)
-            _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
-        else:
-            Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
-            Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
-            Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
-        # Populate workspace buffers and perform SDPA (execute for both new and reused workspaces)
-        map_rows = []
-        for j, ridx in enumerate(bucket_idx):
-            b, t, g, idx = rows[ridx]
-            Qb[j] = Q[b, t, g]  # [h,Dk]
-            Kb[j] = K[b, g, idx]  # [L,Dk]
-            Vb[j] = V[b, g, idx]  # [L,Dv]
-            map_rows.append((b, t, g))
-        # SDPA per bucket: expand per-head
-        q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
-        q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
-        k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
-        v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
-        attn = F.scaled_dot_product_attention(
-            q_btgh, k_btgh, v_btgh, is_causal=True
-        )  # [N,h,1,Dv]
-        Ob = attn.squeeze(2)  # [N,h,Dv]
-        # Scatter back
-        for j, (b, t, g) in enumerate(map_rows):
-            out[b, t, g] = Ob[j]
+            if need_new:
+                # Allow pre-sizing via env to reduce reallocations
+                # Bounded to prevent excessive memory allocation (max 100K rows, 10K length)
+                reserve_N = _env_int_bounded("NSA_SEL_PACK_RESERVE_N", 0, 0, 10**5)
+                reserve_L = _env_int_bounded("NSA_SEL_PACK_RESERVE_L", 0, 0, 10**4)
+                new_N = max(N, reserve_N)
+                new_L = max(L, reserve_L)
+                Qb = torch.empty((new_N, h, Dk), dtype=Q.dtype, device=device)
+                Kb = torch.empty((new_N, new_L, Dk), dtype=K.dtype, device=device)
+                Vb = torch.empty((new_N, new_L, V.shape[-1]), dtype=V.dtype, device=device)
+                _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
+            else:
+                Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
+                Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
+                Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
+            # Populate workspace buffers and perform SDPA (execute for both new and reused workspaces)
+            map_rows = []
+            for j, ridx in enumerate(bucket_idx):
+                b, t, g, idx = rows[ridx]
+                Qb[j] = Q[b, t, g]  # [h,Dk]
+                Kb[j] = K[b, g, idx]  # [L,Dk]
+                Vb[j] = V[b, g, idx]  # [L,Dv]
+                map_rows.append((b, t, g))
+            # SDPA per bucket: expand per-head
+            q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
+            q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
+            k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
+            v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
+            attn = F.scaled_dot_product_attention(
+                q_btgh, k_btgh, v_btgh, is_causal=True
+            )  # [N,h,1,Dv]
+            Ob = attn.squeeze(2)  # [N,h,Dv]
+            # Scatter back
+            for j, (b, t, g) in enumerate(map_rows):
+                out[b, t, g] = Ob[j]
+    return out
+
+
+def selection_attention_varlen_all(
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K: torch.Tensor,  # [B,G,S_kv,Dk]
+    V: torch.Tensor,  # [B,G,S_kv,Dv]
+    ranges: torch.Tensor,  # [B,S,G,n,2]
+) -> torch.Tensor:  # [B,S,G,h,Dv]
+    """
+    Fully batched selection attention using varlen packing across all (B,S,G) rows.
+
+    If NSA_SEL_VARLEN_V2 is enabled (default), dispatches to the vectorized v2
+    packer. Otherwise uses the legacy v1 path (minimal loops with workspace).
+    """
+    # Optional v2 vectorized packer
+    if os.getenv("NSA_SEL_VARLEN_V2", "1").lower() in ("1", "true", "yes", "on"):
+        return selection_attention_varlen_all_v2(Q, K, V, ranges)
+    B, S, G, h, Dk = Q.shape
+    device = Q.device
+    Dv = V.shape[-1]
+    out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
+    # Build row list and lengths from ranges (sum of segment lengths)
+    rows: list[tuple[int, int, int]] = []
+    lens: list[int] = []
+    for b in range(B):
+        for t in range(S):
+            for g in range(G):
+                L = 0
+                for i in range(ranges.shape[3]):
+                    s0 = int(ranges[b, t, g, i, 0].item())
+                    e0 = int(ranges[b, t, g, i, 1].item())
+                    if e0 > s0:
+                        L += e0 - s0
+                if L > 0:
+                    rows.append((b, t, g))
+                    lens.append(L)
+    N = len(rows)
+    if N == 0:
+        return out
+
+    total_k = int(sum(lens))
+    # Workspace-backed packing
+    ws = _get_varlen_workspace(
+        device,
+        dtype_q=Q.dtype,
+        dtype_k=K.dtype,
+        dtype_v=V.dtype,
+        h=h,
+        d_k=Dk,
+        d_v=Dv,
+        cap_N=N,
+        cap_total_k=total_k,
+    )
+    q_pack = ws["q"][:N]
+    k_pack = ws["k"][:total_k]
+    v_pack = ws["v"][:total_k]
+    cuq = ws["cuq"][: N + 1]
+    cuk = ws["cuk"][: N + 1]
+    # Fill cu_seqlens
+    cuq.zero_()
+    cuk.zero_()
+    # Pack per row
+    write_pos = 0
+    for i, (b, t, g) in enumerate(rows):
+        # q for row
+        q_pack[i] = Q[b, t, g]
+        # iterate segments for this row
+        for j in range(ranges.shape[3]):
+            s0 = int(ranges[b, t, g, j, 0].item())
+            e0 = int(ranges[b, t, g, j, 1].item())
+            if e0 <= s0:
+                continue
+            seg_k = K[b, g, s0:e0]  # [Lseg,Dk]
+            seg_v = V[b, g, s0:e0]  # [Lseg,Dv]
+            Lseg = e0 - s0
+            # Assign using explicit expand_as to match target slice shape and avoid view pitfalls
+            _kslice = k_pack[write_pos : write_pos + Lseg]
+            _vslice = v_pack[write_pos : write_pos + Lseg]
+            _kslice.copy_(seg_k[:, None, :].expand_as(_kslice))
+            _vslice.copy_(seg_v[:, None, :].expand_as(_vslice))
+            write_pos += Lseg
+        cuq[i + 1] = cuq[i] + 1
+        cuk[i + 1] = cuk[i] + lens[i]
+    # Try FA‑2 varlen if available and supported. Use non-causal semantics here:
+    # selection packing already clamps keys to ≤ t, and each row has a single
+    # query (Tq=1). Passing causal=True would incorrectly restrict to the first
+    # packed key for FA‑2 varlen. Using causal=False preserves full selected set.
+    ok, _ = fa2_supported_verbose(device, Q.dtype, Dk)
+    if ok and is_flash_varlen_available():
+        try:
+            o_pack = attention_fa2_varlen(
+                q_pack,
+                k_pack,
+                v_pack,
+                cuq,
+                cuk,
+                max_seqlen_q=1,
+                max_seqlen_k=max(lens),
+                causal=False,
+            )  # [N,h,Dv]
+            # Scatter back
+            for i, (b, t, g) in enumerate(rows):
+                out[b, t, g] = o_pack[i]
+            return out
+        except Exception:
+            pass
+    # Dense batch per fixed L bucket as fallback
+    buckets: dict[int, list[int]] = {}
+    for i, L in enumerate(lens):
+        buckets.setdefault(L, []).append(i)
+    for L, idxs in buckets.items():
+        if L <= 0 or len(idxs) == 0:
+            continue
+        Nb = len(idxs)
+        Qb = torch.empty((Nb, h, Dk), dtype=Q.dtype, device=device)
+        Kb = torch.empty((Nb, L, Dk), dtype=K.dtype, device=device)
+        Vb = torch.empty((Nb, L, Dv), dtype=V.dtype, device=device)
+        tgt: list[tuple[int, int, int]] = []
+        for j, irow in enumerate(idxs):
+            b, t, g = rows[irow]
+            Qb[j] = Q[b, t, g]
+            # Rebuild fixed-length K/V for this row from ranges
+            write = 0
+            for rj in range(ranges.shape[3]):
+                s0 = int(ranges[b, t, g, rj, 0].item())
+                e0 = int(ranges[b, t, g, rj, 1].item())
+                if e0 <= s0:
+                    continue
+                Lseg = e0 - s0
+                Kb[j, write : write + Lseg] = K[b, g, s0:e0]
+                Vb[j, write : write + Lseg] = V[b, g, s0:e0]
+                write += Lseg
+            tgt.append((b, t, g))
+        # Batched dense fallback for this bucket. Use non-causal semantics:
+        # all packed keys are already ≤ t and ordered; we do not want an
+        # additional triangular mask over the packed subset for Tq=1.
+        try:
+            q_rows = Qb.unsqueeze(1)  # [Nb,1,h,Dk]
+            k_rows = Kb.unsqueeze(2).expand(Nb, L, h, Dk)  # [Nb,L,h,Dk]
+            v_rows = Vb.unsqueeze(2).expand(Nb, L, h, Dv)  # [Nb,L,h,Dv]
+            Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=False).squeeze(
+                1
+            )  # [Nb,h,Dv]
+            for i, (b, t, g) in enumerate(tgt):
+                out[b, t, g] = Ob[i]
+        except Exception:
+            # Final fallback: per-row SDPA
+            for j, (b, t, g) in enumerate(tgt):
+                q_btgh = Qb[j].unsqueeze(0).unsqueeze(0)  # [1,1,h,Dk]
+                k_btgh = Kb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dk]
+                v_btgh = Vb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dv]
+                out[b, t, g] = attention_bgh(q_btgh, k_btgh, v_btgh, causal=False)[0, 0]
+    return out
+
+
+def selection_attention_varlen_all_v2(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    ranges: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Vectorized v2 varlen selection packer with FA‑2 varlen fast path and dense fallback.
+    - Eliminates Python loops for packing by using a difference-array mask to build per-row
+      allowed indices and flat-select K/V tokens.
+    - Uses causal=False for single‑query rows.
+    - Env: NSA_SEL_VARLEN_MIN_L to bypass on tiny rows (falls back to packed path).
+    """
+    B, S, G, h, Dk = Q.shape
+    device = Q.device
+    Dv = V.shape[-1]
+    S_kv = K.shape[2]
+    out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
+    if S_kv == 0:
+        return out
+
+    # Build allowed mask [B,S,G,S_kv]
+    n = ranges.shape[3]
+    starts = ranges[..., 0].to(torch.int64).clamp_(0, S_kv)
+    ends = ranges[..., 1].to(torch.int64).clamp_(0, S_kv)
+    BSG = B * S * G
+    starts_f = starts.reshape(BSG, n)
+    ends_f = ends.reshape(BSG, n)
+    diff = torch.zeros((BSG, S_kv + 1), dtype=torch.int32, device=device)
+    one = torch.ones_like(starts_f, dtype=diff.dtype, device=device)
+    diff.scatter_add_(1, starts_f, one)
+    diff.scatter_add_(1, ends_f, -one)
+    allowed = diff[:, :-1].cumsum(dim=1).gt(0)  # [BSG,S_kv]
+
+    lens_flat = allowed.sum(dim=1, dtype=torch.int32)  # [BSG]
+    row_mask = lens_flat.gt(0)
+    if not torch.any(row_mask):
+        return out
+    try:
+        min_L = int(os.getenv("NSA_SEL_VARLEN_MIN_L", "0"))
+    except Exception:
+        min_L = 0
+    if min_L > 0 and int(lens_flat.max().item()) < min_L:
+        return grouped_selection_attention_packed(Q, K, V, ranges)
+
+    idx_rows = torch.nonzero(row_mask, as_tuple=False).squeeze(1)  # [N]
+    N = int(idx_rows.numel())
+    # (b,t,g) indices for scatter
+    b_idx = idx_rows // (S * G)
+    rem = idx_rows % (S * G)
+    t_idx = rem // G
+    g_idx = rem % G
+
+    # Pack Q rows
+    Q_rows = Q.reshape(B * S * G, h, Dk)[idx_rows]
+
+    # Map rows to b,g to select K/V
+    bg_map = (
+        torch.arange(B, device=device).view(B, 1, 1) * G
+        + torch.arange(G, device=device).view(1, 1, G)
+    ).expand(B, S, G)
+    bg_rows = bg_map.reshape(B * S * G)[idx_rows]
+    K_bg = K.reshape(B * G, S_kv, Dk)[bg_rows]
+    V_bg = V.reshape(B * G, S_kv, Dv)[bg_rows]
+    allowed_rows = allowed[idx_rows]
+
+    total_k = int(lens_flat[row_mask].sum().item())
+    sel_k = K_bg[allowed_rows]  # [total_k, Dk]
+    sel_v = V_bg[allowed_rows]  # [total_k, Dv]
+    lens_sel = lens_flat[row_mask]  # [N]
+
+    # Workspace-backed packing
+    ws = _get_varlen_workspace(
+        device,
+        dtype_q=Q.dtype,
+        dtype_k=K.dtype,
+        dtype_v=V.dtype,
+        h=h,
+        d_k=Dk,
+        d_v=Dv,
+        cap_N=N,
+        cap_total_k=total_k,
+    )
+    q_pack = ws["q"][:N]
+    k_pack = ws["k"][:total_k]
+    v_pack = ws["v"][:total_k]
+    cuq = ws["cuq"][: N + 1]
+    cuk = ws["cuk"][: N + 1]
+
+    q_pack.copy_(Q_rows)
+    k_pack.copy_(sel_k.unsqueeze(1).expand(total_k, h, Dk))
+    v_pack.copy_(sel_v.unsqueeze(1).expand(total_k, h, Dv))
+    cuq.copy_(torch.arange(0, N + 1, device=device, dtype=torch.int32))
+    cuk[0] = 0
+    torch.cumsum(lens_sel.to(torch.int32), dim=0, out=cuk[1:])
+
+    # FA‑2 varlen (non-causal)
+    ok, _why = fa2_supported_verbose(device, Q.dtype, Dk)
+    max_len = int(lens_sel.max().item())
+    if ok and is_flash_varlen_available():
+        try:
+            o_pack = attention_fa2_varlen(
+                q_pack,
+                k_pack,
+                v_pack,
+                cuq,
+                cuk,
+                max_seqlen_q=1,
+                max_seqlen_k=max_len,
+                causal=False,
+            )
+            out[b_idx, t_idx, g_idx] = o_pack
+            return out
+        except Exception:
+            pass
+
+    # Dense fallback by length buckets
+    starts = cuk[:-1].to(torch.int64)
+    ends = cuk[1:].to(torch.int64)
+    Ls = (ends - starts).to(torch.int64)
+    for L in torch.unique(Ls).tolist():
+        if L <= 0:
+            continue
+        sel = (Ls == L).nonzero(as_tuple=False).squeeze(1)
+        if sel.numel() == 0:
+            continue
+        Nb = int(sel.numel())
+        Qb = q_pack[sel]
+        k_rows = torch.empty((Nb, L, h, Dk), dtype=K.dtype, device=device)
+        v_rows = torch.empty((Nb, L, h, Dv), dtype=V.dtype, device=device)
+        for j in range(Nb):
+            s0 = int(starts[sel[j]].item())
+            e0 = int(ends[sel[j]].item())
+            k_rows[j] = k_pack[s0:e0]
+            v_rows[j] = v_pack[s0:e0]
+        try:
+            Ob = attention_fa2_dense_batch(Qb.unsqueeze(1), k_rows, v_rows, causal=False).squeeze(1)
+        except Exception:
+            Ob = torch.empty((Nb, h, Dv), dtype=V.dtype, device=device)
+            for j in range(Nb):
+                Ob[j] = attention_bgh(Qb[j].unsqueeze(0), k_rows[j].unsqueeze(0), v_rows[j].unsqueeze(0), causal=False)[
+                    0
+                ]
+        out[b_idx[sel], t_idx[sel], g_idx[sel]] = Ob
     return out
 
 
