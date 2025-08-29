@@ -866,10 +866,6 @@ class NSAAttention(nn.Module):
         V_sel = self._shape_kv(self.W_V_sel(x), B, S)
         K_win = self._shape_kv(self.W_K_win(x), B, S)
         V_win = self._shape_kv(self.W_V_win(x), B, S)
-        # Align sequential prefill with PRD: apply RoPE to per-branch K
-        pos_k = torch.arange(S, device=x.device)
-        K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
-        K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
         K_cmp_raw = self._shape_kv(self.W_K_cmp(x), B, S)
         V_cmp_raw = self._shape_kv(self.W_V_cmp(x), B, S)
         G = self.n_kv_groups
@@ -877,7 +873,7 @@ class NSAAttention(nn.Module):
         assert K_win.shape[:3] == (B, G, S) and V_win.shape[:3] == (B, G, S)
         assert K_cmp_raw.shape[:3] == (B, G, S) and V_cmp_raw.shape[:3] == (B, G, S)
 
-        # Align RoPE application across branches for batched path (Q already RoPE'd)
+        # Apply RoPE to per-branch K tensors (Q already has RoPE applied)
         pos_k = torch.arange(S, device=x.device)
         K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
         K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
@@ -1327,6 +1323,11 @@ class NSAAttention(nn.Module):
         V_win = self._shape_kv(self.W_V_win(x), B, S)
         K_cmp_raw = self._shape_kv(self.W_K_cmp(x), B, S)
         V_cmp_raw = self._shape_kv(self.W_V_cmp(x), B, S)
+        
+        # Apply RoPE to per-branch K tensors to align with batched path
+        pos_k = torch.arange(S, device=x.device)
+        K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
+        K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
 
         kv.update_selection_raw(K_sel, V_sel)
         kv.meta = build_block_meta(
