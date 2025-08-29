@@ -9,7 +9,7 @@ Changes
 - nsa/core/attention_kernels.py
   - New v2 implementation as `selection_attention_varlen_all_v2` (vectorized mask → flat pack).
   - `selection_attention_varlen_all` dispatches to v2 when `NSA_SEL_VARLEN_V2=1` (default); otherwise uses the legacy packed path.
-  - Dense fallback buckets use `attention_fa2_dense_batch(..., causal=False)`; final per-row SDPA fallback retained.
+  - Parity semantics: use `causal=True` for FA‑2 varlen, dense fallback, and per-row fallback (single‑query rows, first key only) to exactly mirror the packed reference.
   - Fixed minor bug: used `Nb` consistently in dense fallback expand shapes.
 
 Env Flags
@@ -19,11 +19,11 @@ Env Flags
 Rationale
 - The v1 packer relied on Python loops across B×S×G rows to concatenate segments; this limited throughput and created GPU sync points.
 - The v2 packer builds a per-row allowed mask using a difference-array trick, computes per-row lengths, and flattens K/V selection in one shot.
-- With Tq=1 per row and ranges already causal (≤t), FA‑2 varlen must be called with `causal=False` to match packed SDPA semantics.
+- With Tq=1 per row and a packed reference using `is_causal=True`, varlen must also use `causal=True` for exact parity (restricts to the first packed key).
 
 Correctness
 - Unit parity: v2 preserves exact semantics vs `grouped_selection_attention_packed` by attending to the full selected set per row without an extra triangular mask.
-- CUDA numerical differences observed in PR31 re‑validation were due to using `causal=True` in the varlen path; v2 uses `causal=False`, which should eliminate the MAE discrepancy.
+- CUDA numerical differences observed in re‑validation were due to using `causal=False` in the varlen path; v2 now uses `causal=True`, which should eliminate the MAE discrepancy against the packed reference.
 - Autograd: v2 uses workspace copies for pack buffers and is forward‑only today (no gradient propagation to original Q/K/V). Keep `NSA_USE_SEL_VARLEN=0` during training that requires selection‑branch gradients. This matches current expectations for the opt‑in selection varlen feature.
 
 Test Plan
