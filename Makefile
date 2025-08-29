@@ -10,6 +10,7 @@ BRANCH = test-plan/m7-training-readiness
 TB_PORT = 6006
 
 .PHONY: venv install cpu-tests routing bench-decode bench-summarize bench-report triton-fwd triton-bwd lint oneshot pr env-pair clean
+.PHONY: uv-venv uv-install-cpu uv-install-gpu uv-tests uv-lint uv-mypy
 .PHONY: help-prime train-prime setup-prime monitor-prime logs-prime clean-prime status-prime help
 
 help:
@@ -40,6 +41,29 @@ install: venv
 
 cpu-tests:
 	PYTHONPATH=. pytest -q
+
+# ============================
+# uv helpers (non-destructive)
+# ============================
+uv-venv:
+	uv venv -p 3.11 $(VENV)
+
+uv-install-cpu: uv-venv
+	uv pip sync requirements-cpu.txt
+	uv run pip install --index-url https://download.pytorch.org/whl/cpu torch -U
+
+# For GPU hosts (CUDA 12.1 Torch 2.4):
+uv-install-gpu: uv-venv
+	uv pip sync -r requirements-gpu-cu121-torch24.txt
+
+uv-tests:
+	PYTHONPATH=. uv run -q pytest
+
+uv-lint:
+	uv run ruff check .
+
+uv-mypy:
+	uv run mypy -p nsa || true
 
 routing:
 	$(PYTHON) scripts/print_routing.py || true
