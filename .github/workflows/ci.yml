@@ -26,35 +26,35 @@ jobs:
 
       - name: Environment diagnostics
         run: |
-          ./.venv/bin/python -V
-          ./.venv/bin/python -m pip list
-          ./.venv/bin/python -c "import sys; print('PYTHONPATH', sys.path[0])"
-          ./.venv/bin/python -c "import tomli; print('tomli imported OK')" || true
-          ./.venv/bin/python -m pytest --version || true
+          uv run python -V
+          uv run python -m pip list
+          uv run python -c "import sys; print('PYTHONPATH', sys.path[0])"
+          uv run python -c "import tomli; print('tomli imported OK')" || true
+          uv run python -m pytest --version || true
 
       - name: Lint (ruff)
         run: |
-          ./.venv/bin/python -m ruff --version || true
-          ./.venv/bin/python -m ruff check . || true
+          uv run ruff --version || true
+          uv run ruff check . || true
 
       - name: Type check (mypy)
         run: |
-          ./.venv/bin/python -m mypy --version || true
-          ./.venv/bin/python -m mypy nsa || true
+          uv run mypy --version || true
+          uv run mypy nsa || true
 
       - name: Collect tests (CPU)
         env:
           PYTHONPATH: "."
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          ./.venv/bin/python -m pytest --collect-only -q || true
+          uv run python -m pytest --collect-only -q || true
 
       - name: Run tests (CPU)
         env:
           PYTHONPATH: "."
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          ./.venv/bin/python -m pytest -q -vv | tee test-output.txt
+          uv run python -m pytest -q -vv | tee test-output.txt
 
       - name: Upload test log
         if: always()
@@ -86,7 +86,7 @@ jobs:
           PYTHONPATH: '.'
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          ./.venv/bin/python -m pytest -q -vv \
+          uv run python -m pytest -q -vv \
             nsa/tests/test_equiv_small.py \
             nsa/tests/test_equiv_full_coverage.py \
             nsa/tests/test_decode_reads_trend.py \

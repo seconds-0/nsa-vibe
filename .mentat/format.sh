@@ -14,9 +14,9 @@ run() {
   fi
 }
 
-echo "==> Running autofixers (ruff-format, ruff --fix)"
+echo "==> Running autofixers (ruff-format, ruff check --fix)"
 # ruff format and fixes (fast path; black/isort handled by pre-commit)
 run ruff format .
-run ruff --fix .
+run ruff check --fix .
 
 echo "==> Format script completed"

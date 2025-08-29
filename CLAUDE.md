@@ -289,9 +289,9 @@ PYTHONPATH=. .venv/bin/python bench/sel_threshold_from_csv.py \
 
 ### Environment Setup
 ```bash
-# Use uv for Python environment management
+# Use uv for Python environment management (CPU default)
 uv venv -p 3.11 .venv
-uv pip sync requirements.txt
+uv pip sync requirements-cpu.txt
 ```
 
 ### Testing
