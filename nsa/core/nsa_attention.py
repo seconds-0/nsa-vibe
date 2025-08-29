@@ -93,7 +93,6 @@ def _compute_gate_stats(gates: torch.Tensor) -> dict:
     """
     with torch.no_grad():
         # Flatten to [*, 3] for consistent computation
-        original_shape = gates.shape
         gates_flat = gates.view(-1, 3)
 
         # Gate entropy (should be > 0.5 for healthy mixing)
@@ -757,9 +756,13 @@ class NSAAttention(nn.Module):
                             total_fails=self._fallback_counters["sliding_fa2_fails"],
                         )
                         # Fallback to standard attention
-                        O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
+                        O_win = attention_bgh(
+                            Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True
+                        )
                 else:
-                    O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
+                    O_win = attention_bgh(
+                        Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True
+                    )
                 S_cmp_t = kv.K_cmp.shape[2]
 
                 # M8: Assert causal masking - compressed bounds in decode
@@ -1046,6 +1049,7 @@ class NSAAttention(nn.Module):
         # Strict finite check and fallback
         if strict_asserts and not torch.isfinite(O_cmp).all():
             from nsa.core.attention_kernels import batched_causal_attention_compressed_masked
+
             log("warn.prefill_cmp_nonfinite_fallback")
             O_cmp = batched_causal_attention_compressed_masked(
                 Q, kv.K_cmp, kv.V_cmp, self.l, self.d
@@ -1155,6 +1159,7 @@ class NSAAttention(nn.Module):
                 O_win[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
         if strict_asserts and not torch.isfinite(O_win).all():
             from nsa.core.attention_kernels import sliding_window_attention
+
             log("warn.prefill_win_nonfinite_fallback")
             O_win = sliding_window_attention(Q, K_win, V_win, self.w)
         log("prefill.win", O_win=O_win)
@@ -1265,7 +1270,9 @@ class NSAAttention(nn.Module):
                         .expand(B, G, h, v.shape[2], self.d_v)
                         .reshape(B * G * h, v.shape[2], self.d_v)
                     )
-                    _ = F.scaled_dot_product_attention(q2.contiguous(), k2.contiguous(), v2.contiguous(), is_causal=True)
+                    _ = F.scaled_dot_product_attention(
+                        q2.contiguous(), k2.contiguous(), v2.contiguous(), is_causal=True
+                    )
                 return "flash"
             except Exception:
                 return "fallback"
@@ -1390,12 +1397,7 @@ class NSAAttention(nn.Module):
         B, G, h, Dk = Q.shape
         S = K.shape[2]
         q = Q.reshape(B * G * h, 1, Dk).contiguous()
-        k = (
-            K.unsqueeze(2)
-            .expand(B, G, h, S, Dk)
-            .reshape(B * G * h, S, Dk)
-            .contiguous()
-        )
+        k = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B * G * h, S, Dk).contiguous()
         v = (
             V.unsqueeze(2)
             .expand(B, G, h, S, V.shape[-1])
