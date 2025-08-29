@@ -10,7 +10,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -49,7 +49,7 @@ class TinyLM(nn.Module):
         self.grad_checkpointing = bool(grad_checkpointing)
         # Optional: restrict checkpointing to a layer range via env (e.g., "1:6")
         gc_rng_env = os.getenv("NSA_GC_RANGE", "").strip()
-        self._gc_range: tuple[int, int] | None = None
+        self._gc_range: Optional[Tuple[int, int]] = None
         if gc_rng_env:
             try:
                 parts = gc_rng_env.split(":")
@@ -494,8 +494,8 @@ def main():
             return
         try:
             mod = m.module if hasattr(m, "module") else m
-            dcounts: dict[str, int] = {}
-            lines: list[str] = []
+            dcounts: Dict[str, int] = {}
+            lines: List[str] = []
             for name, p in mod.named_parameters():
                 dt = str(p.dtype)
                 dcounts[dt] = dcounts.get(dt, 0) + int(p.numel())
@@ -720,8 +720,8 @@ def main():
     # --- Optional tracing: per-parameter grad arrival & module backward ---
     trace_grads = os.getenv("NSA_TRACE_GRADS", "0").lower() in ("1", "true", "yes")
     trace_mod_bwd = os.getenv("NSA_TRACE_MODULE_BWD", "0").lower() in ("1", "true", "yes")
-    grad_seen: dict[str, tuple[torch.Size, bool]] = {}
-    mod_bwd_seen: dict[int, str] = {}
+    grad_seen: Dict[str, Tuple[torch.Size, bool]] = {}
+    mod_bwd_seen: Dict[int, str] = {}
 
     def _register_grad_tracer():
         nonlocal grad_seen

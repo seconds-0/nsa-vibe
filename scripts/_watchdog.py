@@ -25,9 +25,10 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Optional, Dict, Tuple
 
 
-def read_last_heartbeat(path: Path) -> dict | None:
+def read_last_heartbeat(path: Path) -> Optional[Dict]:
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -45,7 +46,7 @@ def read_last_heartbeat(path: Path) -> dict | None:
     return None
 
 
-def read_last_csv_row(path: Path) -> tuple[int, float, float, float] | None:
+def read_last_csv_row(path: Path) -> Optional[Tuple[int, float, float, float]]:
     try:
         with open(path) as f:
             lines = f.read().strip().splitlines()

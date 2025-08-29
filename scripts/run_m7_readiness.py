@@ -23,10 +23,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
-def run_cmd(cmd: List[str], outfile: Path, env: Dict[str, str] | None = None) -> Tuple[int, float]:
+def run_cmd(cmd: List[str], outfile: Path, env: Optional[Dict[str, str]] = None) -> Tuple[int, float]:
     outfile.parent.mkdir(parents=True, exist_ok=True)
     ts = time.time()
     with open(outfile, "w", encoding="utf-8", errors="ignore") as f:

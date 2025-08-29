@@ -1,4 +1,5 @@
 import os
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -38,7 +39,7 @@ def _normalize_ranges_tensor(ranges: torch.Tensor, S_kv: int) -> torch.Tensor:
     return t.clamp(min=0, max=S_kv)
 
 
-_PACK_CACHE: dict[int, dict[str, torch.Tensor]] = {}
+_PACK_CACHE: Dict[int, Dict[str, torch.Tensor]] = {}
 _DEVICE_LOGGED: bool = False
 _PACK_CACHE_MAX_ENTRIES: int = int(os.getenv("NSA_SEL_TRITON_PACK_CACHE_MAX_ENTRIES", "4"))
 _PACK_CACHE_MAX_MB: int = int(os.getenv("NSA_SEL_TRITON_PACK_CACHE_MAX_MB", "512"))  # soft cap
@@ -352,7 +353,7 @@ def selection_attention_triton(
                 L_i = sum(e - s for (s, e) in spans)
                 idx_map.append((b, t, g, L_i, spans))
 
-    buckets: dict[int, list[tuple[int, int, int, list[tuple[int, int]]]]] = {}
+    buckets: Dict[int, List[Tuple[int, int, int, List[Tuple[int, int]]]]] = {}
     for b, t, g, L_i, spans in idx_map:
         buckets.setdefault(L_i, []).append((b, t, g, spans))
 

@@ -1,3 +1,5 @@
+from typing import List
+
 import torch
 
 
@@ -21,7 +23,7 @@ def compute_compressed_lengths(
     return torch.where(tpos + 1 < l, 0, ((tpos + 1 - l) // d) + 1).clamp(min=0, max=S_cmp)
 
 
-def build_length_buckets(lengths: torch.Tensor) -> list[torch.Tensor]:
+def build_length_buckets(lengths: torch.Tensor) -> List[torch.Tensor]:
     """
     Group row indices by identical length.
     Args:
@@ -34,7 +36,7 @@ def build_length_buckets(lengths: torch.Tensor) -> list[torch.Tensor]:
     unique = torch.unique(lengths, sorted=True)
     # sort descending so larger buckets processed first
     unique = torch.flip(unique, dims=[0])
-    buckets: list[torch.Tensor] = []
+    buckets: List[torch.Tensor] = []
     for L in unique.tolist():
         idx = torch.nonzero(lengths == int(L), as_tuple=False).flatten()
         buckets.append(idx)

@@ -10,6 +10,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, List, Dict, Tuple
 
 import yaml
 
@@ -21,9 +22,9 @@ class BenchmarkData:
     device: str
     torch_version: str
     cuda_version: str
-    sliding_results: list[dict]  # List of {S, w, speedup, masked_ms, fa2_ms}
-    compressed_results: list[dict]  # List of {S, speedup, masked_ms, fa2_ms}
-    selection_rows: list[dict] | None = None
+    sliding_results: List[Dict]  # List of {S, w, speedup, masked_ms, fa2_ms}
+    compressed_results: List[Dict]  # List of {S, speedup, masked_ms, fa2_ms}
+    selection_rows: Optional[List[Dict]] = None
 
 
 class ThresholdOptimizer:
@@ -38,7 +39,7 @@ class ThresholdOptimizer:
         """
         self.safety_margin = safety_margin
 
-    def parse_bench_output(self, output: str) -> tuple[list[dict], list[dict]]:
+    def parse_bench_output(self, output: str) -> Tuple[List[Dict], List[Dict]]:
         """
         Parse raw benchmark output from bench_fa2.py.
 
@@ -79,7 +80,7 @@ class ThresholdOptimizer:
 
         return sliding_results, compressed_results
 
-    def load_modal_results(self, json_path: str | Path) -> BenchmarkData:
+    def load_modal_results(self, json_path: Path) -> BenchmarkData:
         """Load results from Modal benchmark JSON output."""
         with open(json_path) as f:
             data = json.load(f)
@@ -240,10 +241,10 @@ class ThresholdOptimizer:
 
     def update_config(
         self,
-        config_path: str | Path,
+        config_path: Path,
         win_threshold: int,
         cmp_threshold: int,
-        sel_threshold: int | None = None,
+        sel_threshold: Optional[int] = None,
         backup: bool = True,
     ) -> None:
         """
@@ -285,7 +286,7 @@ class ThresholdOptimizer:
         data: BenchmarkData,
         win_threshold: int,
         cmp_threshold: int,
-        sel_threshold: int | None = None,
+        sel_threshold: Optional[int] = None,
     ) -> str:
         """Generate markdown report of benchmark results and recommendations."""
         sel_line = (

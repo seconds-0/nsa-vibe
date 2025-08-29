@@ -1,5 +1,6 @@
 import os
 import time
+from typing import Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -20,8 +21,8 @@ from nsa.kernels.flash_wrappers import (
 )
 
 # Simple grow-on-demand workspaces for varlen packing to avoid frequent allocations
-_VARLEN_WS: dict[tuple, dict[str, torch.Tensor]] = {}
-_SEL_PACK_WS: dict[tuple, dict[str, torch.Tensor]] = {}
+_VARLEN_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
+_SEL_PACK_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 
 
 def _get_varlen_workspace(

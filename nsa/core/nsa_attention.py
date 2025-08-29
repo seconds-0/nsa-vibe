@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -1278,7 +1278,7 @@ class NSAAttention(nn.Module):
         p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
 
         outs = []
-        sel_ranges_accum: list[torch.Tensor] = []
+        sel_ranges_accum: List[torch.Tensor] = []
         for t in range(S):
             p_grp = p_grp_all[:, t]  # [B,G,S_sel]
             sel_ranges = select_topn_ranges(p_grp, kv.meta, self.n_sel, t, True, 2)

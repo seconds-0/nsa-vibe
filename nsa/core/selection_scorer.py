@@ -1,4 +1,5 @@
 import os
+from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -206,7 +207,7 @@ def select_topn_ranges(
                 continue
             cur_s = int(blocks[0].item())
             cur_e = cur_s + meta.l_sel
-            merged: list[tuple[int, int]] = []
+            merged: List[Tuple[int, int]] = []
             for x in blocks[1:].tolist():
                 if x == cur_e:  # adjacent
                     cur_e += meta.l_sel
