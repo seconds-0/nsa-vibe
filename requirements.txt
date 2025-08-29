@@ -12,3 +12,4 @@ pytest
 hypothesis
 ruff
 mypy
+pre-commit

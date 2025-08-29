@@ -13,6 +13,7 @@ tomli
 ruff
 mypy
 tensorboard
+pre-commit
 
 # Dependencies for pytest and mypy
 pluggy
