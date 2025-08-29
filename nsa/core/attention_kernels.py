@@ -349,41 +349,41 @@ def grouped_selection_attention_packed(
             need_new = (
                 ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
             )
-        if need_new:
-            # Allow pre-sizing via env to reduce reallocations
-            # Bounded to prevent excessive memory allocation (max 100K rows, 10K length)
-            reserve_N = _env_int_bounded("NSA_SEL_PACK_RESERVE_N", 0, 0, 10**5)
-            reserve_L = _env_int_bounded("NSA_SEL_PACK_RESERVE_L", 0, 0, 10**4)
-            new_N = max(N, reserve_N)
-            new_L = max(L, reserve_L)
-            Qb = torch.empty((new_N, h, Dk), dtype=Q.dtype, device=device)
-            Kb = torch.empty((new_N, new_L, Dk), dtype=K.dtype, device=device)
-            Vb = torch.empty((new_N, new_L, V.shape[-1]), dtype=V.dtype, device=device)
-            _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
-        else:
-            Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
-            Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
-            Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
-        # Populate workspace buffers and perform SDPA (execute for both new and reused workspaces)
-        map_rows = []
-        for j, ridx in enumerate(bucket_idx):
-            b, t, g, idx = rows[ridx]
-            Qb[j] = Q[b, t, g]  # [h,Dk]
-            Kb[j] = K[b, g, idx]  # [L,Dk]
-            Vb[j] = V[b, g, idx]  # [L,Dv]
-            map_rows.append((b, t, g))
-        # SDPA per bucket: expand per-head
-        q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
-        q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
-        k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
-        v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
-        attn = F.scaled_dot_product_attention(
-            q_btgh, k_btgh, v_btgh, is_causal=True
-        )  # [N,h,1,Dv]
-        Ob = attn.squeeze(2)  # [N,h,Dv]
-        # Scatter back
-        for j, (b, t, g) in enumerate(map_rows):
-            out[b, t, g] = Ob[j]
+            if need_new:
+                # Allow pre-sizing via env to reduce reallocations
+                # Bounded to prevent excessive memory allocation (max 100K rows, 10K length)
+                reserve_N = _env_int_bounded("NSA_SEL_PACK_RESERVE_N", 0, 0, 10**5)
+                reserve_L = _env_int_bounded("NSA_SEL_PACK_RESERVE_L", 0, 0, 10**4)
+                new_N = max(N, reserve_N)
+                new_L = max(L, reserve_L)
+                Qb = torch.empty((new_N, h, Dk), dtype=Q.dtype, device=device)
+                Kb = torch.empty((new_N, new_L, Dk), dtype=K.dtype, device=device)
+                Vb = torch.empty((new_N, new_L, V.shape[-1]), dtype=V.dtype, device=device)
+                _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
+            else:
+                Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
+                Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
+                Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
+            # Populate workspace buffers and perform SDPA (execute for both new and reused workspaces)
+            map_rows = []
+            for j, ridx in enumerate(bucket_idx):
+                b, t, g, idx = rows[ridx]
+                Qb[j] = Q[b, t, g]  # [h,Dk]
+                Kb[j] = K[b, g, idx]  # [L,Dk]
+                Vb[j] = V[b, g, idx]  # [L,Dv]
+                map_rows.append((b, t, g))
+            # SDPA per bucket: expand per-head
+            q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
+            q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
+            k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
+            v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
+            attn = F.scaled_dot_product_attention(
+                q_btgh, k_btgh, v_btgh, is_causal=True
+            )  # [N,h,1,Dv]
+            Ob = attn.squeeze(2)  # [N,h,Dv]
+            # Scatter back
+            for j, (b, t, g) in enumerate(map_rows):
+                out[b, t, g] = Ob[j]
     return out
 
 
@@ -458,8 +458,11 @@ def selection_attention_varlen_all(
             seg_k = K[b, g, s0:e0]  # [Lseg,Dk]
             seg_v = V[b, g, s0:e0]  # [Lseg,Dv]
             Lseg = e0 - s0
-            k_pack[write_pos : write_pos + Lseg] = seg_k.unsqueeze(1).expand(Lseg, h, Dk)
-            v_pack[write_pos : write_pos + Lseg] = seg_v.unsqueeze(1).expand(Lseg, h, Dv)
+            # Assign using explicit expand_as to match target slice shape and avoid view pitfalls
+            _kslice = k_pack[write_pos : write_pos + Lseg]
+            _vslice = v_pack[write_pos : write_pos + Lseg]
+            _kslice.copy_(seg_k[:, None, :].expand_as(_kslice))
+            _vslice.copy_(seg_v[:, None, :].expand_as(_vslice))
             write_pos += Lseg
         cuq[i + 1] = cuq[i] + 1
         cuk[i + 1] = cuk[i] + lens[i]
@@ -503,13 +506,12 @@ def selection_attention_varlen_all(
                 Vb[j, write : write + Lseg] = V[b, g, s0:e0]
                 write += Lseg
             tgt.append((b, t, g))
-        # Call dense batch attention (FA‑2 dense if available; else SDPA) with causal=True
-        q_rows = Qb.unsqueeze(1).permute(0, 2, 1, 3)  # [Nb,h,1,Dk]
-        k_rows = Kb.unsqueeze(1).expand(Nb, h, L, Dk)
-        v_rows = Vb.unsqueeze(1).expand(Nb, h, L, Dv)
-        Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)  # [Nb,h,Dv]
+        # Per-row fallback using attention_bgh to preserve exact semantics
         for j, (b, t, g) in enumerate(tgt):
-            out[b, t, g] = Ob[j]
+            q_btgh = Qb[j].unsqueeze(0).unsqueeze(0)  # [1,1,h,Dk]
+            k_btgh = Kb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dk]
+            v_btgh = Vb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dv]
+            out[b, t, g] = attention_bgh(q_btgh, k_btgh, v_btgh, causal=True)[0, 0]
     return out
 
 
