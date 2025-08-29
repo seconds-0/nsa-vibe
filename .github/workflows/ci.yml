@@ -22,11 +22,7 @@ jobs:
           python -m pip install -U pip
           python -m pip install -U uv
           uv venv -p 3.11 .venv
-          # Install CPU torch first to avoid CUDA dependencies
-          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
-          # Then install other dependencies
-          uv pip install numpy hydra-core omegaconf pydantic pytest hypothesis sortedcontainers
-          uv pip install ruff mypy tensorboard
+          uv pip sync requirements-cpu.txt
 
       - name: Environment diagnostics
         run: |
@@ -44,9 +40,6 @@ jobs:
         run: |
           uv run mypy --version || true
           uv run mypy nsa || true
-      - name: Ensure Python deps for Hydra (antlr4 runtime)
-        run: |
-          uv pip install antlr4-python3-runtime
 
       - name: Collect tests (CPU)
         env:
@@ -84,10 +77,7 @@ jobs:
           python -m pip install -U pip
           python -m pip install -U uv
           uv venv -p 3.11 .venv
-          # Install CPU torch first to avoid CUDA dependencies
-          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
-          # Then install other dependencies
-          uv pip install numpy hydra-core omegaconf pydantic pytest hypothesis sortedcontainers
+          uv pip sync requirements-cpu.txt
 
       - name: Run batched prefill smoke (CPU)
         env:
