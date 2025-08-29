@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from nsa.cache.kv_cache import NSA_KV
 from nsa.core.block_index import build_block_meta
 from nsa.core.nsa_attention import NSAAttention
+from nsa.core.rope import apply_rope
 
 
 def full_attention_reference_from_nsa_weights(x: torch.Tensor, nsa: NSAAttention) -> torch.Tensor:
@@ -29,6 +30,11 @@ def full_attention_reference_from_nsa_weights(x: torch.Tensor, nsa: NSAAttention
         .repeat_interleave(nsa.h_per_group, dim=2)
         .permute(0, 2, 1, 3)
     )  # [B,H,S,Dv]
+    # Apply RoPE to align with model invariants
+    pos = torch.arange(S, device=x.device)
+    scale = getattr(nsa, "rope_scale", 1.0)
+    Q = apply_rope(Q, pos, scale=scale)
+    K = apply_rope(K, pos, scale=scale)
     out = []
     for t in range(S):
         q = Q[:, :, t : t + 1]

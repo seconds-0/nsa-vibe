@@ -866,6 +866,10 @@ class NSAAttention(nn.Module):
         V_sel = self._shape_kv(self.W_V_sel(x), B, S)
         K_win = self._shape_kv(self.W_K_win(x), B, S)
         V_win = self._shape_kv(self.W_V_win(x), B, S)
+        # Align sequential prefill with PRD: apply RoPE to per-branch K
+        pos_k = torch.arange(S, device=x.device)
+        K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
+        K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
         K_cmp_raw = self._shape_kv(self.W_K_cmp(x), B, S)
         V_cmp_raw = self._shape_kv(self.W_V_cmp(x), B, S)
         G = self.n_kv_groups
