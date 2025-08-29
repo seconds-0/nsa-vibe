@@ -387,6 +387,132 @@ def grouped_selection_attention_packed(
     return out
 
 
+def selection_attention_varlen_all(
+    Q: torch.Tensor,  # [B,S,G,h,Dk]
+    K: torch.Tensor,  # [B,G,S_kv,Dk]
+    V: torch.Tensor,  # [B,G,S_kv,Dv]
+    ranges: torch.Tensor,  # [B,S,G,n,2]
+) -> torch.Tensor:  # [B,S,G,h,Dv]
+    """
+    Fully batched selection attention using varlen packing across all (B,S,G) rows.
+
+    - Packs rows with L>0 into q/k/v flat buffers with cu_seqlens.
+    - Prefers FA‑2 varlen when available; falls back to dense batching per fixed L.
+    - Final fallback returns zeros for rows with L==0 (no allowed keys).
+    """
+    B, S, G, h, Dk = Q.shape
+    device = Q.device
+    Dv = V.shape[-1]
+    out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
+    # Build row list and lengths from ranges (sum of segment lengths)
+    rows: list[tuple[int, int, int]] = []
+    lens: list[int] = []
+    for b in range(B):
+        for t in range(S):
+            for g in range(G):
+                L = 0
+                for i in range(ranges.shape[3]):
+                    s0 = int(ranges[b, t, g, i, 0].item())
+                    e0 = int(ranges[b, t, g, i, 1].item())
+                    if e0 > s0:
+                        L += (e0 - s0)
+                if L > 0:
+                    rows.append((b, t, g))
+                    lens.append(L)
+    N = len(rows)
+    if N == 0:
+        return out
+
+    total_k = int(sum(lens))
+    # Workspace-backed packing
+    ws = _get_varlen_workspace(
+        device,
+        dtype_q=Q.dtype,
+        dtype_k=K.dtype,
+        dtype_v=V.dtype,
+        h=h,
+        d_k=Dk,
+        d_v=Dv,
+        cap_N=N,
+        cap_total_k=total_k,
+    )
+    q_pack = ws["q"][:N]
+    k_pack = ws["k"][:total_k]
+    v_pack = ws["v"][:total_k]
+    cuq = ws["cuq"][: N + 1]
+    cuk = ws["cuk"][: N + 1]
+    # Fill cu_seqlens
+    cuq.zero_()
+    cuk.zero_()
+    # Pack per row
+    write_pos = 0
+    for i, (b, t, g) in enumerate(rows):
+        # q for row
+        q_pack[i] = Q[b, t, g]
+        # iterate segments for this row
+        for j in range(ranges.shape[3]):
+            s0 = int(ranges[b, t, g, j, 0].item())
+            e0 = int(ranges[b, t, g, j, 1].item())
+            if e0 <= s0:
+                continue
+            seg_k = K[b, g, s0:e0]  # [Lseg,Dk]
+            seg_v = V[b, g, s0:e0]  # [Lseg,Dv]
+            Lseg = e0 - s0
+            k_pack[write_pos : write_pos + Lseg] = seg_k.unsqueeze(1).expand(Lseg, h, Dk)
+            v_pack[write_pos : write_pos + Lseg] = seg_v.unsqueeze(1).expand(Lseg, h, Dv)
+            write_pos += Lseg
+        cuq[i + 1] = cuq[i] + 1
+        cuk[i + 1] = cuk[i] + lens[i]
+    # Try FA‑2 varlen if available and supported
+    ok, _ = fa2_supported_verbose(device, Q.dtype, Dk)
+    if ok and is_flash_varlen_available():
+        try:
+            o_pack = attention_fa2_varlen(
+                q_pack, k_pack, v_pack, cuq, cuk, max_seqlen_q=1, max_seqlen_k=max(lens), causal=True
+            )  # [N,h,Dv]
+            # Scatter back
+            for i, (b, t, g) in enumerate(rows):
+                out[b, t, g] = o_pack[i]
+            return out
+        except Exception:
+            pass
+    # Dense batch per fixed L bucket as fallback
+    buckets: dict[int, list[int]] = {}
+    for i, L in enumerate(lens):
+        buckets.setdefault(L, []).append(i)
+    for L, idxs in buckets.items():
+        if L <= 0 or len(idxs) == 0:
+            continue
+        Nb = len(idxs)
+        Qb = torch.empty((Nb, h, Dk), dtype=Q.dtype, device=device)
+        Kb = torch.empty((Nb, L, Dk), dtype=K.dtype, device=device)
+        Vb = torch.empty((Nb, L, Dv), dtype=V.dtype, device=device)
+        tgt: list[tuple[int, int, int]] = []
+        for j, irow in enumerate(idxs):
+            b, t, g = rows[irow]
+            Qb[j] = Q[b, t, g]
+            # Rebuild fixed-length K/V for this row from ranges
+            write = 0
+            for rj in range(ranges.shape[3]):
+                s0 = int(ranges[b, t, g, rj, 0].item())
+                e0 = int(ranges[b, t, g, rj, 1].item())
+                if e0 <= s0:
+                    continue
+                Lseg = e0 - s0
+                Kb[j, write : write + Lseg] = K[b, g, s0:e0]
+                Vb[j, write : write + Lseg] = V[b, g, s0:e0]
+                write += Lseg
+            tgt.append((b, t, g))
+        # Call dense batch attention (FA‑2 dense if available; else SDPA) with causal=True
+        q_rows = Qb.unsqueeze(1).permute(0, 2, 1, 3)  # [Nb,h,1,Dk]
+        k_rows = Kb.unsqueeze(1).expand(Nb, h, L, Dk)
+        v_rows = Vb.unsqueeze(1).expand(Nb, h, L, Dv)
+        Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(1)  # [Nb,h,Dv]
+        for j, (b, t, g) in enumerate(tgt):
+            out[b, t, g] = Ob[j]
+    return out
+
+
 def grouped_selection_attention_masked(
     Q: torch.Tensor,  # [B,S,G,h,Dk]
     K: torch.Tensor,  # [B,G,S_kv,Dk]

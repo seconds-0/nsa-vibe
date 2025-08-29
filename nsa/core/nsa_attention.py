@@ -266,6 +266,7 @@ class NSAAttention(nn.Module):
             "use_sel_pack": parse_bool("NSA_USE_SEL_PACK", "1"),
             "use_triton_sel": parse_bool("NSA_USE_TRITON_SEL", "0") or self.use_triton_sel,
             "use_cuda_sel": parse_bool("NSA_SEL_CUDA", "0"),
+            "use_sel_varlen": parse_bool("NSA_USE_SEL_VARLEN", "0"),
             "fa2_all": parse_bool("NSA_USE_FA2", "0"),
             "fa2_win": parse_bool("NSA_USE_FA2_WIN", "0"),
             "fa2_cmp": parse_bool("NSA_USE_FA2_CMP", "0"),
@@ -1067,6 +1068,7 @@ class NSAAttention(nn.Module):
 
         # Selected ranges attention (prefer Triton if enabled; else packed/gather)
         use_sel_pack = self._env_cache.get("use_sel_pack", True) and not force_parity
+        use_sel_varlen = self._env_cache.get("use_sel_varlen", False) and not force_parity
         use_triton_sel = (
             self._env_cache.get("use_triton_sel", False) or self.use_triton_sel and not force_parity
         )
@@ -1083,6 +1085,22 @@ class NSAAttention(nn.Module):
                     "warn.triton_selection_prefill_fallback",
                     error=str(e),
                     total_fails=self._fallback_counters["selection_triton_fails"],
+                )
+                # Fallback to packed SDPA
+                O_sel = grouped_selection_attention_packed(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+        elif use_sel_varlen:
+            try:
+                from nsa.core.attention_kernels import selection_attention_varlen_all
+
+                O_sel = selection_attention_varlen_all(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+            except Exception as e:
+                # Fallback counter reuse for selection pack failures
+                self._fallback_counters["selection_pack_fails"] += 1
+                self._fallback_counters["total_fallbacks"] += 1
+                log(
+                    "warn.selection_varlen_prefill_fallback",
+                    error=str(e),
+                    total_fails=self._fallback_counters["selection_pack_fails"],
                 )
                 # Fallback to packed SDPA
                 O_sel = grouped_selection_attention_packed(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
