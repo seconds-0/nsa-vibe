@@ -93,7 +93,6 @@ def _compute_gate_stats(gates: torch.Tensor) -> dict:
     """
     with torch.no_grad():
         # Flatten to [*, 3] for consistent computation
-        original_shape = gates.shape
         gates_flat = gates.view(-1, 3)
 
         # Gate entropy (should be > 0.5 for healthy mixing)
@@ -757,9 +756,13 @@ class NSAAttention(nn.Module):
                             total_fails=self._fallback_counters["sliding_fa2_fails"],
                         )
                         # Fallback to standard attention
-                        O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
+                        O_win = attention_bgh(
+                            Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True
+                        )
                 else:
-                    O_win = attention_bgh(Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True)
+                    O_win = attention_bgh(
+                        Q_t.contiguous(), K_w.contiguous(), V_w.contiguous(), causal=True
+                    )
                 S_cmp_t = kv.K_cmp.shape[2]
 
                 # M8: Assert causal masking - compressed bounds in decode
@@ -870,7 +873,7 @@ class NSAAttention(nn.Module):
         assert K_win.shape[:3] == (B, G, S) and V_win.shape[:3] == (B, G, S)
         assert K_cmp_raw.shape[:3] == (B, G, S) and V_cmp_raw.shape[:3] == (B, G, S)
 
-        # Align RoPE application across branches for batched path (Q already RoPE'd)
+        # Apply RoPE to per-branch K tensors (Q already has RoPE applied)
         pos_k = torch.arange(S, device=x.device)
         K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
         K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
@@ -1046,6 +1049,7 @@ class NSAAttention(nn.Module):
         # Strict finite check and fallback
         if strict_asserts and not torch.isfinite(O_cmp).all():
             from nsa.core.attention_kernels import batched_causal_attention_compressed_masked
+
             log("warn.prefill_cmp_nonfinite_fallback")
             O_cmp = batched_causal_attention_compressed_masked(
                 Q, kv.K_cmp, kv.V_cmp, self.l, self.d
@@ -1122,13 +1126,13 @@ class NSAAttention(nn.Module):
                     total_fails=self._fallback_counters["sliding_fa2_fails"],
                 )
                 # Fallback to masked SDPA
-                from nsa.core.attention_kernels import sliding_window_attention_masked
+                from nsa.core.attention_kernels import sliding_window_attention
 
-                O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
+                O_win = sliding_window_attention(Q, K_win, V_win, self.w)
         elif use_win_mask:
-            from nsa.core.attention_kernels import sliding_window_attention_masked
+            from nsa.core.attention_kernels import sliding_window_attention
 
-            O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
+            O_win = sliding_window_attention(Q, K_win, V_win, self.w)
         else:
             # Sliding per-t using the same kernel as sequential
             O_win = torch.zeros(
@@ -1154,9 +1158,10 @@ class NSAAttention(nn.Module):
                 v_t = V_win[:, :, start:end, :].contiguous()
                 O_win[:, t] = attention_bgh(q_t, k_t, v_t, causal=True)
         if strict_asserts and not torch.isfinite(O_win).all():
-            from nsa.core.attention_kernels import sliding_window_attention_masked
+            from nsa.core.attention_kernels import sliding_window_attention
+
             log("warn.prefill_win_nonfinite_fallback")
-            O_win = sliding_window_attention_masked(Q, K_win, V_win, self.w)
+            O_win = sliding_window_attention(Q, K_win, V_win, self.w)
         log("prefill.win", O_win=O_win)
 
         # Gates and combine
@@ -1265,7 +1270,9 @@ class NSAAttention(nn.Module):
                         .expand(B, G, h, v.shape[2], self.d_v)
                         .reshape(B * G * h, v.shape[2], self.d_v)
                     )
-                    _ = F.scaled_dot_product_attention(q2.contiguous(), k2.contiguous(), v2.contiguous(), is_causal=True)
+                    _ = F.scaled_dot_product_attention(
+                        q2.contiguous(), k2.contiguous(), v2.contiguous(), is_causal=True
+                    )
                 return "flash"
             except Exception:
                 return "fallback"
@@ -1316,6 +1323,11 @@ class NSAAttention(nn.Module):
         V_win = self._shape_kv(self.W_V_win(x), B, S)
         K_cmp_raw = self._shape_kv(self.W_K_cmp(x), B, S)
         V_cmp_raw = self._shape_kv(self.W_V_cmp(x), B, S)
+        
+        # Apply RoPE to per-branch K tensors to align with batched path
+        pos_k = torch.arange(S, device=x.device)
+        K_sel = apply_rope(K_sel, pos_k, scale=getattr(self, "rope_scale", 1.0))
+        K_win = apply_rope(K_win, pos_k, scale=getattr(self, "rope_scale", 1.0))
 
         kv.update_selection_raw(K_sel, V_sel)
         kv.meta = build_block_meta(
@@ -1390,12 +1402,7 @@ class NSAAttention(nn.Module):
         B, G, h, Dk = Q.shape
         S = K.shape[2]
         q = Q.reshape(B * G * h, 1, Dk).contiguous()
-        k = (
-            K.unsqueeze(2)
-            .expand(B, G, h, S, Dk)
-            .reshape(B * G * h, S, Dk)
-            .contiguous()
-        )
+        k = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B * G * h, S, Dk).contiguous()
         v = (
             V.unsqueeze(2)
             .expand(B, G, h, S, V.shape[-1])
