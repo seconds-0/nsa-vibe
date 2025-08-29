@@ -25,9 +25,11 @@ from nsa.kernels.flash_wrappers import (
 _VARLEN_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 _SEL_PACK_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 
+
 def clear_varlen_workspaces() -> None:
     """Optional memory cleanup: free varlen packing workspaces."""
     _VARLEN_WS.clear()
+
 
 def clear_selection_pack_workspaces() -> None:
     """Optional memory cleanup: free selection pack workspaces."""
@@ -266,8 +268,7 @@ def grouped_selection_attention_packed(
     unique_L = torch.unique(lengths_t)
     # Enable autograd-safe packing during training or when forced by env
     use_safe_pack = (
-        torch.is_grad_enabled()
-        and (Q.requires_grad or K.requires_grad or V.requires_grad)
+        torch.is_grad_enabled() and (Q.requires_grad or K.requires_grad or V.requires_grad)
     ) or _env_bool("NSA_TRAIN_SAFE_PACK", False)
 
     for Lval in unique_L.tolist():
@@ -328,7 +329,9 @@ def grouped_selection_attention_packed(
             q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
             k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
             v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
-            attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)  # [N,h,1,Dv]
+            attn = F.scaled_dot_product_attention(
+                q_btgh, k_btgh, v_btgh, is_causal=True
+            )  # [N,h,1,Dv]
             Ob = attn.squeeze(2)  # [N,h,Dv]
             # Scatter back
             for j, (b, t, g) in enumerate(map_rows):
@@ -355,7 +358,7 @@ def grouped_selection_attention_masked(
     # Vectorized allowed mask [B,S,G,S_kv] from ranges using difference array
     n = ranges.shape[3]
     starts = ranges[..., 0].to(torch.int64).clamp_(0, S_kv)  # [B,S,G,n]
-    ends = ranges[..., 1].to(torch.int64).clamp_(0, S_kv)    # [B,S,G,n]
+    ends = ranges[..., 1].to(torch.int64).clamp_(0, S_kv)  # [B,S,G,n]
     BSG = B * S * G
     starts_f = starts.reshape(BSG, n)
     ends_f = ends.reshape(BSG, n)
@@ -367,18 +370,8 @@ def grouped_selection_attention_masked(
 
     # Prepare SDPA tensors: [B,G*h,S, D*] and mask [B,G*h,S,S_kv]
     Qf = Q.reshape(B, S, G * h, Dk).transpose(1, 2).contiguous()  # [B,G*h,S,Dk]
-    Kf = (
-        K.unsqueeze(2)
-        .expand(-1, -1, h, -1, -1)
-        .reshape(B, G * h, S_kv, Dk)
-        .contiguous()
-    )
-    Vf = (
-        V.unsqueeze(2)
-        .expand(-1, -1, h, -1, -1)
-        .reshape(B, G * h, S_kv, V.shape[-1])
-        .contiguous()
-    )
+    Kf = K.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(B, G * h, S_kv, Dk).contiguous()
+    Vf = V.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(B, G * h, S_kv, V.shape[-1]).contiguous()
     zeros = torch.zeros((B, G * h, S, S_kv), dtype=Qf.dtype, device=device)
     neg_inf = torch.full((B, G * h, S, S_kv), float("-inf"), dtype=Qf.dtype, device=device)
     Mf = torch.where(
@@ -445,7 +438,9 @@ def sliding_window_attention_fa2(
             log("fa2.gate_skip", branch="win", reason="sm89_guard", forced=bool(_fa2_forced()))
         return sliding_window_attention(Q, K, V, w)
     # Policy guard
-    if not allow_sliding_fa2 and not (_env_bool("NSA_FA2_FORCE_VARLEN", False) or _env_bool("NSA_FA2_FORCE_DENSE", False)):
+    if not allow_sliding_fa2 and not (
+        _env_bool("NSA_FA2_FORCE_VARLEN", False) or _env_bool("NSA_FA2_FORCE_DENSE", False)
+    ):
         if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
             log("fa2.gate_skip", branch="win", reason="unsupported_sliding_semantics", forced=False)
         return sliding_window_attention(Q, K, V, w)
@@ -467,7 +462,13 @@ def sliding_window_attention_fa2(
     # Small-length auto-switch to masked SDPA
     if max_len < min_len_for_fa2:
         if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
-            log("fa2.gate_skip", branch="win", reason="below_min_len", max_len=int(max_len), min_len=int(min_len_for_fa2))
+            log(
+                "fa2.gate_skip",
+                branch="win",
+                reason="below_min_len",
+                max_len=int(max_len),
+                min_len=int(min_len_for_fa2),
+            )
         return sliding_window_attention(Q, K, V, w)
     # Capability check
     ok, why = fa2_supported_verbose(device, Q.dtype, Dk)
@@ -572,11 +573,21 @@ def sliding_window_attention_fa2(
                                     ks = k_pack[cuk[i] : cuk[i + 1]]  # [L,h,Dk]
                                     kv = K[b_i, g_i, s_i:e_i].unsqueeze(1).expand(-1, h, -1)
                                     if ks.shape != kv.shape:
-                                        log("warn.fa2_win_pack_shape", row=i, ks=ks.shape, kv=kv.shape)
+                                        log(
+                                            "warn.fa2_win_pack_shape",
+                                            row=i,
+                                            ks=ks.shape,
+                                            kv=kv.shape,
+                                        )
                                     else:
                                         md = float((ks - kv).abs().max().item())
                                         if md > 1e-3:
-                                            log("warn.fa2_win_pack_mismatch", row=i, L=L_i, max_diff=md)
+                                            log(
+                                                "warn.fa2_win_pack_mismatch",
+                                                row=i,
+                                                L=L_i,
+                                                max_diff=md,
+                                            )
                     except Exception:
                         pass
 
@@ -709,7 +720,13 @@ def compressed_attention_fa2(
             _ = build_cu_seqlens_for_buckets(blens)
     if max_len < min_len_for_fa2:
         if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
-            log("fa2.gate_skip", branch="cmp", reason="below_min_len", max_len=int(max_len), min_len=int(min_len_for_fa2))
+            log(
+                "fa2.gate_skip",
+                branch="cmp",
+                reason="below_min_len",
+                max_len=int(max_len),
+                min_len=int(min_len_for_fa2),
+            )
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     ok, why = fa2_supported_verbose(device, Q.dtype, Dk)
     if not ok or not is_flash_varlen_available():
@@ -879,7 +896,12 @@ def sliding_window_attention_fa2_decode(
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(q_t.device) and not _fa2_forced():
         if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
-            log("fa2.gate_skip", branch="win.decode", reason="sm89_guard", forced=bool(_fa2_forced()))
+            log(
+                "fa2.gate_skip",
+                branch="win.decode",
+                reason="sm89_guard",
+                forced=bool(_fa2_forced()),
+            )
         end = K_win.shape[2]
         win_len = min(w, end)
         if win_len == 0:
@@ -906,7 +928,13 @@ def sliding_window_attention_fa2_decode(
         min_len = 1
     if win_len < min_len:
         if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
-            log("fa2.gate_skip", branch="win.decode", reason="below_min_len", win_len=int(win_len), min_len=int(min_len))
+            log(
+                "fa2.gate_skip",
+                branch="win.decode",
+                reason="below_min_len",
+                win_len=int(win_len),
+                min_len=int(min_len),
+            )
         start = end - win_len
         return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
     start = end - win_len
@@ -936,7 +964,12 @@ def compressed_attention_fa2_decode(
     # Guard: disable FA-2 on Ada (SM 8.9) unless explicitly forced
     if _is_sm89(q_t.device) and not _fa2_forced():
         if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
-            log("fa2.gate_skip", branch="cmp.decode", reason="sm89_guard", forced=bool(_fa2_forced()))
+            log(
+                "fa2.gate_skip",
+                branch="cmp.decode",
+                reason="sm89_guard",
+                forced=bool(_fa2_forced()),
+            )
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     ok, why = fa2_supported_verbose(q_t.device, q_t.dtype, Dk)
     if not ok:
@@ -951,7 +984,13 @@ def compressed_attention_fa2_decode(
         min_len = 1
     if L < min_len:
         if os.getenv("NSA_DEBUG_TIMING", "0").lower() in ("1", "true", "yes"):
-            log("fa2.gate_skip", branch="cmp.decode", reason="below_min_len", L=int(L), min_len=int(min_len))
+            log(
+                "fa2.gate_skip",
+                branch="cmp.decode",
+                reason="below_min_len",
+                L=int(L),
+                min_len=int(min_len),
+            )
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     k = K_cmp[:, :, :L]
     v = V_cmp[:, :, :L]
