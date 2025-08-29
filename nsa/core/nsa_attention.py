@@ -82,6 +82,48 @@ class GateMLP(nn.Module):
         return p
 
 
+def _fused_gate_combine_bsg(
+    q_gp: torch.Tensor,  # [B,S,G,Dk]
+    O_cmp: torch.Tensor,  # [B,S,G,h,Dv]
+    O_sel: torch.Tensor,  # [B,S,G,h,Dv]
+    O_win: torch.Tensor,  # [B,S,G,h,Dv]
+    fc1_w: torch.Tensor,
+    fc1_b: Optional[torch.Tensor],
+    fc2_w: torch.Tensor,
+    fc2_b: Optional[torch.Tensor],
+    tau: float,
+) -> torch.Tensor:
+    import torch.nn.functional as _F
+    x = _F.silu(_F.linear(q_gp, fc1_w, fc1_b))
+    g = _F.linear(x, fc2_w, fc2_b) / max(tau, 1e-6)
+    p = _F.softmax(g, dim=-1)
+    w_cmp = p[..., 0:1].unsqueeze(-1)
+    w_sel = p[..., 1:2].unsqueeze(-1)
+    w_win = p[..., 2:3].unsqueeze(-1)
+    return w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
+
+
+def _fused_gate_combine_bg(
+    q_gp: torch.Tensor,  # [B,G,Dk]
+    O_cmp: torch.Tensor,  # [B,G,h,Dv]
+    O_sel: torch.Tensor,  # [B,G,h,Dv]
+    O_win: torch.Tensor,  # [B,G,h,Dv]
+    fc1_w: torch.Tensor,
+    fc1_b: Optional[torch.Tensor],
+    fc2_w: torch.Tensor,
+    fc2_b: Optional[torch.Tensor],
+    tau: float,
+) -> torch.Tensor:
+    import torch.nn.functional as _F
+    x = _F.silu(_F.linear(q_gp, fc1_w, fc1_b))
+    g = _F.linear(x, fc2_w, fc2_b) / max(tau, 1e-6)
+    p = _F.softmax(g, dim=-1)
+    w_cmp = p[..., 0:1].unsqueeze(-1)
+    w_sel = p[..., 1:2].unsqueeze(-1)
+    w_win = p[..., 2:3].unsqueeze(-1)
+    return w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
+
+
 def _compute_gate_stats(gates: torch.Tensor) -> dict:
     """Compute gate health statistics for monitoring.
 
@@ -277,6 +319,7 @@ class NSAAttention(nn.Module):
             "stopgrad_gates": parse_bool("NSA_STOPGRAD_GATES", "0"),
             "nvtx": parse_bool("NSA_NVTX", "0"),
             "debug_compare": parse_bool("NSA_DEBUG_COMPARE", "0"),
+            "gate_compile": parse_bool("NSA_GATE_COMPILE", "0"),
         }
 
         # Detect whether env overrides were explicitly provided so we can honor hard-disable
@@ -338,6 +381,9 @@ class NSAAttention(nn.Module):
                 self._prefill_tile = 0
         except (ValueError, TypeError):
             self._prefill_tile = 0
+        # Fused gate combine (lazy-compiled)
+        self._gate_fused_bsg = None
+        self._gate_fused_bg = None
 
     def _shape_q(self, Q: torch.Tensor, B: int, S: int) -> torch.Tensor:
         Q = Q.view(B, S, self.n_heads, self.d_k)
@@ -809,30 +855,69 @@ class NSAAttention(nn.Module):
                     )
                 # Preserve dtype for gate input
                 q_gp = Q_t.mean(dim=2, dtype=Q_t.dtype)
-                gates = self.gate(q_gp, tau=self.gate_temp)
-                if self._env_cache.get("stopgrad_gates", False):
-                    gates = gates.detach()
-
-                # Update gate statistics for M8 monitoring
-                self._update_gate_stats(gates)
-
-                # Observability: gate stats
-                try:
-                    log(
-                        "decode.gates",
-                        mean=gates.mean(dim=(-1, -2)).tolist()
-                        if gates.dim() >= 2
-                        else gates.mean().item(),
-                        std=gates.std(dim=(-1, -2)).tolist()
-                        if gates.dim() >= 2
-                        else gates.std().item(),
-                    )
-                except Exception as e:
-                    log("warn.decode.gate_log_fail", error=str(e))
-                w_cmp = gates[..., 0:1].unsqueeze(-1)
-                w_sel = gates[..., 1:2].unsqueeze(-1)
-                w_win = gates[..., 2:3].unsqueeze(-1)
-                O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
+                if self._env_cache.get("gate_compile", False):
+                    try:
+                        fused = self._gate_fused_bg
+                        if fused is None:
+                            fused = _fused_gate_combine_bg
+                            try:
+                                fused = torch.compile(fused, mode="reduce-overhead")  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            self._gate_fused_bg = fused
+                        O = fused(
+                            q_gp,
+                            O_cmp,
+                            O_sel,
+                            O_win,
+                            self.gate.fc1.weight,
+                            self.gate.fc1.bias,
+                            self.gate.fc2.weight,
+                            self.gate.fc2.bias,
+                            float(self.gate_temp),
+                        )
+                    except Exception:
+                        gates = self.gate(q_gp, tau=self.gate_temp)
+                        if self._env_cache.get("stopgrad_gates", False):
+                            gates = gates.detach()
+                        self._update_gate_stats(gates)
+                        try:
+                            log(
+                                "decode.gates",
+                                mean=gates.mean(dim=(-1, -2)).tolist()
+                                if gates.dim() >= 2
+                                else gates.mean().item(),
+                                std=gates.std(dim=(-1, -2)).tolist()
+                                if gates.dim() >= 2
+                                else gates.std().item(),
+                            )
+                        except Exception as e:
+                            log("warn.decode.gate_log_fail", error=str(e))
+                        w_cmp = gates[..., 0:1].unsqueeze(-1)
+                        w_sel = gates[..., 1:2].unsqueeze(-1)
+                        w_win = gates[..., 2:3].unsqueeze(-1)
+                        O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
+                else:
+                    gates = self.gate(q_gp, tau=self.gate_temp)
+                    if self._env_cache.get("stopgrad_gates", False):
+                        gates = gates.detach()
+                    self._update_gate_stats(gates)
+                    try:
+                        log(
+                            "decode.gates",
+                            mean=gates.mean(dim=(-1, -2)).tolist()
+                            if gates.dim() >= 2
+                            else gates.mean().item(),
+                            std=gates.std(dim=(-1, -2)).tolist()
+                            if gates.dim() >= 2
+                            else gates.std().item(),
+                        )
+                    except Exception as e:
+                        log("warn.decode.gate_log_fail", error=str(e))
+                    w_cmp = gates[..., 0:1].unsqueeze(-1)
+                    w_sel = gates[..., 1:2].unsqueeze(-1)
+                    w_win = gates[..., 2:3].unsqueeze(-1)
+                    O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win
                 O_heads = O.reshape(B, self.n_heads, self.d_v)
                 out_t = self.out(O_heads.reshape(B, 1, -1))
                 outs.append(out_t)
@@ -1193,17 +1278,47 @@ class NSAAttention(nn.Module):
 
         # Gates and combine
         q_gp = Q.mean(dim=3)  # [B,S,G,Dk]
-        gates = self.gate(q_gp.reshape(B * S * self.n_kv_groups, self.d_k), tau=self.gate_temp)
-        if self._env_cache.get("stopgrad_gates", False):
-            gates = gates.detach()
-        gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
-
-        # Update gate statistics for M8 monitoring
-        self._update_gate_stats(gates)
-        w_cmp = gates[..., 0:1].unsqueeze(3)
-        w_sel = gates[..., 1:2].unsqueeze(3)
-        w_win = gates[..., 2:3].unsqueeze(3)
-        O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win  # [B,S,G,h,Dv]
+        if self._env_cache.get("gate_compile", False):
+            try:
+                fused = self._gate_fused_bsg
+                if fused is None:
+                    fused = _fused_gate_combine_bsg
+                    try:
+                        fused = torch.compile(fused, mode="reduce-overhead")  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    self._gate_fused_bsg = fused
+                O = fused(
+                    q_gp,
+                    O_cmp,
+                    O_sel,
+                    O_win,
+                    self.gate.fc1.weight,
+                    self.gate.fc1.bias,
+                    self.gate.fc2.weight,
+                    self.gate.fc2.bias,
+                    float(self.gate_temp),
+                )
+            except Exception:
+                gates = self.gate(q_gp.reshape(B * S * self.n_kv_groups, self.d_k), tau=self.gate_temp)
+                if self._env_cache.get("stopgrad_gates", False):
+                    gates = gates.detach()
+                gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
+                self._update_gate_stats(gates)
+                w_cmp = gates[..., 0:1].unsqueeze(3)
+                w_sel = gates[..., 1:2].unsqueeze(3)
+                w_win = gates[..., 2:3].unsqueeze(3)
+                O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win  # [B,S,G,h,Dv]
+        else:
+            gates = self.gate(q_gp.reshape(B * S * self.n_kv_groups, self.d_k), tau=self.gate_temp)
+            if self._env_cache.get("stopgrad_gates", False):
+                gates = gates.detach()
+            gates = gates.view(B, S, self.n_kv_groups, 3)  # [B,S,G,3]
+            self._update_gate_stats(gates)
+            w_cmp = gates[..., 0:1].unsqueeze(3)
+            w_sel = gates[..., 1:2].unsqueeze(3)
+            w_win = gates[..., 2:3].unsqueeze(3)
+            O = w_cmp * O_cmp + w_sel * O_sel + w_win * O_win  # [B,S,G,h,Dv]
 
         # Output projection
         O_heads = O.reshape(B, S, self.n_kv_groups * self.h_per_group, self.d_v)
