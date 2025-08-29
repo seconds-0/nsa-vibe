@@ -30,6 +30,7 @@ attrs
 
 # Torch dependencies
 sympy
+mpmath
 
 # CI dependencies
 antlr4-python3-runtime
