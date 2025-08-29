@@ -23,6 +23,14 @@ from nsa.kernels.flash_wrappers import (
 _VARLEN_WS: dict[tuple, dict[str, torch.Tensor]] = {}
 _SEL_PACK_WS: dict[tuple, dict[str, torch.Tensor]] = {}
 
+def clear_varlen_workspaces() -> None:
+    """Optional memory cleanup: free varlen packing workspaces."""
+    _VARLEN_WS.clear()
+
+def clear_selection_pack_workspaces() -> None:
+    """Optional memory cleanup: free selection pack workspaces."""
+    _SEL_PACK_WS.clear()
+
 
 def _get_varlen_workspace(
     device: torch.device,
@@ -254,6 +262,12 @@ def grouped_selection_attention_packed(
         return out
     lengths_t = torch.tensor(lengths, device=device)
     unique_L = torch.unique(lengths_t)
+    # Enable autograd-safe packing during training or when forced by env
+    use_safe_pack = (
+        torch.is_grad_enabled()
+        and (Q.requires_grad or K.requires_grad or V.requires_grad)
+    ) or _env_bool("NSA_TRAIN_SAFE_PACK", False)
+
     for Lval in unique_L.tolist():
         L = int(Lval)
         # collect row indices for this bucket
@@ -262,38 +276,61 @@ def grouped_selection_attention_packed(
             # rows with L=0 remain zeros
             continue
         N = len(bucket_idx)
-        # Workspace-backed Q, K, V batches to reduce allocations
-        ws_key = (str(device), Q.dtype, K.dtype, V.dtype, h, Dk, V.shape[-1])
-        ws = _SEL_PACK_WS.get(ws_key)
-        need_new = (
-            ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
-        )
-        if need_new:
-            Qb = torch.empty((N, h, Dk), dtype=Q.dtype, device=device)
-            Kb = torch.empty((N, L, Dk), dtype=K.dtype, device=device)
-            Vb = torch.empty((N, L, V.shape[-1]), dtype=V.dtype, device=device)
-            _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
+        if use_safe_pack:
+            # Graph-friendly packing using stack to preserve autograd links
+            map_rows = []
+            Q_list = []
+            K_list = []
+            V_list = []
+            for ridx in bucket_idx:
+                b, t, g, idx = rows[ridx]
+                map_rows.append((b, t, g))
+                Q_list.append(Q[b, t, g])  # [h,Dk]
+                K_list.append(K[b, g, idx])  # [L,Dk]
+                V_list.append(V[b, g, idx])  # [L,Dv]
+            Qb = torch.stack(Q_list, dim=0)  # [N,h,Dk]
+            Kb = torch.stack(K_list, dim=0)  # [N,L,Dk]
+            Vb = torch.stack(V_list, dim=0)  # [N,L,Dv]
+            q_btgh = Qb.unsqueeze(1).permute(0, 2, 1, 3)  # [N,h,1,Dk]
+            k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
+            v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
+            attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)
+            Ob = attn.squeeze(2)  # [N,h,Dv]
+            for j, (b, t, g) in enumerate(map_rows):
+                out[b, t, g] = Ob[j]
         else:
-            Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
-            Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
-            Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
-        map_rows = []
-        for j, ridx in enumerate(bucket_idx):
-            b, t, g, idx = rows[ridx]
-            Qb[j] = Q[b, t, g]  # [h,Dk]
-            Kb[j] = K[b, g, idx]  # [L,Dk]
-            Vb[j] = V[b, g, idx]  # [L,Dv]
-            map_rows.append((b, t, g))
-        # SDPA per bucket: expand per-head
-        q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
-        q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
-        k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
-        v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
-        attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)  # [N,h,1,Dv]
-        Ob = attn.squeeze(2)  # [N,h,Dv]
-        # Scatter back
-        for j, (b, t, g) in enumerate(map_rows):
-            out[b, t, g] = Ob[j]
+            # Workspace-backed Q, K, V batches to reduce allocations
+            ws_key = (str(device), Q.dtype, K.dtype, V.dtype, h, Dk, V.shape[-1])
+            ws = _SEL_PACK_WS.get(ws_key)
+            need_new = (
+                ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
+            )
+            if need_new:
+                Qb = torch.empty((N, h, Dk), dtype=Q.dtype, device=device)
+                Kb = torch.empty((N, L, Dk), dtype=K.dtype, device=device)
+                Vb = torch.empty((N, L, V.shape[-1]), dtype=V.dtype, device=device)
+                _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
+            else:
+                Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
+                Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
+                Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
+            map_rows = []
+            for j, ridx in enumerate(bucket_idx):
+                b, t, g, idx = rows[ridx]
+                Qb[j] = Q[b, t, g]  # [h,Dk]
+                Kb[j] = K[b, g, idx]  # [L,Dk]
+                Vb[j] = V[b, g, idx]  # [L,Dv]
+                map_rows.append((b, t, g))
+            # SDPA per bucket: expand per-head
+            q_btgh = Qb.unsqueeze(1)  # [N,1,h,Dk]
+            q_btgh = q_btgh.permute(0, 2, 1, 3)  # [N,h,1,Dk]
+            k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
+            v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
+            attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)  # [N,h,1,Dv]
+            Ob = attn.squeeze(2)  # [N,h,Dv]
+            # Scatter back
+            for j, (b, t, g) in enumerate(map_rows):
+                out[b, t, g] = Ob[j]
     return out
 
 
@@ -343,7 +380,15 @@ def grouped_selection_attention_masked(
 
     Qf = Qf.contiguous(); Kf = Kf.contiguous(); Vf = Vf.contiguous(); Mf = Mf.contiguous()
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
-    return Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
+    Of = Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
+    # Guard against rows with no allowed keys (all -inf mask) → zero them
+    row_has_any = allowed.any(dim=-1)  # [B,S,G]
+    Of = torch.where(
+        row_has_any.unsqueeze(-1).unsqueeze(-1),
+        Of,
+        torch.zeros_like(Of),
+    )
+    return Of
 
 
 # ===== FA-2 integration scaffolding (M1) =====
@@ -430,30 +475,62 @@ def sliding_window_attention_fa2(
                         len_rows.append(L)
             N = len(rows)
             if N > 0 and max_len >= 1:
-                total_k = int(sum(len_rows))
-                ws = _get_varlen_workspace(
-                    Q.device, Q.dtype, K.dtype, V.dtype, h, Dk, Dv, N, total_k
-                )
-                q_pack = ws["q"][:N]
-                k_pack = ws["k"][:total_k]
-                v_pack = ws["v"][:total_k]
-                cuq = ws["cuq"][: N + 1]
-                lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
-                cuk = ws["cuk"][: N + 1]
-                torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
-                # Fill packs
-                write_pos = 0
-                for i, (b, t, g) in enumerate(rows):
-                    L = len_rows[i]
-                    q_pack[i] = Q[b, t, g]
-                    if L > 0:
-                        start = max(0, (t + 1) - w)
-                        end = t + 1
-                        seg_k = K[b, g, start:end]  # [L,Dk]
-                        seg_v = V[b, g, start:end]  # [L,Dv]
-                        k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
-                        v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
-                        write_pos += L
+                use_safe_pack = (
+                    torch.is_grad_enabled()
+                    and (Q.requires_grad or K.requires_grad or V.requires_grad)
+                ) or _env_bool("NSA_TRAIN_SAFE_PACK", False)
+                if use_safe_pack:
+                    # Autograd-safe packing via stack/cat to preserve graph links
+                    q_pack = torch.stack([Q[b, t, g] for (b, t, g) in rows], dim=0)  # [N,h,Dk]
+                    k_rows = []
+                    v_rows = []
+                    for i, (b, t, g) in enumerate(rows):
+                        L = len_rows[i]
+                        if L > 0:
+                            start = max(0, (t + 1) - w)
+                            end = t + 1
+                            seg_k = K[b, g, start:end].unsqueeze(1).expand(-1, h, -1)  # [L,h,Dk]
+                            seg_v = V[b, g, start:end].unsqueeze(1).expand(-1, h, -1)  # [L,h,Dv]
+                            k_rows.append(seg_k)
+                            v_rows.append(seg_v)
+                    total_k = int(sum(len_rows))
+                    if total_k > 0:
+                        k_pack = torch.cat(k_rows, dim=0)
+                        v_pack = torch.cat(v_rows, dim=0)
+                    else:
+                        k_pack = torch.zeros((0, h, Dk), dtype=K.dtype, device=K.device)
+                        v_pack = torch.zeros((0, h, Dv), dtype=V.dtype, device=V.device)
+                    cuq = torch.arange(0, N + 1, device=Q.device, dtype=torch.int32)
+                    lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
+                    cuk = torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0)
+                else:
+                    total_k = int(sum(len_rows))
+                    ws = _get_varlen_workspace(
+                        Q.device, Q.dtype, K.dtype, V.dtype, h, Dk, Dv, N, total_k
+                    )
+                    q_pack = ws["q"][:N]
+                    k_pack = ws["k"][:total_k]
+                    v_pack = ws["v"][:total_k]
+                    # Build cumulative sequence lengths for Q and K
+                    cuq = ws["cuq"][: N + 1]
+                    cuq.copy_(torch.arange(0, N + 1, device=Q.device, dtype=torch.int32))
+                    lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
+                    cuk = ws["cuk"][: N + 1]
+                    torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
+                    # Fill packs
+                    write_pos = 0
+                    for i, (b, t, g) in enumerate(rows):
+                        L = len_rows[i]
+                        q_pack[i] = Q[b, t, g]
+                        if L > 0:
+                            start = max(0, (t + 1) - w)
+                            end = t + 1
+                            seg_k = K[b, g, start:end]  # [L,Dk]
+                            seg_v = V[b, g, start:end]  # [L,Dv]
+                            assert (write_pos + L) <= total_k, "varlen K/V pack overflow"
+                            k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
+                            v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
+                            write_pos += L
                 if use_timing:
                     t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
@@ -467,6 +544,7 @@ def sliding_window_attention_fa2(
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
+                    log("warn.fa2_win_varlen_nonfinite")
                     return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
@@ -521,6 +599,7 @@ def sliding_window_attention_fa2(
                     causal=True,
                 )  # [N,h,Dv]
                 if not torch.isfinite(o_pack).all():
+                    log("warn.fa2_win_bucket_nonfinite")
                     return sliding_window_attention_masked(Q, K, V, w)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
@@ -604,25 +683,52 @@ def compressed_attention_fa2(
             N = len(rows)
             if N > 0:
                 total_k = int(sum(len_rows))
-                ws = _get_varlen_workspace(
-                    Q.device, Q.dtype, K_cmp.dtype, V_cmp.dtype, h, Dk, Dv, N, total_k
-                )
-                q_pack = ws["q"][:N]
-                k_pack = ws["k"][:total_k]
-                v_pack = ws["v"][:total_k]
-                cuq = ws["cuq"][: N + 1]
-                lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
-                cuk = ws["cuk"][: N + 1]
-                torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
-                write_pos = 0
-                for i, (b, t, g) in enumerate(rows):
-                    L = len_rows[i]
-                    q_pack[i] = Q[b, t, g]
-                    seg_k = K_cmp[b, g, :L]
-                    seg_v = V_cmp[b, g, :L]
-                    k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
-                    v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
-                    write_pos += L
+                use_safe_pack = (
+                    torch.is_grad_enabled()
+                    and (Q.requires_grad or K_cmp.requires_grad or V_cmp.requires_grad)
+                ) or _env_bool("NSA_TRAIN_SAFE_PACK", False)
+                if use_safe_pack:
+                    q_pack = torch.stack([Q[b, t, g] for (b, t, g) in rows], dim=0)
+                    k_rows = []
+                    v_rows = []
+                    for (b, t, g), L in zip(rows, len_rows):
+                        if L > 0:
+                            seg_k = K_cmp[b, g, :L]
+                            seg_v = V_cmp[b, g, :L]
+                            k_rows.append(seg_k.unsqueeze(1).expand(-1, h, -1))  # [L,h,Dk]
+                            v_rows.append(seg_v.unsqueeze(1).expand(-1, h, -1))  # [L,h,Dv]
+                    if total_k > 0:
+                        k_pack = torch.cat(k_rows, dim=0)
+                        v_pack = torch.cat(v_rows, dim=0)
+                    else:
+                        k_pack = torch.zeros((0, h, Dk), dtype=K_cmp.dtype, device=K_cmp.device)
+                        v_pack = torch.zeros((0, h, Dv), dtype=V_cmp.dtype, device=V_cmp.device)
+                    cuq = torch.arange(0, N + 1, device=Q.device, dtype=torch.int32)
+                    lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
+                    cuk = torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0)
+                else:
+                    ws = _get_varlen_workspace(
+                        Q.device, Q.dtype, K_cmp.dtype, V_cmp.dtype, h, Dk, Dv, N, total_k
+                    )
+                    q_pack = ws["q"][:N]
+                    k_pack = ws["k"][:total_k]
+                    v_pack = ws["v"][:total_k]
+                    cuq = ws["cuq"][: N + 1]
+                    cuq.copy_(torch.arange(0, N + 1, device=Q.device, dtype=torch.int32))
+                    lens_t = torch.tensor(len_rows, dtype=torch.int32, device=Q.device)
+                    cuk = ws["cuk"][: N + 1]
+                    torch.cumsum(torch.nn.functional.pad(lens_t, (1, 0)), dim=0, out=cuk)
+                    write_pos = 0
+                    for i, (b, t, g) in enumerate(rows):
+                        L = len_rows[i]
+                        q_pack[i] = Q[b, t, g]
+                        if L > 0:
+                            seg_k = K_cmp[b, g, :L]
+                            seg_v = V_cmp[b, g, :L]
+                            assert (write_pos + L) <= total_k, "varlen cmp K/V pack overflow"
+                            k_pack[write_pos : write_pos + L] = seg_k.unsqueeze(1).expand(L, h, Dk)
+                            v_pack[write_pos : write_pos + L] = seg_v.unsqueeze(1).expand(L, h, Dv)
+                            write_pos += L
                 if use_timing:
                     t0 = time.perf_counter()
                 o_pack = attention_fa2_varlen(
@@ -635,6 +741,9 @@ def compressed_attention_fa2(
                     max_seqlen_k=max_len,
                     causal=True,
                 )  # [N,h,Dv]
+                if not torch.isfinite(o_pack).all():
+                    log("warn.fa2_cmp_varlen_nonfinite")
+                    return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
                 if use_timing:
                     dt = (time.perf_counter() - t0) * 1e3
                     log("fa2.cmp.varlen_all", N=int(N), total_k=int(total_k), ms=dt)
@@ -732,6 +841,8 @@ def sliding_window_attention_fa2_decode(
         min_len = int(os.getenv("NSA_FA2_MIN_LEN_WIN", "16"))
     except Exception:
         min_len = 16
+    if min_len < 1:
+        min_len = 1
     if win_len < min_len:
         start = end - win_len
         return attention_bgh(q_t, K_win[:, :, start:end], V_win[:, :, start:end], causal=True)
@@ -768,6 +879,8 @@ def compressed_attention_fa2_decode(
         min_len = int(os.getenv("NSA_FA2_MIN_LEN_CMP", "16"))
     except Exception:
         min_len = 16
+    if min_len < 1:
+        min_len = 1
     if L < min_len:
         return attention_bgh(q_t, K_cmp[:, :, :L], V_cmp[:, :, :L], causal=True)
     k = K_cmp[:, :, :L]

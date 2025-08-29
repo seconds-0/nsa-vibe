@@ -2,24 +2,32 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from nsa.core.debug import log
 
 
 def is_flash_available() -> bool:
+    """Return True if flash-attn dense API is importable."""
     try:
+        from flash_attn import flash_attn_func  # type: ignore
 
+        _ = flash_attn_func  # silence linter
         return True
     except Exception:
         return False
 
 
 def is_flash_varlen_available() -> bool:
+    """Return True if a varlen API is importable (either QKV or KV-packed)."""
     try:
-        # Probe alternative varlen entrypoints across FA-2 versions
+        from flash_attn import flash_attn_varlen_func  # type: ignore
 
+        _ = flash_attn_varlen_func
         return True
     except Exception:
         try:
+            from flash_attn import flash_attn_varlen_kvpacked_func  # type: ignore
 
+            _ = flash_attn_varlen_kvpacked_func
             return True
         except Exception:
             return False
@@ -45,26 +53,42 @@ def attention_bgh(
 ) -> torch.Tensor:
     """
     Q: [B,G,h,Dk], K/V: [B,G,S,D*] -> out [B,G,h,Dv]
-    Uses flash-attn if available; falls back to SDPA.
+    Prefer flash-attn if available; fallback to SDPA.
     """
     B, G, h, Dk = Q.shape
     S = K.shape[2]
-    try:
+    # Try FA-2 dense path first
+    if is_flash_available():
+        try:
+            from flash_attn import flash_attn_func  # type: ignore
 
-        q = Q.reshape(B * G * h, 1, Dk)
-        k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
-        v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
-        # flash_attn_func expects [B, T, H] in some setups; use SDPA fallback for simplicity here
-        raise ImportError
-    except Exception:
-        q = Q.reshape(B * G * h, 1, Dk)
-        k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
-        v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
-        q = q.contiguous(); k = k.contiguous(); v = v.contiguous()
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
-        o = attn.squeeze(1).reshape(B, G, h, -1)
-        # Guard against rare numerical issues on some GPU precisions
-        return torch.nan_to_num(o, nan=0.0)
+            # Reshape without materializing copies
+            q = Q.transpose(1, 2).reshape(B, G * h, 1, Dk)  # [B,G*h,1,Dk]
+            k = (
+                K.unsqueeze(2)
+                .expand(B, G, h, S, Dk)
+                .reshape(B, G * h, S, Dk)
+            )  # [B,G*h,S,Dk]
+            v = (
+                V.unsqueeze(2)
+                .expand(B, G, h, S, V.shape[-1])
+                .reshape(B, G * h, S, V.shape[-1])
+            )  # [B,G*h,S,Dv]
+            o = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
+            o = o.reshape(B, G, h, -1)
+            if not torch.isfinite(o).all():
+                log("warn.flash_bgh_nonfinite", path="fa2.dense")
+            return torch.nan_to_num(o, nan=0.0)
+        except Exception:
+            pass
+    # SDPA fallback
+    q2 = Q.reshape(B * G * h, 1, Dk)
+    k2 = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
+    v2 = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
+    q2 = q2.contiguous(); k2 = k2.contiguous(); v2 = v2.contiguous()
+    attn = F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal)
+    o = attn.squeeze(1).reshape(B, G, h, -1)
+    return torch.nan_to_num(o, nan=0.0)
 
 
 def attention_fa2_varlen_stub(*args, **kwargs):
