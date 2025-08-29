@@ -1254,12 +1254,18 @@ class NSAAttention(nn.Module):
         def _probe(tag: str, k: torch.Tensor, v: torch.Tensor) -> str:
             try:
                 with sdpa_kernel(enable_flash=True, enable_mem_efficient=False, enable_math=False):
-                    _ = F.scaled_dot_product_attention(
-                        q.reshape(B * G * h, 1, self.d_k),
-                        k.repeat_interleave(h, dim=1).reshape(B * G * h, k.shape[2], self.d_k),
-                        v.repeat_interleave(h, dim=1).reshape(B * G * h, v.shape[2], self.d_v),
-                        is_causal=True,
+                    q2 = q.reshape(B * G * h, 1, self.d_k)
+                    k2 = (
+                        k.unsqueeze(2)
+                        .expand(B, G, h, k.shape[2], self.d_k)
+                        .reshape(B * G * h, k.shape[2], self.d_k)
                     )
+                    v2 = (
+                        v.unsqueeze(2)
+                        .expand(B, G, h, v.shape[2], self.d_v)
+                        .reshape(B * G * h, v.shape[2], self.d_v)
+                    )
+                    _ = F.scaled_dot_product_attention(q2.contiguous(), k2.contiguous(), v2.contiguous(), is_causal=True)
                 return "flash"
             except Exception:
                 return "fallback"
@@ -1384,8 +1390,18 @@ class NSAAttention(nn.Module):
         B, G, h, Dk = Q.shape
         S = K.shape[2]
         q = Q.reshape(B * G * h, 1, Dk).contiguous()
-        k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk).contiguous()
-        v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1]).contiguous()
+        k = (
+            K.unsqueeze(2)
+            .expand(B, G, h, S, Dk)
+            .reshape(B * G * h, S, Dk)
+            .contiguous()
+        )
+        v = (
+            V.unsqueeze(2)
+            .expand(B, G, h, S, V.shape[-1])
+            .reshape(B * G * h, S, V.shape[-1])
+            .contiguous()
+        )
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         o = attn.squeeze(1).reshape(B, G, h, -1)
         return o

@@ -2,7 +2,23 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+
 from nsa.core.debug import log
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = str(name and __import__("os").getenv(name, "1" if default else "0")).lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def flash_attn_version() -> str | None:
+    """Return flash-attn version string if importable, else None."""
+    try:
+        import flash_attn as _fa  # type: ignore
+
+        return getattr(_fa, "__version__", None)
+    except Exception:
+        return None
 
 
 def is_flash_available() -> bool:
@@ -33,19 +49,31 @@ def is_flash_varlen_available() -> bool:
             return False
 
 
-def fa2_supported(device: torch.device, dtype: torch.dtype, head_dim: int) -> bool:
+def fa2_supported_verbose(
+    device: torch.device, dtype: torch.dtype, head_dim: int
+) -> tuple[bool, str]:
     """
-    Conservative support check for FA-2 paths.
-    - Require CUDA device
-    - Require head_dim multiple of 8 (typical constraint)
-    - Guard on availability import probe
+    Conservative capability probe with a reason string for logging.
+    We do not hard-fail on dtype, relying on try/except at call sites.
     """
     if device.type != "cuda":
-        return False
+        return False, "device_not_cuda"
     if head_dim % 8 != 0:
-        return False
-    # Prefer varlen availability probe for FA-2 usage
-    return is_flash_varlen_available() or is_flash_available()
+        return False, "head_dim_not_multiple_of_8"
+    if not (is_flash_varlen_available() or is_flash_available()):
+        return False, "flash_attn_not_importable"
+    # Optional version floor (best-effort)
+    ver = flash_attn_version()
+    if ver is None:
+        # Unknown version; still allow
+        return True, "ok"
+    # Allow all known versions; attach for logs
+    return True, f"ok_v{ver}"
+
+
+def fa2_supported(device: torch.device, dtype: torch.dtype, head_dim: int) -> bool:
+    ok, _ = fa2_supported_verbose(device, dtype, head_dim)
+    return ok
 
 
 def attention_bgh(
@@ -64,16 +92,12 @@ def attention_bgh(
 
             # Reshape without materializing copies
             q = Q.transpose(1, 2).reshape(B, G * h, 1, Dk)  # [B,G*h,1,Dk]
-            k = (
-                K.unsqueeze(2)
-                .expand(B, G, h, S, Dk)
-                .reshape(B, G * h, S, Dk)
-            )  # [B,G*h,S,Dk]
+            k = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B, G * h, S, Dk)  # [B,G*h,S,Dk]
             v = (
-                V.unsqueeze(2)
-                .expand(B, G, h, S, V.shape[-1])
-                .reshape(B, G * h, S, V.shape[-1])
+                V.unsqueeze(2).expand(B, G, h, S, V.shape[-1]).reshape(B, G * h, S, V.shape[-1])
             )  # [B,G*h,S,Dv]
+            if _env_bool("NSA_DEBUG_TIMING"):
+                log("fa2.bgh.path", path="fa2.dense", B=B, G=G, h=h, S=S, Dk=Dk)
             o = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
             o = o.reshape(B, G, h, -1)
             if not torch.isfinite(o).all():
@@ -82,21 +106,20 @@ def attention_bgh(
         except Exception:
             pass
     # SDPA fallback
-    q2 = Q.reshape(B * G * h, 1, Dk)
-    k2 = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
-    v2 = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
-    q2 = q2.contiguous(); k2 = k2.contiguous(); v2 = v2.contiguous()
+    if _env_bool("NSA_DEBUG_TIMING"):
+        log("fa2.bgh.path", path="sdpa", B=B, G=G, h=h, S=S, Dk=Dk)
+    # Expand heads via view/expand to avoid materializing copies
+    q2 = Q.reshape(B * G * h, 1, Dk).contiguous()
+    k2 = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B * G * h, S, Dk).contiguous()
+    v2 = (
+        V.unsqueeze(2)
+        .expand(B, G, h, S, V.shape[-1])
+        .reshape(B * G * h, S, V.shape[-1])
+        .contiguous()
+    )
     attn = F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal)
     o = attn.squeeze(1).reshape(B, G, h, -1)
     return torch.nan_to_num(o, nan=0.0)
-
-
-def attention_fa2_varlen_stub(*args, **kwargs):
-    """
-    Stub for FA-2 varlen attention; will be implemented in M1.
-    Intentionally raises to direct callers to fallback.
-    """
-    raise NotImplementedError("FA-2 varlen attention not yet implemented")
 
 
 def attention_fa2_dense_batch(
@@ -122,12 +145,22 @@ def attention_fa2_dense_batch(
     try:
         from flash_attn import flash_attn_func  # type: ignore
 
+        if _env_bool("NSA_DEBUG_TIMING"):
+            log(
+                "fa2.batch.path",
+                path="fa2.dense",
+                N=int(q.shape[0]),
+                Tq=int(q.shape[1]),
+                Tk=int(k.shape[1]),
+            )
         return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
     except Exception:
         # SDPA fallback per row
         N, Tq, h, D = q.shape
         Tk = k.shape[1]
         Dv = v.shape[-1]
+        if _env_bool("NSA_DEBUG_TIMING"):
+            log("fa2.batch.path", path="sdpa", N=int(N), Tq=int(Tq), Tk=int(Tk))
         q2 = q.reshape(N * h, Tq, D)
         k2 = k.reshape(N * h, Tk, D)
         v2 = v.reshape(N * h, Tk, Dv)
