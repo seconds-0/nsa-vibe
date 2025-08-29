@@ -133,12 +133,7 @@ def sliding_window_attention(
     disallowed = ~allowed  # [S,S]
     # Prepare SDPA tensors: [B, G*h, S, D*]
     Qf = Q.reshape(B, S, G * h, Dk).transpose(1, 2).contiguous()  # [B,G*h,S,Dk]
-    Kf = (
-        K.unsqueeze(2)
-        .expand(B, G, h, S, Dk)
-        .reshape(B, G * h, S, Dk)
-        .contiguous()
-    )
+    Kf = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B, G * h, S, Dk).contiguous()
     Vf = (
         V.unsqueeze(2)
         .expand(B, G, h, S, V.shape[-1])
@@ -696,7 +691,8 @@ def sliding_window_attention_fa2(
             for i, (b, t, g) in enumerate(tgt):
                 out[b, t, g] = Ob[i]
         return out
-    except Exception:
+    except Exception as e:
+        log("warn.fa2_unexpected_fallback", branch="win", error=str(e)[:100])
         return sliding_window_attention_masked(Q, K, V, w)
 
 
@@ -901,7 +897,8 @@ def compressed_attention_fa2(
             for i, (b, t, g) in enumerate(tgt):
                 out[b, t, g] = Ob[i]
         return out
-    except Exception:
+    except Exception as e:
+        log("warn.fa2_unexpected_fallback", branch="cmp", error=str(e)[:100])
         return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
 
 
@@ -966,7 +963,8 @@ def sliding_window_attention_fa2_decode(
         if not torch.isfinite(o).all():
             return attention_bgh(q_t, k, v, causal=True)
         return o
-    except Exception:
+    except Exception as e:
+        log("warn.fa2_unexpected_fallback", branch="win.decode", error=str(e)[:100])
         return attention_bgh(q_t, k, v, causal=True)
 
 

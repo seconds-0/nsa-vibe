@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+
 from nsa.core.debug import log
 
 
@@ -91,15 +92,9 @@ def attention_bgh(
 
             # Reshape without materializing copies
             q = Q.transpose(1, 2).reshape(B, G * h, 1, Dk)  # [B,G*h,1,Dk]
-            k = (
-                K.unsqueeze(2)
-                .expand(B, G, h, S, Dk)
-                .reshape(B, G * h, S, Dk)
-            )  # [B,G*h,S,Dk]
+            k = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B, G * h, S, Dk)  # [B,G*h,S,Dk]
             v = (
-                V.unsqueeze(2)
-                .expand(B, G, h, S, V.shape[-1])
-                .reshape(B, G * h, S, V.shape[-1])
+                V.unsqueeze(2).expand(B, G, h, S, V.shape[-1]).reshape(B, G * h, S, V.shape[-1])
             )  # [B,G*h,S,Dv]
             if _env_bool("NSA_DEBUG_TIMING"):
                 log("fa2.bgh.path", path="fa2.dense", B=B, G=G, h=h, S=S, Dk=Dk)
@@ -115,12 +110,7 @@ def attention_bgh(
         log("fa2.bgh.path", path="sdpa", B=B, G=G, h=h, S=S, Dk=Dk)
     # Expand heads via view/expand to avoid materializing copies
     q2 = Q.reshape(B * G * h, 1, Dk).contiguous()
-    k2 = (
-        K.unsqueeze(2)
-        .expand(B, G, h, S, Dk)
-        .reshape(B * G * h, S, Dk)
-        .contiguous()
-    )
+    k2 = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B * G * h, S, Dk).contiguous()
     v2 = (
         V.unsqueeze(2)
         .expand(B, G, h, S, V.shape[-1])
@@ -130,14 +120,6 @@ def attention_bgh(
     attn = F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal)
     o = attn.squeeze(1).reshape(B, G, h, -1)
     return torch.nan_to_num(o, nan=0.0)
-
-
-def attention_fa2_varlen_stub(*args, **kwargs):
-    """
-    Stub for FA-2 varlen attention; will be implemented in M1.
-    Intentionally raises to direct callers to fallback.
-    """
-    raise NotImplementedError("FA-2 varlen attention not yet implemented")
 
 
 def attention_fa2_dense_batch(
@@ -164,7 +146,13 @@ def attention_fa2_dense_batch(
         from flash_attn import flash_attn_func  # type: ignore
 
         if _env_bool("NSA_DEBUG_TIMING"):
-            log("fa2.batch.path", path="fa2.dense", N=int(q.shape[0]), Tq=int(q.shape[1]), Tk=int(k.shape[1]))
+            log(
+                "fa2.batch.path",
+                path="fa2.dense",
+                N=int(q.shape[0]),
+                Tq=int(q.shape[1]),
+                Tk=int(k.shape[1]),
+            )
         return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
     except Exception:
         # SDPA fallback per row
