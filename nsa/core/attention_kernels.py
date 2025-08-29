@@ -129,8 +129,10 @@ def sliding_window_attention(
     row = torch.arange(S, device=device).view(S, 1)
     col = torch.arange(S, device=device).view(1, S)
     allowed = (col <= row) & (col >= (row - (w - 1)))  # [S,S]
-    # Disallowed True means masked for SDPA boolean mask
-    disallowed = ~allowed  # [S,S]
+    # Use additive float mask with -inf for disallowed positions to avoid NaNs
+    # across SDPA backends/dtypes. Shape: [S,S] then broadcast to [B,G*h,S,S].
+    Mf2d = torch.full((S, S), float("-inf"), dtype=Q.dtype, device=device)
+    Mf2d.masked_fill_(allowed, 0.0)
     # Prepare SDPA tensors: [B, G*h, S, D*]
     Qf = Q.reshape(B, S, G * h, Dk).transpose(1, 2).contiguous()  # [B,G*h,S,Dk]
     Kf = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B, G * h, S, Dk).contiguous()
@@ -140,8 +142,8 @@ def sliding_window_attention(
         .reshape(B, G * h, S, V.shape[-1])
         .contiguous()
     )
-    # Broadcast mask to [B,G*h,S,S]
-    Mf = disallowed.view(1, 1, S, S).expand(B, G * h, S, S)
+    # Broadcast additive mask to [B,G*h,S,S]
+    Mf = Mf2d.view(1, 1, S, S).expand(B, G * h, S, S)
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     Of = Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
     return Of
