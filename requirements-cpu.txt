@@ -28,6 +28,9 @@ iniconfig
 sortedcontainers
 attrs
 
+# Torch dependencies
+sympy
+
 # CI dependencies
 antlr4-python3-runtime
 pyyaml
