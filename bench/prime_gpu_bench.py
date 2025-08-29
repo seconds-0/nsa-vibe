@@ -282,9 +282,7 @@ class PrimeIntellectBenchmark:
 
         return {"user": user, "host": host, "port": int(port)}
 
-    def setup_ssh(
-        self, ssh_info: dict, private_key_path: str | None = None
-    ) -> paramiko.SSHClient:
+    def setup_ssh(self, ssh_info: dict, private_key_path: str | None = None) -> paramiko.SSHClient:
         """
         Setup SSH connection to pod.
 
@@ -321,7 +319,10 @@ class PrimeIntellectBenchmark:
         elif "PRIME_SSH_PASSWORD" in os.environ:
             connect_kwargs["password"] = os.environ["PRIME_SSH_PASSWORD"]
             auth_configured = True
-        elif os.environ.get("SSH_KEY_PATH") and Path(os.environ["SSH_KEY_PATH"]).expanduser().exists():
+        elif (
+            os.environ.get("SSH_KEY_PATH")
+            and Path(os.environ["SSH_KEY_PATH"]).expanduser().exists()
+        ):
             # Use SSH_KEY_PATH environment variable
             connect_kwargs["key_filename"] = str(Path(os.environ["SSH_KEY_PATH"]).expanduser())
             auth_configured = True

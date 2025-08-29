@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn.functional as F
 
@@ -107,19 +106,19 @@ def select_topn_ranges(
     _skip_validation: bool = False,
 ) -> torch.Tensor:
     """Select top-n block ranges with deterministic tie-breaking.
-    
+
     M8: Enhanced with robust deterministic tie-breaking for training reproducibility.
     Uses scaled epsilon bias to prefer lower indices on score ties, ensuring
     identical selection across runs with the same inputs.
-    
+
     Args:
-        p_grp: Group probabilities [B,G,S_sel] 
+        p_grp: Group probabilities [B,G,S_sel]
         meta: Block metadata with selection ranges
         n_top: Number of top blocks to select
         t_token: Current token position (0-indexed)
         force_init: Whether to force include block 0
         force_local: Number of local blocks to force include
-        
+
     Returns:
         Selected ranges [B,G,n_top,2] as [start,end) pairs
     """
@@ -161,7 +160,7 @@ def select_topn_ranges(
         # Ensure deterministic topk with sorted=True for consistent ordering
         k_actual = min(k_rest, S_sel)
         _, top_idx = torch.topk(composite, k=k_actual, dim=-1, largest=True, sorted=True)
-        
+
         # M8: Assert tie-breaking worked - check for potential numerical issues
         if torch.is_grad_enabled():
             # Only check during training when gradients are enabled
@@ -173,18 +172,25 @@ def select_topn_ranges(
                     very_close = torch.abs(score_diffs) < (float(tie_break_scale.item()) * 0.1)
                     if very_close.any():
                         from nsa.core.debug import log
-                        log("warn.selection_tiebreak", 
+
+                        log(
+                            "warn.selection_tiebreak",
                             msg="Close scores detected in selection - potential tie-break instability",
                             min_diff=float(torch.abs(score_diffs).min().item()),
-                            tie_break_scale=float(tie_break_scale))
+                            tie_break_scale=float(tie_break_scale),
+                        )
         sel_idx = torch.cat([forced_idx, top_idx], dim=-1)
     else:
         sel_idx = forced_idx
     # sort selected indices ascending for consistent range merging
     sel_idx = torch.sort(sel_idx, dim=-1).values
-    
+
     # M8: Optional determinism validation (skip if called from validation itself)
-    if not _skip_validation and os.getenv("NSA_VALIDATE_SELECTION_DETERMINISM", "0").lower() in ("1", "true", "yes"):
+    if not _skip_validation and os.getenv("NSA_VALIDATE_SELECTION_DETERMINISM", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         validate_selection_determinism(p_grp, meta, n_top, t_token)
     # merge adjacent into contiguous ranges
     ranges = []
@@ -279,25 +285,32 @@ def select_topn_ranges_batched(
         # M8: Deterministic tie-breaker - prefer lower indices; rank in float32 to avoid
         # overwhelming biases under low-precision dtypes.
         tie_break_scale = torch.tensor(1e-8, device=device, dtype=torch.float32)
-        base_idx = torch.arange(S_sel, device=device, dtype=torch.float32).view(1, 1, 1, S_sel).expand(B, S, G, S_sel)
+        base_idx = (
+            torch.arange(S_sel, device=device, dtype=torch.float32)
+            .view(1, 1, 1, S_sel)
+            .expand(B, S, G, S_sel)
+        )
         composite = masked.to(torch.float32) - (base_idx * tie_break_scale)
         # Ensure deterministic topk with explicit sorted=True for batched path
-        k_actual = min(k_rest, S_sel) 
+        k_actual = min(k_rest, S_sel)
         _, top_idx = torch.topk(composite, k=k_actual, dim=-1, largest=True, sorted=True)
-        
+
         # M8: Optional validation for tie-breaking effectiveness in training
         if torch.is_grad_enabled() and k_actual > 1:
             with torch.no_grad():
                 orig_scores = torch.gather(masked, -1, top_idx).to(torch.float32)
                 # Check last dimension for potential tie-break issues
-                score_diffs = torch.diff(orig_scores, dim=-1) 
+                score_diffs = torch.diff(orig_scores, dim=-1)
                 very_close = torch.abs(score_diffs) < (float(tie_break_scale.item()) * 0.1)
                 if very_close.any():
                     from nsa.core.debug import log
-                    log("warn.batched_selection_tiebreak",
+
+                    log(
+                        "warn.batched_selection_tiebreak",
                         msg="Close scores in batched selection - potential instability",
                         batch_close_count=int(very_close.sum().item()),
-                        tie_break_scale=float(tie_break_scale))
+                        tie_break_scale=float(tie_break_scale),
+                    )
         selected = torch.cat([forced, top_idx], dim=-1)
     else:
         selected = forced[..., :n_top]
@@ -409,7 +422,7 @@ def convert_indices_to_ranges_batched_v2(
             torch.cuda.nvtx.range_push("nsa.sel.ranges_v2")
         except Exception:
             _nvtx = False
-    
+
     device = indices.device
     B, S_q, G, K = indices.shape
     if K == 0:
@@ -421,7 +434,7 @@ def convert_indices_to_ranges_batched_v2(
             torch.cuda.nvtx.range_push("v2_run_detection")
         except Exception:
             pass
-    
+
     valid = indices.ge(0)
     x = torch.where(valid, indices, torch.full_like(indices, -2))  # sentinel -2
 
@@ -431,7 +444,7 @@ def convert_indices_to_ranges_batched_v2(
     diff = x - x_shift
     adjacent_or_dup = (diff.eq(1) | diff.eq(0)) & prev_valid
     run_start = valid & (~adjacent_or_dup | (~prev_valid))
-    
+
     if _nvtx:
         try:
             torch.cuda.nvtx.range_pop()
@@ -461,9 +474,9 @@ def convert_indices_to_ranges_batched_v2(
     start_blk_flat = x_flat[run_start_flat].to(torch.int32)
 
     # Build unique global run ids by offsetting row-local run ids with row offsets
-    run_offsets = torch.cumsum(
-        torch.nn.functional.pad(runs_per_row_flat, (1, 0)), dim=0
-    )[:-1]  # [N]
+    run_offsets = torch.cumsum(torch.nn.functional.pad(runs_per_row_flat, (1, 0)), dim=0)[
+        :-1
+    ]  # [N]
     # Row index per element (0..N-1)
     row_ids = torch.arange(N, device=device, dtype=torch.int32)
     row_ids_per_elem = row_ids.view(N, 1).expand(N, K)
@@ -481,7 +494,7 @@ def convert_indices_to_ranges_batched_v2(
             torch.cuda.nvtx.range_push("v2_scatter_reduce")
         except Exception:
             pass
-    
+
     total_runs = int(runs_per_row_flat.sum().item())
     if total_runs == 0:
         if _nvtx:
@@ -493,8 +506,10 @@ def convert_indices_to_ranges_batched_v2(
     max_blk = torch.full((total_runs,), -2, dtype=torch.int32, device=device)
     # Values to reduce are block ids for valid elements
     blk_vals = x_flat[run_id_flat.ge(0)].to(torch.int32)
-    max_blk.scatter_reduce_(0, global_rid_valid.to(torch.int64), blk_vals, reduce="amax", include_self=False)
-    
+    max_blk.scatter_reduce_(
+        0, global_rid_valid.to(torch.int64), blk_vals, reduce="amax", include_self=False
+    )
+
     if _nvtx:
         try:
             torch.cuda.nvtx.range_pop()
@@ -534,103 +549,100 @@ def convert_indices_to_ranges_batched_v2(
     p = pos_in_row.to(torch.int64)
     out[b, t, g, p, 0] = start_tok_flat.to(torch.int32)
     out[b, t, g, p, 1] = end_tok_flat.to(torch.int32)
-    
+
     if _nvtx:
         try:
             torch.cuda.nvtx.range_pop()
         except Exception:
             pass
-    
+
     return out
 
 
 def map_pcmp_to_pslc_slow_path(p_cmp_all: torch.Tensor, meta: BlockMeta) -> torch.Tensor:
     """
     M8: Eq.9 slow path verifier - explicit mathematical computation.
-    
+
     This function implements the exact mathematical definition by using the
     CSR mapping directly instead of recomputing overlaps. This ensures it
     matches the fast path exactly.
-    
+
     Args:
         p_cmp_all: [B,S,G,h,S_cmp] compressed probabilities
         meta: Block metadata with overlap mapping
-        
+
     Returns:
         p_slc_all: [B,S,G,h,S_sel] selection probabilities
     """
     B, S, G, h, S_cmp = p_cmp_all.shape
     device = p_cmp_all.device
     S_sel = meta.sel_starts.numel()
-    
+
     if S_cmp == 0:
         return torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
-    
+
     # Use CSR mapping directly (same as fast path but with explicit loops)
     p_slc_all = torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
-    
+
     indptr = meta.M_csl_indptr.to(device)
-    indices = meta.M_csl_indices.to(device) 
+    indices = meta.M_csl_indices.to(device)
     values = meta.M_csl_values.to(device, dtype=p_cmp_all.dtype)
-    
+
     # For each compressed block (CSR row)
     for cmp_i in range(min(S_cmp, len(indptr) - 1)):
         start = int(indptr[cmp_i].item())
         end = int(indptr[cmp_i + 1].item())
-        
+
         if start == end:
             continue
-            
+
         # Get the selection blocks this compressed block contributes to
         sel_cols = indices[start:end]
         weights = values[start:end]
-        
+
         # Add weighted contribution to each selection block
         for j, (sel_idx, weight) in enumerate(zip(sel_cols, weights)):
             sel_idx = int(sel_idx.item())
             if sel_idx < S_sel:
                 p_slc_all[..., sel_idx] += p_cmp_all[..., cmp_i] * float(weight.item())
-    
+
     return p_slc_all
 
 
 def verify_mapping_equivalence(
-    p_cmp_all: torch.Tensor, 
-    meta: BlockMeta, 
-    rtol: float = 1e-5,
-    atol: float = 1e-8
+    p_cmp_all: torch.Tensor, meta: BlockMeta, rtol: float = 1e-5, atol: float = 1e-8
 ) -> tuple[bool, dict]:
     """
     M8: Verify fast COO path matches slow mathematical path (Eq.9 verification).
-    
+
     Args:
         p_cmp_all: Compressed probabilities to test
         meta: Block metadata
         rtol: Relative tolerance for comparison
         atol: Absolute tolerance for comparison
-        
+
     Returns:
         (is_equivalent, details): True if paths match, plus diagnostic info
     """
     # Only run verification if explicitly requested via env flag
     if not os.getenv("NSA_VERIFY_EQ9_MAPPING", "0").lower() in ("1", "true", "yes"):
         return True, {"status": "skipped", "reason": "NSA_VERIFY_EQ9_MAPPING not set"}
-    
+
     with torch.no_grad():
         # Compute both paths
         fast_result = map_pcmp_to_pslc_batched(p_cmp_all, meta)
         slow_result = map_pcmp_to_pslc_slow_path(p_cmp_all, meta)
-        
+
         # Compare results
         is_close = torch.allclose(fast_result, slow_result, rtol=rtol, atol=atol)
-        
+
         # Compute diagnostic metrics
         abs_diff = (fast_result - slow_result).abs()
         max_abs_diff = abs_diff.max().item()
         mean_abs_diff = abs_diff.mean().item()
         rel_diff = abs_diff / (slow_result.abs() + atol)
         max_rel_diff = rel_diff.max().item()
-        
+
         details = {
             "status": "verified" if is_close else "mismatch",
             "max_abs_diff": max_abs_diff,
@@ -640,57 +652,61 @@ def verify_mapping_equivalence(
             "rtol": rtol,
             "atol": atol,
         }
-        
+
         if not is_close:
             from nsa.core.debug import log
-            log("error.eq9_mapping_mismatch",
+
+            log(
+                "error.eq9_mapping_mismatch",
                 msg="Fast COO path does not match slow mathematical path",
-                **details)
-        
+                **details,
+            )
+
         return is_close, details
 
 
 def validate_selection_determinism(
-    p_grp: torch.Tensor,
-    meta: BlockMeta, 
-    n_top: int,
-    t_token: int,
-    num_trials: int = 5
+    p_grp: torch.Tensor, meta: BlockMeta, n_top: int, t_token: int, num_trials: int = 5
 ) -> bool:
     """Validate that selection is deterministic by running multiple times.
-    
+
     Args:
         p_grp: Group probabilities [B,G,S_sel]
         meta: Block metadata
         n_top: Number of top blocks to select
         t_token: Current token position
         num_trials: Number of trials to test determinism
-        
+
     Returns:
         True if all trials produce identical results
     """
     # Only run validation if explicitly requested via env flag
     if not os.getenv("NSA_VALIDATE_SELECTION_DETERMINISM", "0").lower() in ("1", "true", "yes"):
         return True
-        
+
     if p_grp.requires_grad:
         # Don't validate during training to avoid affecting gradients
         return True
-        
+
     with torch.no_grad():
         results = []
         for trial in range(num_trials):
-            ranges = select_topn_ranges(p_grp.clone(), meta, n_top, t_token, True, 2, _skip_validation=True)
+            ranges = select_topn_ranges(
+                p_grp.clone(), meta, n_top, t_token, True, 2, _skip_validation=True
+            )
             results.append(ranges.clone())
-        
+
         # Check if all results are identical
         for i in range(1, num_trials):
             if not torch.equal(results[0], results[i]):
                 from nsa.core.debug import log
-                log("error.selection_nondeterministic",
+
+                log(
+                    "error.selection_nondeterministic",
                     msg=f"Selection non-deterministic: trial 0 != trial {i}",
                     trial_0_shape=list(results[0].shape),
-                    trial_i_shape=list(results[i].shape))
+                    trial_i_shape=list(results[i].shape),
+                )
                 return False
-                
+
     return True

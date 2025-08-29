@@ -38,7 +38,9 @@ def apply_rope(
     if scale <= 0:
         scale = 1.0
     # Compute angles in float32 for accuracy, then cast sin/cos to input dtype to preserve dtype end-to-end
-    angles = (pos.to(torch.float32) / float(scale)).unsqueeze(-1) * inv_freq  # [..., S, D/2] (float32)
+    angles = (pos.to(torch.float32) / float(scale)).unsqueeze(
+        -1
+    ) * inv_freq  # [..., S, D/2] (float32)
     sin = torch.sin(angles).to(dtype=x.dtype)
     cos = torch.cos(angles).to(dtype=x.dtype)
     x_2 = x.view(*x.shape[:-1], D // 2, 2)

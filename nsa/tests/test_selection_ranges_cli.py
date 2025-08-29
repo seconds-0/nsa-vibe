@@ -33,9 +33,7 @@ def test_selection_ranges_cli_runs(tmp_path):
         "8",
         "--json",
     ]
-    proc = subprocess.run(
-        args, env=env, capture_output=True, text=True, timeout=60
-    )
+    proc = subprocess.run(args, env=env, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
     # Expect at least one JSON line with key 't'
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]

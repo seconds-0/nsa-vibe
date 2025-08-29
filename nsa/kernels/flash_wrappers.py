@@ -6,7 +6,6 @@ import torch.nn.functional as F
 
 def is_flash_available() -> bool:
     try:
-
         return True
     except Exception:
         return False
@@ -19,7 +18,6 @@ def is_flash_varlen_available() -> bool:
         return True
     except Exception:
         try:
-
             return True
         except Exception:
             return False
@@ -50,7 +48,6 @@ def attention_bgh(
     B, G, h, Dk = Q.shape
     S = K.shape[2]
     try:
-
         q = Q.reshape(B * G * h, 1, Dk)
         k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
         v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
@@ -60,7 +57,9 @@ def attention_bgh(
         q = Q.reshape(B * G * h, 1, Dk)
         k = K.repeat_interleave(h, dim=1).reshape(B * G * h, S, Dk)
         v = V.repeat_interleave(h, dim=1).reshape(B * G * h, S, V.shape[-1])
-        q = q.contiguous(); k = k.contiguous(); v = v.contiguous()
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
         o = attn.squeeze(1).reshape(B, G, h, -1)
         # Guard against rare numerical issues on some GPU precisions

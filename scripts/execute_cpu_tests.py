@@ -25,6 +25,7 @@ base_dir.mkdir(parents=True, exist_ok=True)
 results_file = base_dir / "EVIDENCE.md"
 log_file = base_dir / "execution.log"
 
+
 def log(msg):
     """Log to both console and file"""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -33,38 +34,41 @@ def log(msg):
     with open(log_file, "a") as f:
         f.write(log_msg + "\n")
 
+
 def run_test(test_name, cmd, timeout=30):
     """Run a test and collect evidence"""
     test_dir = base_dir / test_name
     test_dir.mkdir(parents=True, exist_ok=True)
-    
+
     log(f"Running test: {test_name}")
-    
+
     # Save environment
     env_file = test_dir / "env.json"
-    env_vars = {k: v for k, v in os.environ.items() if any(x in k for x in ["NSA_", "TORCH_", "CONFIG"])}
+    env_vars = {
+        k: v for k, v in os.environ.items() if any(x in k for x in ["NSA_", "TORCH_", "CONFIG"])
+    }
     with open(env_file, "w") as f:
         json.dump(env_vars, f, indent=2)
-    
+
     # Run test
     output_file = test_dir / "output.log"
     try:
         result = subprocess.run(
-            cmd, 
-            shell=True, 
-            capture_output=True, 
-            text=True, 
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
             timeout=timeout,
-            cwd="/Users/alexanderhuth/Code/nsa-vibe"
+            cwd="/Users/alexanderhuth/Code/nsa-vibe",
         )
-        
+
         # Save output
         with open(output_file, "w") as f:
             f.write(result.stdout)
             if result.stderr:
                 f.write("\n=== STDERR ===\n")
                 f.write(result.stderr)
-        
+
         # Extract traces
         traces_file = test_dir / "traces.log"
         with open(output_file, "r") as f:
@@ -73,10 +77,10 @@ def run_test(test_name, cmd, timeout=30):
             for line in content.split("\n"):
                 if any(x in line for x in ["[GRAD-TRACE]", "MISSING:", "[trace]", "seen_types"]):
                     traces.append(line)
-            
+
             with open(traces_file, "w") as tf:
                 tf.write("\n".join(traces))
-        
+
         # Determine result
         if result.returncode == 0 and "step 0001" in content:
             status = "PASS"
@@ -84,14 +88,14 @@ def run_test(test_name, cmd, timeout=30):
             status = "HANG"
         else:
             status = "FAIL"
-        
+
         # Save result
         with open(test_dir / "result.txt", "w") as f:
             f.write(status)
-        
+
         log(f"  Result: {status}")
         return status, traces
-        
+
     except subprocess.TimeoutExpired:
         status = "HANG"
         with open(test_dir / "result.txt", "w") as f:
@@ -105,12 +109,14 @@ def run_test(test_name, cmd, timeout=30):
         log(f"  Result: ERROR - {e}")
         return status, []
 
+
 # Main test execution
 log("Starting NSA CPU Evidence Collection")
 log(f"Output directory: {base_dir}")
 
 # Check PyTorch
 import torch
+
 log(f"PyTorch version: {torch.__version__}")
 log(f"CUDA available: {torch.cuda.is_available()}")
 
@@ -120,8 +126,7 @@ os.environ["NSA_TRACE_GRADS"] = "1"
 os.environ["NSA_TRACE_MODULE_BWD"] = "1"
 
 status1, traces1 = run_test(
-    "gradient_tracing",
-    "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
+    "gradient_tracing", "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
 )
 
 # Test 2: Branch isolation
@@ -132,7 +137,7 @@ for branch in ["cmp", "sel", "win"]:
     os.environ["NSA_FORCE_BRANCH"] = branch
     status, traces = run_test(
         f"branch_{branch}",
-        "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
+        "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1",
     )
     branch_results[branch] = status
     del os.environ["NSA_FORCE_BRANCH"]
@@ -143,23 +148,20 @@ gc_results = {}
 
 # Test full GC
 status_full, _ = run_test(
-    "gc_full",
-    "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
+    "gc_full", "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
 )
 gc_results["full"] = status_full
 
 # Test GC range 0:2 (for CPU's 2-layer model)
 os.environ["NSA_GC_RANGE"] = "0:1"
 status_0_1, _ = run_test(
-    "gc_range_0_1",
-    "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
+    "gc_range_0_1", "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
 )
 gc_results["0:1"] = status_0_1
 
 os.environ["NSA_GC_RANGE"] = "1:2"
 status_1_2, _ = run_test(
-    "gc_range_1_2", 
-    "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
+    "gc_range_1_2", "python -u scripts/train_showcase.py --dataset synthetic --ddp 0 --steps 1"
 )
 gc_results["1:2"] = status_1_2
 
@@ -196,14 +198,14 @@ report = f"""# NSA Test Evidence Collection - CPU Execution
 - **Missing Parameters**: {len(all_missing)} unique parameters
 
 ### 2. Branch Isolation Results (CPU)
-- **cmp branch**: {branch_results.get('cmp', 'N/A')}
-- **sel branch**: {branch_results.get('sel', 'N/A')}
-- **win branch**: {branch_results.get('win', 'N/A')}
+- **cmp branch**: {branch_results.get("cmp", "N/A")}
+- **sel branch**: {branch_results.get("sel", "N/A")}
+- **win branch**: {branch_results.get("win", "N/A")}
 
 ### 3. GC Range Control Results
-- **Full GC**: {gc_results.get('full', 'N/A')}
-- **GC [0:1)**: {gc_results.get('0:1', 'N/A')}
-- **GC [1:2)**: {gc_results.get('1:2', 'N/A')}
+- **Full GC**: {gc_results.get("full", "N/A")}
+- **GC [0:1)**: {gc_results.get("0:1", "N/A")}
+- **GC [1:2)**: {gc_results.get("1:2", "N/A")}
 
 ## Evidence Collected
 
@@ -331,13 +333,13 @@ log(f"\n✅ Evidence collection complete!")
 log(f"Report saved to: {results_file}")
 
 # Print summary
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("EVIDENCE COLLECTION SUMMARY")
-print("="*60)
+print("=" * 60)
 print(f"Gradient Tracing: {status1}")
 print(f"Branch cmp: {branch_results.get('cmp', 'N/A')}")
 print(f"Branch sel: {branch_results.get('sel', 'N/A')}")
 print(f"Branch win: {branch_results.get('win', 'N/A')}")
 print(f"GC Full: {gc_results.get('full', 'N/A')}")
 print(f"Missing Params: {len(all_missing)}")
-print("="*60)
+print("=" * 60)

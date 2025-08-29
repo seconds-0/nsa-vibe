@@ -8,4 +8,3 @@ def test_apply_rope_preserves_input_dtype():
         pos = torch.arange(3, dtype=torch.int64)
         y = apply_rope(x, pos)
         assert y.dtype == dtype
-

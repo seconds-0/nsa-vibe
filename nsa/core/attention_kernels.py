@@ -341,7 +341,10 @@ def grouped_selection_attention_masked(
         neg_inf,
     )
 
-    Qf = Qf.contiguous(); Kf = Kf.contiguous(); Vf = Vf.contiguous(); Mf = Mf.contiguous()
+    Qf = Qf.contiguous()
+    Kf = Kf.contiguous()
+    Vf = Vf.contiguous()
+    Mf = Mf.contiguous()
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     return Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
 

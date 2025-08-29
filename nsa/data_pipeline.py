@@ -5,6 +5,7 @@ Provides a FineWeb-Edu IterableDataset and simple local JSONL/TXT loaders.
 This module is optional; scripts/train_showcase.py currently uses a simpler
 loader in scripts/datasets. Migrate incrementally as needed.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,6 +54,7 @@ def fineweb_stream_batches(
     batch: List[List[int]] = []
     seen = 0
     import time as _t
+
     t0 = _t.time()
     last = t0
     for ex in ds:
@@ -113,4 +115,3 @@ def local_jsonl_or_txt_batches(
                 if len(batch) >= batch_size:
                     yield batch[:batch_size]
                     batch = batch[batch_size:]
-

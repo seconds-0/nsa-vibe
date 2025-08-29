@@ -57,6 +57,7 @@ class TinyLM(nn.Module):
     ):
         super().__init__()
         from nsa.model.llama_block_nsa import RMSNorm
+
         self.embed = nn.Embedding(vocab, dim)
         self.grad_checkpointing = bool(grad_checkpointing)
         self.blocks = nn.ModuleList(
@@ -84,6 +85,7 @@ class TinyLM(nn.Module):
         for blk in self.blocks:
             if self.grad_checkpointing and x.requires_grad:
                 import torch.utils.checkpoint as _ckpt
+
                 x = _ckpt.checkpoint(lambda inp: blk(inp), x, use_reentrant=False)
             else:
                 x = blk(x)
@@ -94,6 +96,7 @@ class TinyLM(nn.Module):
 def set_seed(seed: int):
     import random
     import numpy as np
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -109,7 +112,11 @@ def _dump_env_info(out_dir: Path, extra: Optional[Dict[str, Any]] = None) -> Non
             "cuda_available": torch.cuda.is_available(),
             "cuda_device_count": torch.cuda.device_count(),
             "distributed_backend": "FSDP",  # Mark as FSDP implementation
-            "env": {k: v for k, v in os.environ.items() if k.startswith("NSA_") or k in ("WORLD_SIZE", "RANK", "LOCAL_RANK", "CONFIG")},
+            "env": {
+                k: v
+                for k, v in os.environ.items()
+                if k.startswith("NSA_") or k in ("WORLD_SIZE", "RANK", "LOCAL_RANK", "CONFIG")
+            },
         }
         if torch.cuda.is_available():
             try:
@@ -181,6 +188,7 @@ def _register_signal_dump(out_dir: Path) -> None:
                         f.write("".join(traceback.format_stack(stack)))
         except Exception:
             pass
+
     try:
         signal.signal(signal.SIGUSR1, dump_stack)
         signal.signal(signal.SIGTERM, dump_stack)
@@ -193,9 +201,13 @@ def _sdp_kernel_ctx():
     flash_only = os.getenv("NSA_SDPA_FLASH_ONLY", "0").lower() in ("1", "true", "yes")
     no_flash = os.getenv("NSA_SDPA_NO_FLASH", "0").lower() in ("1", "true", "yes")
     if flash_only:
-        return torch.backends.cuda.sdp_kernel(enable_flash=True, enable_mem_efficient=False, enable_math=False)
+        return torch.backends.cuda.sdp_kernel(
+            enable_flash=True, enable_mem_efficient=False, enable_math=False
+        )
     if no_flash:
-        return torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=True, enable_math=True)
+        return torch.backends.cuda.sdp_kernel(
+            enable_flash=False, enable_mem_efficient=True, enable_math=True
+        )
     return contextlib.nullcontext()
 
 
@@ -207,6 +219,7 @@ def _dump_mem(out_dir: Path, tag: str) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"mem_fsdp_{tag}.txt").write_text(torch.cuda.memory_summary())
         import json as _json
+
         stats = {k: int(v) for k, v in torch.cuda.memory_stats().items()}
         (out_dir / f"mem_fsdp_{tag}.json").write_text(_json.dumps(stats, indent=2))
     except Exception:
@@ -235,21 +248,41 @@ def main():
         choices=["synthetic", "fineweb_edu", "fineweb_edu_local"],
         help="Training data source",
     )
-    cli.add_argument("--save", type=str, default="artifacts/train_showcase_fsdp/model.pt", help="Path to save final weights+config")
-    cli.add_argument("--ddp", type=int, default=-1, help="Ignored (FSDP always uses distributed when available)")
+    cli.add_argument(
+        "--save",
+        type=str,
+        default="artifacts/train_showcase_fsdp/model.pt",
+        help="Path to save final weights+config",
+    )
+    cli.add_argument(
+        "--ddp", type=int, default=-1, help="Ignored (FSDP always uses distributed when available)"
+    )
     cli.add_argument("--resume", type=str, default="", help="Checkpoint path to resume from")
-    cli.add_argument("--loader-timeout", type=float, default=60.0, help="Timeout seconds for initial dataset batch fetch")
-    cli.add_argument("--fwe-report-docs", type=int, default=1000, help="FineWeb‑Edu progress print frequency")
-    cli.add_argument("--synthetic-on-fail", action="store_true", help="Fallback to synthetic if FineWeb‑Edu stalls")
-    cli.add_argument("--local-path", type=str, default="", help="Path for --dataset fineweb_edu_local")
+    cli.add_argument(
+        "--loader-timeout",
+        type=float,
+        default=60.0,
+        help="Timeout seconds for initial dataset batch fetch",
+    )
+    cli.add_argument(
+        "--fwe-report-docs", type=int, default=1000, help="FineWeb‑Edu progress print frequency"
+    )
+    cli.add_argument(
+        "--synthetic-on-fail",
+        action="store_true",
+        help="Fallback to synthetic if FineWeb‑Edu stalls",
+    )
+    cli.add_argument(
+        "--local-path", type=str, default="", help="Path for --dataset fineweb_edu_local"
+    )
     cli_args, _ = cli.parse_known_args()
-    
+
     cfg_path = os.environ.get("CONFIG", "configs/train_showcase.yaml")
     print(f"[boot] loading config {cfg_path} (FSDP mode)", flush=True)
     cfg = OmegaConf.load(cfg_path)
     os.makedirs(cfg.train.out_dir, exist_ok=True)
     out_dir = Path(cfg.train.out_dir)
-    
+
     # NSA performance defaults: force vectorized prefill and disable sync-heavy asserts
     # Only set if not already provided by the environment
     os.environ.setdefault("NSA_PREFILL_BATCHED", "1")
@@ -266,7 +299,7 @@ def main():
     env_ws = int(os.environ.get("WORLD_SIZE", "1"))
     if env_ws > 1 and torch.distributed.is_available() and not torch.distributed.is_initialized():
         torch.distributed.init_process_group(backend=os.environ.get("TORCH_BACKEND", "nccl"))
-    
+
     world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
@@ -285,7 +318,7 @@ def main():
         torch.backends.cudnn.allow_tf32 = True
     except Exception:
         pass
-    
+
     dtype = torch.float32
     if str(cfg.runtime.precision).lower() in ("bf16", "bfloat16"):
         dtype = torch.bfloat16
@@ -296,16 +329,23 @@ def main():
     data_cfg = cfg.get("data", {}) if hasattr(cfg, "get") else {}
     use_bpe = False
     vocab = 256
-    if str(cli_args.dataset).lower() == "fineweb_edu" and str(data_cfg.get("tokenizer", "byte")).lower() == "gpt2":
+    if (
+        str(cli_args.dataset).lower() == "fineweb_edu"
+        and str(data_cfg.get("tokenizer", "byte")).lower() == "gpt2"
+    ):
         try:
             from transformers import GPT2Tokenizer  # type: ignore
+
             tok = GPT2Tokenizer.from_pretrained("gpt2")
             vocab = int(tok.vocab_size)
             use_bpe = True
         except Exception as e:
             raise RuntimeError("GPT-2 tokenizer requested but transformers not available.") from e
-    
-    print(f"[train] dataset={cli_args.dataset} tokenizer={'gpt2' if use_bpe else 'byte'} backend=FSDP", flush=True)
+
+    print(
+        f"[train] dataset={cli_args.dataset} tokenizer={'gpt2' if use_bpe else 'byte'} backend=FSDP",
+        flush=True,
+    )
 
     model = TinyLM(
         vocab=vocab,
@@ -331,8 +371,8 @@ def main():
     # Print NSA runtime knobs relevant to prefill performance
     print(
         "[train][nsa] prefill_batched="
-        f"{os.getenv('NSA_PREFILL_BATCHED', '0')} strict_asserts={os.getenv('NSA_STRICT_ASSERTS','0')} "
-        f"verify_eq9={os.getenv('NSA_VERIFY_EQ9_MAPPING','0')} debug_log={os.getenv('NSA_DEBUG_LOG','0')}",
+        f"{os.getenv('NSA_PREFILL_BATCHED', '0')} strict_asserts={os.getenv('NSA_STRICT_ASSERTS', '0')} "
+        f"verify_eq9={os.getenv('NSA_VERIFY_EQ9_MAPPING', '0')} debug_log={os.getenv('NSA_DEBUG_LOG', '0')}",
         flush=True,
     )
     if rank == 0:
@@ -375,7 +415,7 @@ def main():
             transformer_auto_wrap_policy,
             transformer_layer_cls={LlamaBlockNSA},
         )
-        
+
         # Mixed precision policy
         mixed_precision_policy = None
         if dtype == torch.bfloat16:
@@ -390,16 +430,24 @@ def main():
                 reduce_dtype=torch.float16,
                 buffer_dtype=torch.float16,
             )
-        
+
         # Sharding strategy can be switched by env (full|grad_op)
         shard_env = os.getenv("NSA_FSDP_SHARDING", "full").strip().lower()
-        shard_strategy = ShardingStrategy.FULL_SHARD if shard_env in ("full", "fs", "full_shard") else ShardingStrategy.SHARD_GRAD_OP
+        shard_strategy = (
+            ShardingStrategy.FULL_SHARD
+            if shard_env in ("full", "fs", "full_shard")
+            else ShardingStrategy.SHARD_GRAD_OP
+        )
 
         # Optional toggles via env
         limit_gathers = os.getenv("NSA_FSDP_LIMIT_ALL_GATHERS", "1").lower() in ("1", "true", "yes")
         fwd_prefetch = os.getenv("NSA_FSDP_FORWARD_PREFETCH", "1").lower() in ("1", "true", "yes")
         # Critical perf toggle when using activation checkpointing: keep params gathered through backward
-        reshard_after_fwd = os.getenv("NSA_FSDP_RESHARD_AFTER_FWD", "0").lower() in ("1", "true", "yes")
+        reshard_after_fwd = os.getenv("NSA_FSDP_RESHARD_AFTER_FWD", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         # Optional: flatten vs. orig params
         use_orig_params = os.getenv("NSA_FSDP_USE_ORIG_PARAMS", "1").lower() in ("1", "true", "yes")
         # Optional: disable auto-wrap to wrap the whole model as a single FSDP unit
@@ -426,7 +474,7 @@ def main():
             backward_prefetch=backward_prefetch,
             use_orig_params=use_orig_params,
         )
-        
+
         if rank == 0:
             extra = []
             extra.append(f"sharding={shard_strategy.name}")
@@ -445,10 +493,10 @@ def main():
             return
         try:
             # For FSDP models, need to access the wrapped module
-            mod = getattr(m, 'module', m)  # FSDP doesn't use .module but handle both cases
+            mod = getattr(m, "module", m)  # FSDP doesn't use .module but handle both cases
             dcounts: dict[str, int] = {}
             lines: list[str] = []
-            
+
             # FSDP parameters might need special handling
             for name, p in mod.named_parameters():
                 dt = str(p.dtype)
@@ -458,9 +506,11 @@ def main():
                 dt = str(b.dtype)
                 dcounts[dt] = dcounts.get(dt, 0) + int(b.numel())
                 lines.append(f"BUFFER {name} {dt} {b.shape}")
-            
+
             total = sum(dcounts.values()) or 1
-            summary = ["# DTYPE SUMMARY (elements) - FSDP"] + [f"{k}: {v} ({v/total:.2%})" for k, v in sorted(dcounts.items())]
+            summary = ["# DTYPE SUMMARY (elements) - FSDP"] + [
+                f"{k}: {v} ({v / total:.2%})" for k, v in sorted(dcounts.items())
+            ]
             out = out_dir / "dtypes_report_fsdp.txt"
             out_dir.mkdir(parents=True, exist_ok=True)
             with open(out, "w") as f:
@@ -492,30 +542,34 @@ def main():
         B_local = base + (1 if rank < extra else 0)
     else:
         B_local = B_global
-    
+
     lr = float(cfg.train.lr)
     save_every = int(cfg.train.get("save_every", 0))
     eval_every = int(cfg.train.get("eval_every", 0))
     accum = int(cfg.train.get("accumulate_grad_batches", 1))
     warmup = int(cfg.train.get("warmup_steps", 0))
 
-    opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=float(cfg.train.get("weight_decay", 0.0)))
-    
+    opt = optim.AdamW(
+        model.parameters(), lr=lr, weight_decay=float(cfg.train.get("weight_decay", 0.0))
+    )
+
     total_steps = steps
+
     def lr_lambda(step):
         if warmup > 0 and step < warmup:
             return float(step + 1) / float(max(1, warmup))
         import math
+
         progress = float(step - warmup) / float(max(1, total_steps - warmup))
         progress = min(1.0, max(0.0, progress))
         return 0.5 * (1.0 + math.cos(math.pi * progress))
-    
+
     scheduler = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     loss_fn = nn.CrossEntropyLoss()
 
     # Dataset setup (same as DDP version)
-    use_fwe = (str(cli_args.dataset).lower() == "fineweb_edu")
-    use_fwe_local = (str(cli_args.dataset).lower() == "fineweb_edu_local")
+    use_fwe = str(cli_args.dataset).lower() == "fineweb_edu"
+    use_fwe_local = str(cli_args.dataset).lower() == "fineweb_edu_local"
     hb = Heartbeat(out_dir, rank)
     hb.write(0, "boot", {"phase": "start", "backend": "FSDP"})
 
@@ -527,30 +581,45 @@ def main():
             from nsa.data_pipeline import fineweb_stream_batches, Shard  # type: ignore
         except Exception as e:
             raise RuntimeError("FineWeb‑Edu pipeline missing") from e
-        
+
         if use_bpe:
             from transformers import GPT2Tokenizer  # type: ignore
+
             tok = GPT2Tokenizer.from_pretrained("gpt2")
+
             def encode_bytes(s: str):
                 tokens = tok.encode(s)
                 if len(tokens) > S - 1:
                     tokens = tokens[: S - 1]
                 return tokens
         else:
+
             def encode_bytes(s: str):
                 tokens = list(s.encode("utf-8", errors="ignore"))
                 if len(tokens) > S - 1:
                     tokens = tokens[: S - 1]
                 return tokens
-        
+
         os.environ["NSA_FWE_REPORT_DOCS"] = str(int(cli_args.fwe_report_docs))
         print("[train] streaming FineWeb‑Edu via datasets (sharded per rank) - FSDP", flush=True)
-        
+
         if world_size > 1:
             shard = Shard(mod=world_size, rem=rank)
-            fwe_train = fineweb_stream_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, shard=shard, report_docs=int(cli_args.fwe_report_docs))
+            fwe_train = fineweb_stream_batches(
+                encode=encode_bytes,
+                seq_len=S,
+                batch_size=B_global,
+                shard=shard,
+                report_docs=int(cli_args.fwe_report_docs),
+            )
         else:
-            fwe_train = fineweb_stream_batches(encode=encode_bytes, seq_len=S, batch_size=B_global, shard=Shard(mod=100, rem=1), report_docs=int(cli_args.fwe_report_docs))
+            fwe_train = fineweb_stream_batches(
+                encode=encode_bytes,
+                seq_len=S,
+                batch_size=B_global,
+                shard=Shard(mod=100, rem=1),
+                report_docs=int(cli_args.fwe_report_docs),
+            )
 
         # Smoke test same as DDP version
         def _pull_one_batch(result_box: Dict[str, Any]) -> None:
@@ -567,9 +636,12 @@ def main():
         t = threading.Thread(target=_pull_one_batch, args=(box,), daemon=True)
         t.start()
         t.join(timeout=float(cli_args.loader_timeout))
-        
+
         if not box.get("ok", False):
-            msg = box.get("err", f"timeout waiting for first FineWeb‑Edu batch (≥{cli_args.loader_timeout:.0f}s)")
+            msg = box.get(
+                "err",
+                f"timeout waiting for first FineWeb‑Edu batch (≥{cli_args.loader_timeout:.0f}s)",
+            )
             print(f"[error] FineWeb‑Edu loader failed: {msg}", flush=True)
             hb.write(0, "fineweb_loader_error", {"error": msg})
             if cli_args.synthetic_on_fail:
@@ -578,12 +650,16 @@ def main():
             else:
                 raise RuntimeError(f"FineWeb‑Edu loader stall: {msg}")
         else:
-            print(f"[train] first FineWeb‑Edu batch fetched in {box.get('dt', 0.0):.2f}s", flush=True)
+            print(
+                f"[train] first FineWeb‑Edu batch fetched in {box.get('dt', 0.0):.2f}s", flush=True
+            )
             hb.write(0, "fineweb_loader_ready", {"dt": box.get("dt", 0.0)})
             first_batch = box["batch"]
+
             def _chain_batches(first, iterator):
                 yield first
                 yield from iterator
+
             fwe_train = _chain_batches(first_batch, fwe_train)
 
     # Training loop (same logic as DDP, but FSDP handles synchronization automatically)
@@ -612,7 +688,7 @@ def main():
                 except Exception:
                     pass
                 hb.write(0, "watchdog_dump", {"path": str(dump_path)})
-    
+
     threading.Thread(target=_watchdog, daemon=True).start()
 
     for step in range(1, steps + 1):
@@ -622,7 +698,12 @@ def main():
                 _t0_fetch = time.time()
                 batch = next(fwe_train)
                 if world_size > 1:
-                    start = sum([B_global // world_size + (1 if r < (B_global % world_size) else 0) for r in range(rank)])
+                    start = sum(
+                        [
+                            B_global // world_size + (1 if r < (B_global % world_size) else 0)
+                            for r in range(rank)
+                        ]
+                    )
                     count = B_local
                     sub = [batch[i] for i in range(start, start + count)] if count > 0 else []
                     x = torch.tensor(sub, dtype=torch.long, device=device)
@@ -642,8 +723,10 @@ def main():
         # Validate input tensor shape
         expected_shape = (B_local, S)
         if x.shape != expected_shape:
-            raise ValueError(f"Input tensor shape mismatch: got {x.shape}, expected {expected_shape}")
-        
+            raise ValueError(
+                f"Input tensor shape mismatch: got {x.shape}, expected {expected_shape}"
+            )
+
         if rank == 0 and step <= 5:
             print(f"[debug] step {step}: input shape {x.shape}, seq_len {S} (FSDP)", flush=True)
 
@@ -657,8 +740,10 @@ def main():
         with _sdp_kernel_ctx():
             logits = model(x)
         logits_trim = logits[:, :-1, :].contiguous()
-        loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1))) / max(1, accum)
-        
+        loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1))) / max(
+            1, accum
+        )
+
         if not torch.isfinite(loss):
             if rank == 0:
                 print("[train][FATAL] non-finite loss detected — aborting run (FSDP).", flush=True)
@@ -669,33 +754,35 @@ def main():
         # Backward pass - FSDP handles synchronization automatically, no need for no_sync()
         loss.backward()
         grad_accum += 1
-        
+
         if grad_accum >= accum:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.train.get("grad_clip", 1.0)))
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), float(cfg.train.get("grad_clip", 1.0))
+            )
             opt.step()
             opt.zero_grad(set_to_none=True)
             scheduler.step()
             grad_accum = 0
 
         losses.append(loss.detach().float().item())
-        tokens_total += (B_local * max(0, S - 1))
-        
+        tokens_total += B_local * max(0, S - 1)
+
         # Logging (same as DDP version but mark as FSDP)
         if step % int(cfg.train.log_every) == 0 or step == 1:
             cur_loss = float(loss.item() * max(1, accum))
             log_loss = cur_loss
-            
+
             if world_size > 1:
                 t = torch.tensor([log_loss], device=device, dtype=torch.float32)
                 torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.AVG)
                 log_loss = float(t.item())
-            
+
             now = time.time()
             dt = max(1e-6, now - last_log_time)
             toks = tokens_total - last_log_tokens
             toks_per_s_local = toks / dt
             toks_per_s_global = toks_per_s_local * (world_size if world_size > 1 else 1)
-            
+
             if rank == 0:
                 # Grad norm logging
                 gn_val = None
@@ -709,7 +796,7 @@ def main():
                         gn_val = total
                 except Exception:
                     gn_val = None
-                
+
                 print(
                     (
                         f"step {step:04d} | loss {log_loss:.4f} | lr {scheduler.get_last_lr()[0]:.2e} | "
@@ -718,7 +805,7 @@ def main():
                     ),
                     flush=True,
                 )
-                
+
                 hb_extra = {"loss": log_loss, "toks_per_s": toks_per_s_global, "backend": "FSDP"}
                 if dt_fetch_last is not None:
                     hb_extra["dt_fetch_s"] = float(dt_fetch_last)
@@ -729,7 +816,10 @@ def main():
                 try:
                     # Access the wrapped module for traversal
                     root_mod = getattr(model, "_fsdp_wrapped_module", model)
-                    from nsa.core.nsa_attention import NSAAttention  # local import to avoid circulars
+                    from nsa.core.nsa_attention import (
+                        NSAAttention,
+                    )  # local import to avoid circulars
+
                     gate_entropies = []
                     gate_entropy_mins = []
                     gate_max_maxes = []
@@ -776,6 +866,7 @@ def main():
                     # Aggregate and emit
                     if gate_entropies:
                         import numpy as _np
+
                         hb_extra.update(
                             {
                                 "gate_entropy_mean": float(_np.mean(gate_entropies)),
@@ -787,9 +878,7 @@ def main():
                         if branch_shares_acc:
                             # Average branch shares across modules
                             bs_arr = _np.array(branch_shares_acc)
-                            hb_extra["gate_branch_shares"] = (
-                                bs_arr.mean(axis=0).round(6).tolist()
-                            )
+                            hb_extra["gate_branch_shares"] = bs_arr.mean(axis=0).round(6).tolist()
 
                     # Fallback counters CSV (aggregated)
                     fc_path = Path(cfg.train.out_dir) / "fallback_counters_fsdp.csv"
@@ -810,6 +899,7 @@ def main():
                             with open(ks_path, "w") as kf:
                                 kf.write("step,k_mean,k_max,rows,pct_at_max\n")
                         import numpy as _np
+
                         k_mean = float(_np.mean(sel_k_means)) if sel_k_means else 0.0
                         k_max = int(max(sel_k_maxes)) if sel_k_maxes else 0
                         pct_at_max = float(_np.mean(sel_pct_at_maxes)) if sel_pct_at_maxes else 0.0
@@ -830,10 +920,14 @@ def main():
                         print(f"[warn] FSDP diagnostics aggregation failed: {e}", flush=True)
 
                 hb.write(step, "progress", hb_extra)
-                (Path(cfg.train.out_dir) / "training_fsdp.csv").parent.mkdir(parents=True, exist_ok=True)
+                (Path(cfg.train.out_dir) / "training_fsdp.csv").parent.mkdir(
+                    parents=True, exist_ok=True
+                )
                 with open(Path(cfg.train.out_dir) / "training_fsdp.csv", "a") as tf:
-                    tf.write(f"{step},{log_loss:.6f},{scheduler.get_last_lr()[0]:.6e},{toks_per_s_global:.0f}\n")
-                
+                    tf.write(
+                        f"{step},{log_loss:.6f},{scheduler.get_last_lr()[0]:.6e},{toks_per_s_global:.0f}\n"
+                    )
+
                 if tb_writer is not None:
                     try:
                         tb_writer.add_scalar("train/loss", log_loss, step)
@@ -841,7 +935,7 @@ def main():
                         tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
                     except Exception:
                         pass
-            
+
             last_log_time = now
             last_log_tokens = tokens_total
 
@@ -868,7 +962,7 @@ def main():
                     FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
                 ):
                     state_dict = model.state_dict()
-                
+
                 state = {
                     "state_dict": state_dict,
                     "cfg": OmegaConf.to_container(cfg, resolve=True),
@@ -892,11 +986,11 @@ def main():
         "loss_last": float(losses[-1]) if losses else None,
         "backend": "FSDP",
     }
-    
+
     if rank == 0:
         with open(Path(cfg.train.out_dir) / "metrics_fsdp.json", "w") as f:
             json.dump(meta, f, indent=2)
-        
+
         try:
             # Save a full (unsharded) state dict on rank 0 only
             with FSDP.state_dict_type(
@@ -915,9 +1009,9 @@ def main():
             torch.save(state, str(out_path))
         except Exception:
             pass
-        
+
         print(json.dumps(meta, indent=2), flush=True)
-        
+
         try:
             if tb_writer is not None:
                 tb_writer.flush()
