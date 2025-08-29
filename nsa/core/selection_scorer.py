@@ -43,12 +43,22 @@ def compute_pcmp_all(Q_all: torch.Tensor, K_cmp: torch.Tensor, scale: float) -> 
     """
     Q_all: [B,S,G,h,Dk], K_cmp: [B,G,S_cmp,Dk] -> p_cmp_all: [B,S,G,h,S_cmp]
     """
-    # Transpose K to align for einsum
-    Kt = K_cmp.permute(0, 1, 3, 2)  # [B,G,Dk,S_cmp]
-    # Use distinct subscript for compressed axis to avoid collision with token axis
-    logits = torch.einsum("bsghd,bgdc->bsghc", Q_all, Kt)  # [B,S,G,h,S_cmp]
-    logits = logits * scale
-    return F.softmax(logits, dim=-1)
+    use_mixed = os.getenv("NSA_P_CMP_MIXED", "0").lower() in ("1", "true", "yes", "on")
+    if use_mixed and Q_all.device.type == "cuda":
+        # Optional mixed-precision path (disabled by default). Computes logits and softmax
+        # under autocast to reduce memory bandwidth on large shapes. Output is upcast
+        # back to the original dtype to preserve downstream numerics.
+        orig_dtype = Q_all.dtype
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            Kt = K_cmp.permute(0, 1, 3, 2)  # [B,G,Dk,S_cmp]
+            logits = torch.einsum("bsghd,bgdc->bsghc", Q_all, Kt) * scale
+            p = F.softmax(logits, dim=-1)
+        return p.to(orig_dtype)
+    else:
+        # Baseline precise path
+        Kt = K_cmp.permute(0, 1, 3, 2)  # [B,G,Dk,S_cmp]
+        logits = torch.einsum("bsghd,bgdc->bsghc", Q_all, Kt) * scale
+        return F.softmax(logits, dim=-1)
 
 
 def map_pcmp_to_pslc(p_cmp: torch.Tensor, meta: BlockMeta) -> torch.Tensor:
