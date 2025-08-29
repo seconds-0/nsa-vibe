@@ -26,6 +26,14 @@ _VARLEN_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 _SEL_PACK_WS: Dict[Tuple, Dict[str, torch.Tensor]] = {}
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.getenv(name, str(default)))
+        return v
+    except Exception:
+        return default
+
+
 def clear_varlen_workspaces() -> None:
     """Optional memory cleanup: free varlen packing workspaces."""
     _VARLEN_WS.clear()
@@ -61,8 +69,11 @@ def _get_varlen_workspace(
             or cuk.numel() < (cap_N + 1)
         )
     if need_new:
-        new_N = max(cap_N, 1)
-        new_K = max(cap_total_k, 1)
+        # Allow pre-sizing via env to avoid growth reallocations on long runs
+        reserve_N = _env_int("NSA_VARLEN_RESERVE_N", 0)
+        reserve_K = _env_int("NSA_VARLEN_RESERVE_K", 0)
+        new_N = max(cap_N, reserve_N, 1)
+        new_K = max(cap_total_k, reserve_K, 1)
         ws = {
             "q": torch.empty((new_N, h, d_k), dtype=dtype_q, device=device),
             "k": torch.empty((new_K, h, d_k), dtype=dtype_k, device=device),
@@ -321,15 +332,20 @@ def grouped_selection_attention_packed(
             need_new = (
                 ws is None or ws["Q"].shape[0] < N or ws["K"].shape[1] < L or ws["V"].shape[1] < L
             )
-            if need_new:
-                Qb = torch.empty((N, h, Dk), dtype=Q.dtype, device=device)
-                Kb = torch.empty((N, L, Dk), dtype=K.dtype, device=device)
-                Vb = torch.empty((N, L, V.shape[-1]), dtype=V.dtype, device=device)
-                _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
-            else:
-                Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
-                Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
-                Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
+        if need_new:
+            # Allow pre-sizing via env to reduce reallocations
+            reserve_N = _env_int("NSA_SEL_PACK_RESERVE_N", 0)
+            reserve_L = _env_int("NSA_SEL_PACK_RESERVE_L", 0)
+            new_N = max(N, reserve_N)
+            new_L = max(L, reserve_L)
+            Qb = torch.empty((new_N, h, Dk), dtype=Q.dtype, device=device)
+            Kb = torch.empty((new_N, new_L, Dk), dtype=K.dtype, device=device)
+            Vb = torch.empty((new_N, new_L, V.shape[-1]), dtype=V.dtype, device=device)
+            _SEL_PACK_WS[ws_key] = {"Q": Qb, "K": Kb, "V": Vb}
+        else:
+            Qb = _SEL_PACK_WS[ws_key]["Q"][:N]
+            Kb = _SEL_PACK_WS[ws_key]["K"][:N, :L]
+            Vb = _SEL_PACK_WS[ws_key]["V"][:N, :L]
             map_rows = []
             for j, ridx in enumerate(bucket_idx):
                 b, t, g, idx = rows[ridx]
