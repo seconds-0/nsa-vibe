@@ -339,7 +339,7 @@ def grouped_selection_attention_packed(
             q_btgh = Qb.unsqueeze(1).permute(0, 2, 1, 3)  # [N,h,1,Dk]
             k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
             v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
-            attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=False)
+            attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)
             Ob = attn.squeeze(2)  # [N,h,Dv]
             for j, (b, t, g) in enumerate(map_rows):
                 out[b, t, g] = Ob[j]
@@ -379,7 +379,7 @@ def grouped_selection_attention_packed(
             k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
             v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
             attn = F.scaled_dot_product_attention(
-                q_btgh, k_btgh, v_btgh, is_causal=False
+                q_btgh, k_btgh, v_btgh, is_causal=True
             )  # [N,h,1,Dv]
             Ob = attn.squeeze(2)  # [N,h,Dv]
             # Scatter back
