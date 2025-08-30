@@ -23,6 +23,19 @@
 - Preserve dataset streaming semantics and sharding behavior with `Shard(mod, rem)`.
 - Determinism: unchanged ordering within a shard.
 
+## Status
+- [x] Phase 1 toggles wired and documented: `NSA_FWE_DOC_BATCH`, `NSA_FWE_PREFETCH`, `NSA_FWE_Q`, `NSA_FWE_REPORT_DOCS` are consumed in `scripts/train_showcase.py`/`scripts/train_showcase_fsdp.py`; prefetcher uses pinned CPU when available. Launch/runbooks set sane defaults.
+- [x] Instrumentation: Per‑step `dt_fetch_s` and rolling `fetch_p50_ms`/`fetch_p95_ms` emitted to heartbeat; loader readiness event logged with first‑batch latency. Smoke/run scripts consume heartbeat to gate health.
+- [x] Local bootstrap read path supported: `--dataset fineweb_edu_local --local-path /data/fwe_bootstrap.jsonl` loads JSONL/TXT via `nsa.data_pipeline`.
+- [x] Phase 2 warmup controls: `NSA_FWE_WARMUP_BATCHES`/`NSA_FWE_WARMUP_TIMEOUT` implemented with heartbeat event `fineweb_loader_warmup{requested,filled,wait_ms}` in both `train_showcase.py` and `train_showcase_fsdp.py`.
+- [ ] Phase 0 measurements captured as artifacts (cold vs warm) — execute and attach logs.
+- [ ] Automation: small helper `scripts/automation/fwe_bootstrap.py` to pre‑stage ~5GB JSONL.
+- [ ] Rollout: enable Phase 1 toggles in CI/prod defaults and tune per‑node values (doc batch, queue depth).
+
+## Next Actions
+- Run Phase 0 measurements on A100/H100: capture cold/warm first‑batch latencies and steady‑state fetch p95; include heartbeat and console logs under `artifacts/`.
+- Apply Phase 1 toggles in CI and production runbooks; validate no tokens/sec regressions; tune `NSA_FWE_DOC_BATCH`/`NSA_FWE_Q` per node.
+
 ## Phase 0 — Baseline & Measurement (No code changes)
 1) Configure caches on fast local storage.
    - `export HF_HOME=/mnt/hf_home`
@@ -115,4 +128,3 @@ Notes:
 - Cold start: < 5–7s (warm cache), < 10s (cold cache) to first batch.
 - Steady‑state: fetch p95 < 80–100 ms; no tokens/sec regression.
 - Zero training stalls; safe fallbacks on loader timeout.
-
