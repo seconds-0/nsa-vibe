@@ -469,9 +469,10 @@ def selection_attention_varlen_all(
             write_pos += Lseg
         cuq[i + 1] = cuq[i] + 1
         cuk[i + 1] = cuk[i] + lens[i]
-    # Try FA‑2 varlen if available and supported. Use causal semantics for parity
-    # with the packed reference (single‑query row with is_causal=False restricts
-    # attention to the first packed key).
+    # Try FA‑2 varlen if available and supported. Use non-causal semantics here:
+    # selection packing already clamps keys to ≤ t, and each row has a single
+    # query (Tq=1). Passing causal=True would incorrectly restrict to the first
+    # packed key for FA‑2 varlen. Using causal=False preserves full selected set.
     ok, _ = fa2_supported_verbose(device, Q.dtype, Dk)
     if ok and is_flash_varlen_available():
         try:
@@ -518,8 +519,9 @@ def selection_attention_varlen_all(
                 Vb[j, write : write + Lseg] = V[b, g, s0:e0]
                 write += Lseg
             tgt.append((b, t, g))
-        # Batched dense fallback for this bucket. Use causal semantics to mirror
-        # the packed reference behavior (first key only for Tq=1).
+        # Batched dense fallback for this bucket. Use non-causal semantics:
+        # all packed keys are already ≤ t and ordered; we do not want an
+        # additional triangular mask over the packed subset for Tq=1.
         try:
             q_rows = Qb.unsqueeze(1)  # [Nb,1,h,Dk]
             k_rows = Kb.unsqueeze(2).expand(Nb, L, h, Dk)  # [Nb,L,h,Dk]
@@ -549,7 +551,7 @@ def selection_attention_varlen_all_v2(
     Vectorized v2 varlen selection packer with FA‑2 varlen fast path and dense fallback.
     - Eliminates Python loops for packing by using a difference-array mask to build per-row
       allowed indices and flat-select K/V tokens.
-    - Uses causal=False for single‑query rows (parity with packed reference: first key only).
+    - Uses causal=False for single‑query rows.
     - Env: NSA_SEL_VARLEN_MIN_L to bypass on tiny rows (falls back to packed path).
     """
     B, S, G, h, Dk = Q.shape
@@ -635,7 +637,7 @@ def selection_attention_varlen_all_v2(
     cuk[0] = 0
     torch.cumsum(lens_sel.to(torch.int32), dim=0, out=cuk[1:])
 
-    # FA‑2 varlen (causal) for parity with packed reference (Tq=1)
+    # FA‑2 varlen (non-causal)
     ok, _why = fa2_supported_verbose(device, Q.dtype, Dk)
     max_len = int(lens_sel.max().item())
     if ok and is_flash_varlen_available():
