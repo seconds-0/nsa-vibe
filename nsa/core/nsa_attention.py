@@ -88,9 +88,9 @@ def _fused_gate_combine_bsg(
     O_sel: torch.Tensor,  # [B,S,G,h,Dv]
     O_win: torch.Tensor,  # [B,S,G,h,Dv]
     fc1_w: torch.Tensor,
-    fc1_b: torch.Tensor | None,
+    fc1_b: Optional[torch.Tensor],
     fc2_w: torch.Tensor,
-    fc2_b: torch.Tensor | None,
+    fc2_b: Optional[torch.Tensor],
     tau: float,
 ) -> torch.Tensor:
     import torch.nn.functional as _F
@@ -109,9 +109,9 @@ def _fused_gate_combine_bg(
     O_sel: torch.Tensor,  # [B,G,h,Dv]
     O_win: torch.Tensor,  # [B,G,h,Dv]
     fc1_w: torch.Tensor,
-    fc1_b: torch.Tensor | None,
+    fc1_b: Optional[torch.Tensor],
     fc2_w: torch.Tensor,
-    fc2_b: torch.Tensor | None,
+    fc2_b: Optional[torch.Tensor],
     tau: float,
 ) -> torch.Tensor:
     import torch.nn.functional as _F

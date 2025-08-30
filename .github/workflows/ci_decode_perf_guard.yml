@@ -37,13 +37,13 @@ if not csv_path.exists():
     print('missing CSV'); sys.exit(2)
 with open(csv_path) as f:
     rows = list(csv.DictReader(f))
-# Expect rows with Context, Total(ms)
+# Expect rows with S, ms_total from CSV format
 values = {}
 for r in rows:
-    if 'Context' in r and 'Total(ms)' in r:
-        ctx = r['Context'].strip()
+    if 'S' in r and 'ms_total' in r:
+        ctx = r['S'].strip()
         try:
-            ms = float(r['Total(ms)'])
+            ms = float(r['ms_total'])
             values[ctx] = ms
         except Exception:
             pass
