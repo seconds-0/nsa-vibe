@@ -3,6 +3,6 @@ runtime:
   use_triton_sel: false
   sel_triton_min_L: 4096
   # FA‑2 off by default on SM 8.9
-  fa2_min_len_win: 999999
-  fa2_min_len_cmp: 999999
-
+  # Use -1 sentinel to disable at thresholds layer
+  fa2_min_len_win: -1
+  fa2_min_len_cmp: -1

@@ -16,8 +16,9 @@ runtime:
   use_flash: true
   use_triton_sel: false
   compile_cmp_win: false
-  fa2_min_len_win: 999999  # Disable FA-2 on RTX 4090 (SM 8.9) by default; override via NSA_FA2_FORCE=1 for experiments
-  fa2_min_len_cmp: 999999  # Disable FA-2 on RTX 4090 (SM 8.9) by default; override via NSA_FA2_FORCE=1 for experiments
+  # Use -1 sentinel to disable FA‑2 via thresholds (clearer than a large magic value)
+  fa2_min_len_win: -1  # Disable FA‑2 on RTX 4090 (SM 8.9) by default; override via NSA_FA2_FORCE=1 for experiments
+  fa2_min_len_cmp: -1  # Disable FA‑2 on RTX 4090 (SM 8.9) by default; override via NSA_FA2_FORCE=1 for experiments
   sel_triton_min_L: 4096 # Permanently disable Triton selection on RTX 4090 (see ADR); use SDPA fallback
 train:
   lr: 3.0e-4
