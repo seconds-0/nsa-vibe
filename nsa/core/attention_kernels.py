@@ -339,7 +339,7 @@ def grouped_selection_attention_packed(
             q_btgh = Qb.unsqueeze(1).permute(0, 2, 1, 3)  # [N,h,1,Dk]
             k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
             v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
-            attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=True)
+            attn = F.scaled_dot_product_attention(q_btgh, k_btgh, v_btgh, is_causal=False)
             Ob = attn.squeeze(2)  # [N,h,Dv]
             for j, (b, t, g) in enumerate(map_rows):
                 out[b, t, g] = Ob[j]
@@ -379,7 +379,7 @@ def grouped_selection_attention_packed(
             k_btgh = Kb.unsqueeze(1).expand(N, h, L, Dk)
             v_btgh = Vb.unsqueeze(1).expand(N, h, L, V.shape[-1])
             attn = F.scaled_dot_product_attention(
-                q_btgh, k_btgh, v_btgh, is_causal=True
+                q_btgh, k_btgh, v_btgh, is_causal=False
             )  # [N,h,1,Dv]
             Ob = attn.squeeze(2)  # [N,h,Dv]
             # Scatter back
@@ -470,7 +470,7 @@ def selection_attention_varlen_all(
         cuq[i + 1] = cuq[i] + 1
         cuk[i + 1] = cuk[i] + lens[i]
     # Try FA‑2 varlen if available and supported. Use causal semantics for parity
-    # with the packed reference (single‑query row with is_causal=True restricts
+    # with the packed reference (single‑query row with is_causal=False restricts
     # attention to the first packed key).
     ok, _ = fa2_supported_verbose(device, Q.dtype, Dk)
     if ok and is_flash_varlen_available():
@@ -483,7 +483,7 @@ def selection_attention_varlen_all(
                 cuk,
                 max_seqlen_q=1,
                 max_seqlen_k=max(lens),
-                causal=True,
+                causal=False,
             )  # [N,h,Dv]
             # Scatter back
             for i, (b, t, g) in enumerate(rows):
@@ -524,7 +524,7 @@ def selection_attention_varlen_all(
             q_rows = Qb.unsqueeze(1)  # [Nb,1,h,Dk]
             k_rows = Kb.unsqueeze(2).expand(Nb, L, h, Dk)  # [Nb,L,h,Dk]
             v_rows = Vb.unsqueeze(2).expand(Nb, L, h, Dv)  # [Nb,L,h,Dv]
-            Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(
+            Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=False).squeeze(
                 1
             )  # [Nb,h,Dv]
             for i, (b, t, g) in enumerate(tgt):
@@ -535,7 +535,7 @@ def selection_attention_varlen_all(
                 q_btgh = Qb[j].unsqueeze(0).unsqueeze(0)  # [1,1,h,Dk]
                 k_btgh = Kb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dk]
                 v_btgh = Vb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dv]
-                out[b, t, g] = attention_bgh(q_btgh, k_btgh, v_btgh, causal=True)[0, 0]
+                out[b, t, g] = attention_bgh(q_btgh, k_btgh, v_btgh, causal=False)[0, 0]
     return out
 
 
@@ -549,7 +549,7 @@ def selection_attention_varlen_all_v2(
     Vectorized v2 varlen selection packer with FA‑2 varlen fast path and dense fallback.
     - Eliminates Python loops for packing by using a difference-array mask to build per-row
       allowed indices and flat-select K/V tokens.
-    - Uses causal=True for single‑query rows (parity with packed reference: first key only).
+    - Uses causal=False for single‑query rows (parity with packed reference: first key only).
     - Env: NSA_SEL_VARLEN_MIN_L to bypass on tiny rows (falls back to packed path).
     """
     B, S, G, h, Dk = Q.shape
@@ -648,7 +648,7 @@ def selection_attention_varlen_all_v2(
                 cuk,
                 max_seqlen_q=1,
                 max_seqlen_k=max_len,
-                causal=True,
+                causal=False,
             )
             out[b_idx, t_idx, g_idx] = o_pack
             return out
@@ -675,11 +675,11 @@ def selection_attention_varlen_all_v2(
             k_rows[j] = k_pack[s0:e0]
             v_rows[j] = v_pack[s0:e0]
         try:
-            Ob = attention_fa2_dense_batch(Qb.unsqueeze(1), k_rows, v_rows, causal=True).squeeze(1)
+            Ob = attention_fa2_dense_batch(Qb.unsqueeze(1), k_rows, v_rows, causal=False).squeeze(1)
         except Exception:
             Ob = torch.empty((Nb, h, Dv), dtype=V.dtype, device=device)
             for j in range(Nb):
-                Ob[j] = attention_bgh(Qb[j].unsqueeze(0), k_rows[j].unsqueeze(0), v_rows[j].unsqueeze(0), causal=True)[
+                Ob[j] = attention_bgh(Qb[j].unsqueeze(0), k_rows[j].unsqueeze(0), v_rows[j].unsqueeze(0), causal=False)[
                     0
                 ]
         out[b_idx[sel], t_idx[sel], g_idx[sel]] = Ob
