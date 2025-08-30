@@ -815,6 +815,11 @@ def sliding_window_attention_fa2(
         min_len_for_fa2 = int(os.getenv("NSA_FA2_MIN_LEN_WIN", str(min_len_for_fa2)))
     except Exception:
         pass
+    # Disable sentinel: non-positive threshold disables FA‑2 entirely for this branch
+    if min_len_for_fa2 <= 0:
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="win", reason="disabled_threshold")
+        return sliding_window_attention(Q, K, V, w)
     buckets = build_length_buckets(lengths)
     if buckets:
         log("fa2.win.buckets", n=len(buckets), max_len=max_len)
@@ -1076,6 +1081,11 @@ def compressed_attention_fa2(
         min_len_for_fa2 = int(os.getenv("NSA_FA2_MIN_LEN_CMP", str(min_len_for_fa2)))
     except Exception:
         pass
+    # Disable sentinel: non-positive threshold disables FA‑2 entirely for this branch
+    if min_len_for_fa2 <= 0:
+        if os.getenv("NSA_SDPA_AUDIT", "0").lower() in ("1", "true", "yes"):
+            log("fa2.gate_skip", branch="cmp", reason="disabled_threshold")
+        return batched_causal_attention_compressed_masked(Q, K_cmp, V_cmp, l, d)
     buckets = build_length_buckets(num_cmp)
     if buckets:
         log("fa2.cmp.buckets", n=len(buckets), max_len=max_len)

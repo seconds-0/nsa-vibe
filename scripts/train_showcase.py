@@ -304,6 +304,25 @@ def main():
             print("[env-guard] ok", flush=True)
     except Exception as _e:
         print(f"[env-guard] skipped: {_e}")
+    # Apply FA-2 policy from config → env without overriding explicit env
+    try:
+        rt = cfg.get("runtime", {}) if hasattr(cfg, "get") else {}
+        # Boolean master switch: runtime.fa2_enabled (default: None)
+        if "fa2_enabled" in rt and "NSA_USE_FA2" not in os.environ:
+            os.environ["NSA_USE_FA2"] = "1" if bool(rt.fa2_enabled) else "0"
+            # Keep branch flags aligned if unset
+            if "NSA_USE_FA2_WIN" not in os.environ:
+                os.environ["NSA_USE_FA2_WIN"] = os.environ["NSA_USE_FA2"]
+            if "NSA_USE_FA2_CMP" not in os.environ:
+                os.environ["NSA_USE_FA2_CMP"] = os.environ["NSA_USE_FA2"]
+        # Thresholds: runtime.fa2_min_len_win/cmp → NSA_FA2_MIN_LEN_*
+        if "fa2_min_len_win" in rt and "NSA_FA2_MIN_LEN_WIN" not in os.environ:
+            os.environ["NSA_FA2_MIN_LEN_WIN"] = str(int(rt.fa2_min_len_win))
+        if "fa2_min_len_cmp" in rt and "NSA_FA2_MIN_LEN_CMP" not in os.environ:
+            os.environ["NSA_FA2_MIN_LEN_CMP"] = str(int(rt.fa2_min_len_cmp))
+    except Exception as _e:
+        print(f"[env-policy] skipped applying FA-2 policy: {_e}")
+
     _dump_env_info(out_dir)
     _register_signal_dump(out_dir)
 
