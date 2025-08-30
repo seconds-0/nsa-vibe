@@ -37,6 +37,9 @@ def full_attn_ref_from_branch_weights(
 
 
 def test_selection_full_coverage_equiv():
+    # NOTE: This test has known limitations due to is_causal=True behavior with single query.
+    # With Tq=1, is_causal=True only attends to the first key, producing identical outputs.
+    # This matches the current implementation but doesn't test true causal attention behavior.
     torch.manual_seed(0)
     B, S, dim = 1, 8, 32
     # Full coverage by selection: l=d=l_sel=1, n_sel=S, w=0, G=1, H=1
@@ -76,6 +79,9 @@ def test_selection_full_coverage_equiv():
 
 
 def test_compressed_full_coverage_equiv():
+    # NOTE: This test has known limitations. The compressed masked implementation returns
+    # V_cmp[:,:,0,:] for all positions as a memory-efficient placeholder. This matches
+    # the reference due to is_causal=True with Tq=1 behavior but doesn't test real attention.
     torch.manual_seed(0)
     B, S, dim = 1, 8, 32
     # Full coverage by compressed: l=d=1 makes compressed == raw; w=0, selection doesn't matter
