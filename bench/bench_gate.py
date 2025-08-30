@@ -42,9 +42,10 @@ def main():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--iters", type=int, default=200)
     args = ap.parse_args()
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else args.device)
-    if isinstance(device, str):
-        device = torch.device(device)
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
     bench_gate(B=2, S=128, G=2, h=4, Dk=64, Dv=64, iters=args.iters, device=device)
 
 
