@@ -6,7 +6,7 @@ runtime:
   # FlashAttention‑2 policy on A100 (SM80): disabled by default
   # Rationale: For current NSA M7 shapes (prefill/decode), SDPA paths are
   # consistently as fast or faster on A100 in internal benches. See
-  # Documentation/Reports/A100-FA2-vs-SDPA-Notes.md for methodology.
+  # Documentation/Reports/2025-08-30 Test Engineer Report - A100 FA2 vs SDPA Benchmarks v1.md for methodology.
   #
   # Precedence:
   # - Env overrides (NSA_USE_FA2*, NSA_FA2_MIN_LEN_*) take precedence.

@@ -137,7 +137,7 @@ mkdir -p $TRITON_CACHE_DIR
    - Primary: set `runtime.fa2_enabled: false` (maps to `NSA_USE_FA2=0` unless env overrides).
    - Secondary: disable thresholds with sentinel `-1` via `runtime.fa2_min_len_win/cmp` (maps to `NSA_FA2_MIN_LEN_*`).
    - Precedence: env overrides config; branch env (`NSA_USE_FA2_{WIN,CMP}`) override global.
-   - See Documentation/Reports/A100-FA2-vs-SDPA-Notes.md for benchmark methodology and rationale.
+   - See Documentation/Reports/2025-08-30 Test Engineer Report - A100 FA2 vs SDPA Benchmarks v1.md for benchmark methodology and rationale.
 
 3. **Start Monitoring**
    ```bash
@@ -595,8 +595,8 @@ rsync -av training_backup_*.tar.gz user@backup-server:/backups/nsa/
 This runbook provides comprehensive operational procedures for production NSA training systems. Keep it updated as new features and optimizations are added to the system.
 ### FA‑2 and Selection Defaults (A100)
 - Disable FA‑2 by default on A100. SDPA outperforms FA‑2 for our shapes.
-  - Set `NSA_USE_FA2=0`
-  - In `configs/profiles/a100.yaml`: `runtime.fa2_min_len_win: 999999`, `runtime.fa2_min_len_cmp: 999999`.
+  - Set `NSA_USE_FA2=0` or `runtime.fa2_enabled: false`
+  - In `configs/profiles/a100.yaml`: `runtime.fa2_min_len_win: -1`, `runtime.fa2_min_len_cmp: -1`.
 - Keep selection varlen disabled by default: `NSA_USE_SEL_VARLEN=0`.
 - If enabling selection varlen for experiments, rely on masked SDPA fallback (PR40) for correctness and performance.
 
