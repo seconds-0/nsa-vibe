@@ -30,7 +30,9 @@ def full_attn_ref_from_branch_weights(
         q = Q[:, :, t : t + 1]
         k = K[:, :, : t + 1]
         v = V[:, :, : t + 1]
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)  # [B,H,1,Dv]
+        # Note: is_causal=False because we already enforce causality by slicing k/v to [:t+1]
+        # With single query (Tq=1), is_causal=True would incorrectly restrict to first key only
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=False)  # [B,H,1,Dv]
         outs.append(attn)
     O = torch.cat(outs, dim=2).permute(0, 2, 1, 3).reshape(B, S, n_heads * d_v)
     return W_O(O)
