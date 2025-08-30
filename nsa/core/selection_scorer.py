@@ -96,34 +96,24 @@ def map_pcmp_to_pslc_batched(p_cmp_all: torch.Tensor, meta: BlockMeta) -> torch.
     S_sel = meta.sel_starts.numel()
     if S_cmp == 0:
         return torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
-    use_mixed = os.getenv("NSA_P_SLC_MIXED", "0").lower() in ("1", "true", "yes", "on")
-    # Baseline precise path (also used as fallback if autocast fails)
-    def _compute(p_src_all: torch.Tensor, dtype_out: torch.dtype) -> torch.Tensor:
-        rows, cols = meta.M_csl_coo_indices.to(device)
-        w_vals = meta.M_csl_coo_values.to(device=device, dtype=p_src_all.dtype)
-        valid_mask = rows < S_cmp
-        if valid_mask.dim() == 0:
-            valid_mask = valid_mask.unsqueeze(0)
-        rows_v = rows[valid_mask]
-        cols_v = cols[valid_mask]
-        w_v = w_vals[valid_mask]
-        if rows_v.numel() == 0:
-            return torch.zeros((B, S, G, h, S_sel), device=device, dtype=dtype_out)
-        p_src = p_src_all[..., rows_v] * w_v  # [B,S,G,h,nnz]
-        p_slc_local = torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_src_all.dtype)
-        idx = cols_v.view(1, 1, 1, 1, -1).expand(B, S, G, h, -1).long()
-        p_slc_local = p_slc_local.scatter_add(-1, idx, p_src)
-        return p_slc_local.to(dtype_out)
-
-    if use_mixed and device.type == "cuda":
-        orig_dtype = p_cmp_all.dtype
-        try:
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                return _compute(p_cmp_all, orig_dtype)
-        except Exception:
-            return _compute(p_cmp_all, orig_dtype)
-    else:
-        return _compute(p_cmp_all, p_cmp_all.dtype)
+    # COO sparse matmul: for each nnz (r,c,w), add p_cmp[..., r]*w to p_slc[..., c]
+    rows, cols = meta.M_csl_coo_indices.to(device)
+    w = meta.M_csl_coo_values.to(device=device, dtype=p_cmp_all.dtype)
+    # Filter mapping rows to those < current S_cmp to avoid out-of-bounds in early decode
+    valid_mask = rows < S_cmp
+    if valid_mask.dim() == 0:
+        valid_mask = valid_mask.unsqueeze(0)
+    rows = rows[valid_mask]
+    cols = cols[valid_mask]
+    w = w[valid_mask]
+    if rows.numel() == 0:
+        return torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
+    p_src = p_cmp_all[..., rows] * w  # [B,S,G,h,nnz]
+    p_slc = torch.zeros((B, S, G, h, S_sel), device=device, dtype=p_cmp_all.dtype)
+    # Ensure Long dtype for scatter_add indices
+    idx = cols.view(1, 1, 1, 1, -1).expand(B, S, G, h, -1).long()
+    p_slc = p_slc.scatter_add(-1, idx, p_src)
+    return p_slc
 
 
 def group_reduce_pslc(p_slc: torch.Tensor) -> torch.Tensor:

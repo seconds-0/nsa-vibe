@@ -30,6 +30,7 @@ help:
 	@echo "📊 Benchmarking:"
 	@echo "  make bench-decode  - Decode benchmark"
 	@echo "  make routing       - Show execution routing"
+	@echo "  make fa2-autotune  - Run FA-2 bench + apply thresholds"
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -77,6 +78,10 @@ bench-summarize:
 
 bench-report:
 	bash scripts/bench_summary.sh
+
+fa2-autotune:
+	@echo "🔧 Running FA-2 auto-tune (GPU required)..."
+	bash scripts/automation/fa2_autotune.sh configs/base.yaml artifacts/fa2_autotune
 
 triton-fwd:
 	NSA_USE_TRITON_SEL=1 NSA_TRITON_SEL_FORCE=1 PYTHONPATH=. pytest -q nsa/tests/test_triton_sel_parity_gpu.py
