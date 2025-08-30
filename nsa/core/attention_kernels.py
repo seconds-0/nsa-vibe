@@ -404,6 +404,11 @@ def selection_attention_varlen_all(
     if os.getenv("NSA_SEL_VARLEN_V2", "1").lower() in ("1", "true", "yes", "on"):
         return selection_attention_varlen_all_v2(Q, K, V, ranges)
     B, S, G, h, Dk = Q.shape
+    # Parity override: when enabled, force causal=True to match packed reference
+    _parity = os.getenv("NSA_SEL_VARLEN_FORCE_PARITY", "0").lower() in ("1", "true", "yes", "on")
+    if _parity:
+        # Force exact parity by delegating to the packed reference
+        return grouped_selection_attention_packed(Q, K, V, ranges)
     device = Q.device
     Dv = V.shape[-1]
     out = torch.zeros((B, S, G, h, Dv), dtype=V.dtype, device=V.device)
@@ -469,9 +474,8 @@ def selection_attention_varlen_all(
             write_pos += Lseg
         cuq[i + 1] = cuq[i] + 1
         cuk[i + 1] = cuk[i] + lens[i]
-    # Try FA‑2 varlen if available and supported. Use causal semantics for parity
-    # with the packed reference (single‑query row with is_causal=True restricts
-    # attention to the first packed key).
+    # Try FA‑2 varlen if available and supported. Default non-causal semantics;
+    # optionally force parity with packed path via NSA_SEL_VARLEN_FORCE_PARITY.
     ok, _ = fa2_supported_verbose(device, Q.dtype, Dk)
     if ok and is_flash_varlen_available():
         try:
@@ -483,7 +487,7 @@ def selection_attention_varlen_all(
                 cuk,
                 max_seqlen_q=1,
                 max_seqlen_k=max(lens),
-                causal=True,
+                causal=_parity,
             )  # [N,h,Dv]
             # Scatter back
             for i, (b, t, g) in enumerate(rows):
@@ -518,13 +522,12 @@ def selection_attention_varlen_all(
                 Vb[j, write : write + Lseg] = V[b, g, s0:e0]
                 write += Lseg
             tgt.append((b, t, g))
-        # Batched dense fallback for this bucket. Use causal semantics to mirror
-        # the packed reference behavior (first key only for Tq=1).
+        # Batched dense fallback for this bucket. Default non-causal; optionally force parity.
         try:
             q_rows = Qb.unsqueeze(1)  # [Nb,1,h,Dk]
             k_rows = Kb.unsqueeze(2).expand(Nb, L, h, Dk)  # [Nb,L,h,Dk]
             v_rows = Vb.unsqueeze(2).expand(Nb, L, h, Dv)  # [Nb,L,h,Dv]
-            Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=True).squeeze(
+            Ob = attention_fa2_dense_batch(q_rows, k_rows, v_rows, causal=_parity).squeeze(
                 1
             )  # [Nb,h,Dv]
             for i, (b, t, g) in enumerate(tgt):
@@ -535,7 +538,7 @@ def selection_attention_varlen_all(
                 q_btgh = Qb[j].unsqueeze(0).unsqueeze(0)  # [1,1,h,Dk]
                 k_btgh = Kb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dk]
                 v_btgh = Vb[j].unsqueeze(0).unsqueeze(0)  # [1,1,L,Dv]
-                out[b, t, g] = attention_bgh(q_btgh, k_btgh, v_btgh, causal=True)[0, 0]
+                out[b, t, g] = attention_bgh(q_btgh, k_btgh, v_btgh, causal=_parity)[0, 0]
     return out
 
 
@@ -549,10 +552,15 @@ def selection_attention_varlen_all_v2(
     Vectorized v2 varlen selection packer with FA‑2 varlen fast path and dense fallback.
     - Eliminates Python loops for packing by using a difference-array mask to build per-row
       allowed indices and flat-select K/V tokens.
-    - Uses causal=True for single‑query rows (parity with packed reference: first key only).
+    - Uses causal=False for single‑query rows.
     - Env: NSA_SEL_VARLEN_MIN_L to bypass on tiny rows (falls back to packed path).
     """
     B, S, G, h, Dk = Q.shape
+    # Parity override: when enabled, force causal=True to match packed reference
+    _parity = os.getenv("NSA_SEL_VARLEN_FORCE_PARITY", "0").lower() in ("1", "true", "yes", "on")
+    if _parity:
+        # Force exact parity by delegating to the packed reference
+        return grouped_selection_attention_packed(Q, K, V, ranges)
     device = Q.device
     Dv = V.shape[-1]
     S_kv = K.shape[2]
@@ -635,7 +643,7 @@ def selection_attention_varlen_all_v2(
     cuk[0] = 0
     torch.cumsum(lens_sel.to(torch.int32), dim=0, out=cuk[1:])
 
-    # FA‑2 varlen (causal) for parity with packed reference (Tq=1)
+    # FA‑2 varlen (non-causal)
     ok, _why = fa2_supported_verbose(device, Q.dtype, Dk)
     max_len = int(lens_sel.max().item())
     if ok and is_flash_varlen_available():
@@ -648,7 +656,7 @@ def selection_attention_varlen_all_v2(
                 cuk,
                 max_seqlen_q=1,
                 max_seqlen_k=max_len,
-                causal=True,
+                causal=_parity,
             )
             out[b_idx, t_idx, g_idx] = o_pack
             return out
@@ -675,11 +683,11 @@ def selection_attention_varlen_all_v2(
             k_rows[j] = k_pack[s0:e0]
             v_rows[j] = v_pack[s0:e0]
         try:
-            Ob = attention_fa2_dense_batch(Qb.unsqueeze(1), k_rows, v_rows, causal=True).squeeze(1)
+            Ob = attention_fa2_dense_batch(Qb.unsqueeze(1), k_rows, v_rows, causal=_parity).squeeze(1)
         except Exception:
             Ob = torch.empty((Nb, h, Dv), dtype=V.dtype, device=device)
             for j in range(Nb):
-                Ob[j] = attention_bgh(Qb[j].unsqueeze(0), k_rows[j].unsqueeze(0), v_rows[j].unsqueeze(0), causal=True)[
+                Ob[j] = attention_bgh(Qb[j].unsqueeze(0), k_rows[j].unsqueeze(0), v_rows[j].unsqueeze(0), causal=_parity)[
                     0
                 ]
         out[b_idx[sel], t_idx[sel], g_idx[sel]] = Ob
