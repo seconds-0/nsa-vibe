@@ -1,0 +1,70 @@
+name: FA-2 Auto-Tune (GPU, manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      safety_margin:
+        description: 'Minimum speedup to enable FA-2 (e.g., 1.2)'
+        default: '1.2'
+        required: false
+
+jobs:
+  autotune:
+    runs-on: [self-hosted, gpu]
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install GPU deps
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U uv
+          uv venv -p 3.11 .venv
+          uv pip sync -r requirements-gpu-cu121-torch24.txt
+          # Optional: ensure flash-attn is present
+          uv run python -c "import importlib,sys; print('flash_attn?', importlib.util.find_spec('flash_attn') is not None)"
+
+      - name: Run FA-2 bench and apply thresholds
+        env:
+          PYTHONPATH: .
+        run: |
+          mkdir -p artifacts/fa2_autotune
+          uv run python bench/bench_fa2.py --mode win --heads 8 --dk 64 --dv 64 --S_list 256,512,1024 --w 256 --iters 50 --device auto | tee artifacts/fa2_autotune/fa2_bench_win.txt || true
+          uv run python bench/bench_fa2.py --mode cmp --heads 8 --dk 64 --dv 64 --S_list 256,512,1024 --l 32 --d 16 --iters 50 --device auto | tee artifacts/fa2_autotune/fa2_bench_cmp.txt || true
+          cat artifacts/fa2_autotune/fa2_bench_win.txt artifacts/fa2_autotune/fa2_bench_cmp.txt > artifacts/fa2_autotune/fa2_bench.txt
+          uv run python bench/threshold_optimizer.py artifacts/fa2_autotune/fa2_bench.txt --config configs/base.yaml --report fa2_thresholds.md --safety-margin "${{ github.event.inputs.safety_margin || '1.2' }}"
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout -b auto/fa2-thresholds-${{ github.run_id }}
+          git add configs/base.yaml fa2_thresholds.md artifacts/fa2_autotune/fa2_bench.txt || true
+          git commit -m "Auto-tune FA-2 thresholds (run ${{ github.run_id }})" || echo "No changes to commit"
+          git push -u origin auto/fa2-thresholds-${{ github.run_id }} || true
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: Auto-tune FA-2 thresholds (run ${{ github.run_id }})
+          branch: auto/fa2-thresholds-${{ github.run_id }}
+          base: master
+          title: PR35 — FA-2 Min-Length Auto-Tune (GPU)
+          body: |
+            This PR updates FA-2 thresholds based on an automated GPU benchmark run.
+
+            - Updated: `configs/base.yaml` runtime.fa2_min_len_{win,cmp}
+            - Report: `fa2_thresholds.md`
+            - Bench log: `artifacts/fa2_autotune/fa2_bench.txt`
+
+            Triggered via workflow_dispatch with safety margin `${{ github.event.inputs.safety_margin || '1.2' }}`.

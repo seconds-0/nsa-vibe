@@ -33,8 +33,6 @@
 - [ ] Rollout: enable Phase 1 toggles in CI/prod defaults and tune per‑node values (doc batch, queue depth).
 
 ## Next Actions
-- Implement Phase 2 warmup in `train_showcase.py` and `train_showcase_fsdp.py` (env flags, optional wait on prefetch queue, heartbeat metrics).
-- Add `scripts/automation/fwe_bootstrap.py` and wire to runbooks; keep remote streaming as primary with local bootstrap opt‑in for strict SLA starts.
 - Run Phase 0 measurements on A100/H100: capture cold/warm first‑batch latencies and steady‑state fetch p95; include heartbeat and console logs under `artifacts/`.
 - Apply Phase 1 toggles in CI and production runbooks; validate no tokens/sec regressions; tune `NSA_FWE_DOC_BATCH`/`NSA_FWE_Q` per node.
 

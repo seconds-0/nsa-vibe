@@ -200,7 +200,14 @@ class ThresholdOptimizer:
     def _find_sliding_threshold(self, results: list[dict]) -> int:
         """Find minimum window size where FA-2 consistently beats masked."""
         if not results:
-            return 512  # Conservative default
+            return 999999  # Disable FA-2 when no data
+
+        # Check if FA-2 is actually faster for ANY configuration
+        has_speedup = any(r["speedup"] >= self.safety_margin for r in results)
+        if not has_speedup:
+            # FA-2 is slower across the board - disable it
+            print(f"FA-2 sliding window slower than SDPA (best speedup: {max(r['speedup'] for r in results):.2f}x)")
+            return 999999  # Disable FA-2
 
         # Group by window size
         window_sizes = sorted(set(r["w"] for r in results))
@@ -212,13 +219,20 @@ class ThresholdOptimizer:
             if all(r["speedup"] >= self.safety_margin for r in w_results):
                 return w
 
-        # If no window size meets criteria, use conservative default
-        return max(window_sizes[-1], 512) if window_sizes else 512
+        # If no window size meets criteria consistently, disable FA-2
+        return 999999  # Disable FA-2 rather than enabling with poor performance
 
     def _find_compressed_threshold(self, results: list[dict]) -> int:
         """Find minimum compressed length where FA-2 beats masked."""
         if not results:
-            return 32  # Conservative default
+            return 999999  # Disable FA-2 when no data
+
+        # Check if FA-2 is actually faster for ANY configuration
+        has_speedup = any(r["speedup"] >= self.safety_margin for r in results)
+        if not has_speedup:
+            # FA-2 is slower across the board - disable it
+            print(f"FA-2 compressed slower than SDPA (best speedup: {max(r['speedup'] for r in results):.2f}x)")
+            return 999999  # Disable FA-2
 
         # Check different sequence lengths
         seq_lengths = sorted(set(r["S"] for r in results))
@@ -237,7 +251,7 @@ class ThresholdOptimizer:
                 else:
                     return 8
 
-        return 32  # Conservative default
+        return 999999  # Disable FA-2 rather than enabling with poor performance
 
     def update_config(
         self,
@@ -326,7 +340,23 @@ class ThresholdOptimizer:
             emoji = "✅" if r["speedup"] >= self.safety_margin else "❌"
             report += f"| {r['S']} | {r['speedup']:.2f}x {emoji} | {r['masked_ms']:.2f} | {r['fa2_ms']:.2f} |\n"
 
-        report += f"""
+        # Check if FA-2 is disabled
+        fa2_disabled = win_threshold == 999999 or cmp_threshold == 999999
+        
+        if fa2_disabled:
+            report += f"""
+## Analysis
+
+⚠️ **FA-2 DISABLED**: FlashAttention-2 is slower than PyTorch SDPA on this GPU.
+
+With a safety margin of {self.safety_margin:.1f}x:
+- **Sliding**: {"DISABLED (FA-2 slower)" if win_threshold == 999999 else f"FA-2 is faster for window sizes ≥ {win_threshold}"}
+- **Compressed**: {"DISABLED (FA-2 slower)" if cmp_threshold == 999999 else f"FA-2 is faster for effective lengths ≥ {cmp_threshold}"}
+
+{"FA-2 has been disabled to preserve performance. PyTorch's native SDPA will be used instead." if fa2_disabled else f"These thresholds ensure FA-2 is only used when it provides at least {int((self.safety_margin - 1) * 100)}% speedup."}
+"""
+        else:
+            report += f"""
 ## Analysis
 
 With a safety margin of {self.safety_margin:.1f}x:
