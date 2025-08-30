@@ -663,7 +663,15 @@ def selection_attention_varlen_all_v2(
         except Exception:
             pass
 
-    # Dense fallback by length buckets
+    # Correctness-first fallback: masked SDPA over an allowed key mask
+    # This path matches the non-causal packed reference exactly and avoids
+    # potential packing/indexing pitfalls in dense-bucket fallbacks.
+    try:
+        return grouped_selection_attention_masked(Q, K, V, ranges)
+    except Exception:
+        pass
+
+    # Legacy dense fallback by length buckets (kept as a final fallback)
     starts = cuk[:-1].to(torch.int64)
     ends = cuk[1:].to(torch.int64)
     Ls = (ends - starts).to(torch.int64)
