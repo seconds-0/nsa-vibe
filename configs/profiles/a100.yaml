@@ -4,6 +4,6 @@ runtime:
   # Set after running selection benches with margin ≥ 1.2×
   sel_triton_min_L: 2048
   # Optional FA‑2 gates (tune via FA‑2 benches)
-  fa2_min_len_win: 256
-  fa2_min_len_cmp: 128
-
+  # Disable FA‑2 by default on A100 for our workload: SDPA is faster
+  fa2_min_len_win: 999999
+  fa2_min_len_cmp: 999999

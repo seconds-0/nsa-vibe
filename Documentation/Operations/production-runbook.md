@@ -582,3 +582,14 @@ rsync -av training_backup_*.tar.gz user@backup-server:/backups/nsa/
 ```
 
 This runbook provides comprehensive operational procedures for production NSA training systems. Keep it updated as new features and optimizations are added to the system.
+### FA‑2 and Selection Defaults (A100)
+- Disable FA‑2 by default on A100. SDPA outperforms FA‑2 for our shapes.
+  - Set `NSA_USE_FA2=0`
+  - In `configs/profiles/a100.yaml`: `runtime.fa2_min_len_win: 999999`, `runtime.fa2_min_len_cmp: 999999`.
+- Keep selection varlen disabled by default: `NSA_USE_SEL_VARLEN=0`.
+- If enabling selection varlen for experiments, rely on masked SDPA fallback (PR40) for correctness and performance.
+
+### Data Loader Settings
+- Enable prefetch and tune queue depth to reduce fetch p95 (`NSA_FWE_PREFETCH=1`, `NSA_FWE_Q=8..16`).
+- Optional warmup (PR36): `NSA_FWE_WARMUP_BATCHES=32..64`, `NSA_FWE_WARMUP_TIMEOUT=60` to reduce first‑step latency.
+- Optional bootstrap: pre‑stage ~5GB JSONL locally (see `scripts/automation/fwe_bootstrap.py`) for strict SLA starts.
