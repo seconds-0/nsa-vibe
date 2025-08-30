@@ -943,12 +943,6 @@ class NSAAttention(nn.Module):
                 pass
         p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all, kv.meta)  # [B,S,G,h,S_sel]
 
-        # Optional: cast group scores to fp32 before top‑k to stabilize tie‑breaks under mixed modes
-        if os.getenv("NSA_P_GRP_FP32", "0").lower() in ("1", "true", "yes", "on"):
-            p_grp_all = p_slc_all.sum(dim=3).to(torch.float32)
-        else:
-            p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
-
         # M8: Optional Eq.9 verification in batched prefill
         if self._env_cache.get("verify_eq9", False):
             is_equiv, details = verify_mapping_equivalence(p_cmp_all, kv.meta)
@@ -958,6 +952,7 @@ class NSAAttention(nn.Module):
                     msg="Eq.9 mapping verification failed in batched prefill",
                     **details,
                 )
+        p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
         log(
             "prefill.scores",
             B=B,
@@ -1380,10 +1375,7 @@ class NSAAttention(nn.Module):
         scale = 1.0 / (self.d_k**0.5)
         p_cmp_all = compute_pcmp_all(Q, kv.K_cmp, scale)  # [B,S,G,h,S_cmp]
         p_slc_all = map_pcmp_to_pslc_batched(p_cmp_all, kv.meta)  # [B,S,G,h,S_sel]
-        if os.getenv("NSA_P_GRP_FP32", "0").lower() in ("1", "true", "yes", "on"):
-            p_grp_all = p_slc_all.sum(dim=3).to(torch.float32)
-        else:
-            p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
+        p_grp_all = p_slc_all.sum(dim=3)  # [B,S,G,S_sel]
 
         outs = []
         sel_ranges_accum: List[torch.Tensor] = []
