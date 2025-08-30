@@ -67,6 +67,11 @@ python -c "from nsa.core.nsa_attention import NSAAttention; print('Attention imp
 ls -la $CONFIG
 python -c "import yaml; yaml.safe_load(open('$CONFIG'))"
 
+# Validate FA-2 policy precedence (env > runtime > default)
+# Example: disable globally via env
+export NSA_USE_FA2=0; python -c "import os; print('NSA_USE_FA2=', os.getenv('NSA_USE_FA2'))"
+# Or rely on A100 runtime defaults: runtime.fa2_enabled: false; fa2_min_len_*: -1
+
 # Validate dataset access
 python scripts/automation/fwe_smoke.py --seq-len 1024 --batch 1 --timeout 60 --tokenizer byte
 
@@ -127,6 +132,12 @@ mkdir -p $TRITON_CACHE_DIR
      --synthetic-on-fail \
      2>&1 | tee training.log
    ```
+
+   FA‑2 Policy (A100 defaults)
+   - Primary: set `runtime.fa2_enabled: false` (maps to `NSA_USE_FA2=0` unless env overrides).
+   - Secondary: disable thresholds with sentinel `-1` via `runtime.fa2_min_len_win/cmp` (maps to `NSA_FA2_MIN_LEN_*`).
+   - Precedence: env overrides config; branch env (`NSA_USE_FA2_{WIN,CMP}`) override global.
+   - See Documentation/Reports/A100-FA2-vs-SDPA-Notes.md for benchmark methodology and rationale.
 
 3. **Start Monitoring**
    ```bash

@@ -3,7 +3,15 @@ runtime:
   use_triton_sel: true
   # Set after running selection benches with margin ≥ 1.2×
   sel_triton_min_L: 2048
-  # Optional FA‑2 gates (tune via FA‑2 benches)
-  # Disable FA‑2 by default on A100 for our workload: SDPA is faster
-  fa2_min_len_win: 999999
-  fa2_min_len_cmp: 999999
+  # FlashAttention‑2 policy on A100 (SM80): disabled by default
+  # Rationale: For current NSA M7 shapes (prefill/decode), SDPA paths are
+  # consistently as fast or faster on A100 in internal benches. See
+  # Documentation/Reports/A100-FA2-vs-SDPA-Notes.md for methodology.
+  #
+  # Precedence:
+  # - Env overrides (NSA_USE_FA2*, NSA_FA2_MIN_LEN_*) take precedence.
+  # - This profile sets a boolean default and disable sentinels.
+  fa2_enabled: false        # prefer explicit boolean off on A100
+  # Use -1 sentinel to disable branch thresholds (clearer than "magic" large ints)
+  fa2_min_len_win: -1       # disable sliding FA‑2 unless explicitly enabled
+  fa2_min_len_cmp: -1       # disable compressed FA‑2 unless explicitly enabled
