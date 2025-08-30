@@ -1,0 +1,75 @@
+name: CI Decode Perf Guard (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  perf-guard:
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps (GPU)
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U uv
+          uv venv -p 3.11 .venv
+          uv pip sync -r requirements-gpu-cu121-torch24.txt || true
+      - name: Run decode bench
+        env:
+          PYTHONPATH: .
+        run: |
+          mkdir -p artifacts
+          uv run python bench/bench_decode.py --S_list 512,1024 --iters 16 --warmup 4 --csv artifacts/decode_guard.csv --branch_force_mode env
+      - name: Check tokens/sec vs baseline
+        run: |
+          python - <<'PY'
+import csv, sys, json
+from pathlib import Path
+csv_path = Path('artifacts/decode_guard.csv')
+baseline_path = Path('baselines/a100_decode_guard.json')
+if not csv_path.exists():
+    print('missing CSV'); sys.exit(2)
+with open(csv_path) as f:
+    rows = list(csv.DictReader(f))
+# Expect rows with Context, Total(ms)
+values = {}
+for r in rows:
+    if 'Context' in r and 'Total(ms)' in r:
+        ctx = r['Context'].strip()
+        try:
+            ms = float(r['Total(ms)'])
+            values[ctx] = ms
+        except Exception:
+            pass
+if not baseline_path.exists():
+    print('Baseline not found; printing current means:')
+    print(json.dumps(values, indent=2))
+    sys.exit(0)
+base = json.loads(baseline_path.read_text())
+# Compare with ±5% tolerance
+ok = True
+for k, ms in values.items():
+    if k not in base:
+        print(f'[WARN] missing baseline for {k}')
+        continue
+    b = float(base[k])
+    change = (b - ms) / b * 100.0
+    if abs(change) > 5.0:
+        print(f'[FAIL] {k}: {ms:.2f}ms vs baseline {b:.2f}ms (Δ {change:+.1f}%)')
+        ok = False
+    else:
+        print(f'[OK] {k}: {ms:.2f}ms vs baseline {b:.2f}ms (Δ {change:+.1f}%)')
+sys.exit(0 if ok else 1)
+PY
+      - name: Upload bench artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decode_guard_csv
+          path: artifacts/decode_guard.csv
