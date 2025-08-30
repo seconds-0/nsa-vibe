@@ -6,6 +6,22 @@
 **Target Performance**: 300-800 tok/s  
 **GPU**: NVIDIA A100 80GB PCIe  
 
+## Status
+- [x] FA‑2 integration scaffolding in place: dense/varlen wrappers with capability probes and safe fallbacks (`nsa/kernels/flash_wrappers.py`), default‑enable compressed FA‑2 with sliding guarded off by default (`NSAAttention` env cache). GPU parity tests and runbooks added.
+- [x] Hot‑path `repeat_interleave` eliminated in attention paths via `unsqueeze/expand/reshape` (OOM‑safe); tests keep `repeat_interleave` only for convenience.
+- [x] Workspace pre‑sizing for varlen/selection pack with env reserves (`NSA_VARLEN_RESERVE_{N,K}`, `NSA_SEL_PACK_RESERVE_{N,L}`) to reduce allocator churn.
+- [x] Selection varlen attention implemented with FA‑2 varlen fast path and exact per‑row fallback; parity unit test added.
+- [x] Opt‑in mixed precision for p_cmp scoring via `NSA_P_CMP_MIXED` (bf16 autocast, upcast to original dtype).
+- [x] Batched prefill RoPE alignment fixed (Q/K consistent across batched vs sequential); small‑S equivalence test updated.
+- [~] PR31 (selection varlen) fixes landed locally; GPU validation to be re‑run on A100/H100 before merge.
+- [ ] FA‑2 min‑length thresholds auto‑tune: integrate `scripts/apply_fa2_thresholds.py` into config workflows and CI.
+
+## Next Actions
+- Vectorize selection varlen pack v2 (eliminate Python loops in `selection_attention_varlen_all`); gate with `NSA_SEL_VARLEN_V2` and add min‑L threshold to avoid overhead on tiny rows.
+- Expand mixed precision to selection mapping (`p_slc`/`p_grp`) under env guard with float32 tie‑breaks; add parity tests across dtypes.
+- Add kernel fusion experiments (gate MLP + combine) under `NSA_GATE_COMPILE` for benches; keep opt‑in and parity‑guarded.
+- Strengthen telemetry: counters for FA‑2 engagement vs fallback, varlen vs packed path usage, and selection length statistics surfaced in heartbeat to inform thresholds.
+
 ## Executive Summary
 
 The primary performance bottleneck is that **FlashAttention-2 is not actually being used** despite being enabled. The system is falling back to slow `repeat_interleave` operations and standard SDPA. Fixing this single issue should provide a 10-20x speedup, bringing performance into the target range.
