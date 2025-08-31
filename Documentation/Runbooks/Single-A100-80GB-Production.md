@@ -88,6 +88,16 @@ python -u scripts/train_showcase.py \
   2>&1 | tee training.log
 ```
 
+Performance overrides (useful for canaries or triage):
+```bash
+# Disable gradient checkpointing and reduce problem size
+python -u scripts/train_showcase.py \
+  --dataset fineweb_edu --ddp 0 --no-gc \
+  --seq-len 512 --batch-size 1 --accum-batches 1 \
+  --fwe-report-docs 1000 --loader-timeout 120 --synthetic-on-fail \
+  2>&1 | tee training.log
+```
+
 Artifacts: `artifacts/m7c_125m_1xa100_prod/` (CSV, heartbeat, TB logs, counters)
 
 ## 7) Monitoring & Smoke Validation

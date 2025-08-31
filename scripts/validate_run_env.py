@@ -61,6 +61,10 @@ def main() -> int:
         issues.append(Issue("WARN", "TORCH_CUDNN_ALLOW_TF32 not enabled (set to 1)"))
     if os.getenv("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", "0") not in ("1", "true", "yes"):
         issues.append(Issue("WARN", "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE not enabled (set to 1)"))
+    if env_bool("NSA_DETECT_ANOMALY", "0"):
+        issues.append(Issue("WARN", "NSA_DETECT_ANOMALY is enabled; severe slowdown expected"))
+    if env_bool("NSA_DEBUG_LOG", "0") or os.getenv("TORCH_LOGS"):
+        issues.append(Issue("WARN", "Debug logging enabled (NSA_DEBUG_LOG or TORCH_LOGS); disable for perf"))
 
     # GPU check (best-effort)
     try:
@@ -91,4 +95,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
