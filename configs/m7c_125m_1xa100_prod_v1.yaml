@@ -1,0 +1,42 @@
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_groups: 2
+  d_k: 64
+  d_v: 64
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: "avg"
+runtime:
+  device: "cuda"
+  precision: "bf16"
+  use_flash: true            # keep true; FA‑2 disabled via flags below
+  use_triton_sel: false      # SDPA selection in production
+  gradient_checkpointing: true
+  # FA‑2 policy on A100: disabled by default
+  fa2_enabled: false
+  fa2_min_len_win: -1
+  fa2_min_len_cmp: -1
+  # Keep Triton selection fully off via threshold (defensive)
+  sel_triton_min_L: 4096
+train:
+  steps: 50000
+  seq_len: 2048
+  batch_size: 2
+  accumulate_grad_batches: 2
+  lr: 2.0e-4
+  lr_schedule: "cosine"
+  warmup_steps: 2000
+  weight_decay: 0.01
+  grad_clip: 1.0
+  log_every: 20
+  eval_every: 1000
+  save_every: 5000
+  seed: 1337
+  out_dir: "artifacts/m7c_125m_1xa100_prod"
+

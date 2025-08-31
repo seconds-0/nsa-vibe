@@ -1,84 +1,26 @@
-# Single A100 (80GB) Production Runbook — NSA Selection Varlen Packed
+# Single A100 (80GB) Production Runbook — SDPA‑First, FA‑2 Off
 
-This runbook provides exact, reproducible steps to run the 50k training on a single NVIDIA A100 80GB instance, with the optimized selection varlen packing and improved data pipeline. It includes branch/commit capture, environment setup, configs, commands, monitoring, expectations, and toggles.
-
-## 0) Prepare Code (on your dev machine)
-
-- Create a feature branch and commit the latest changes:
-
-```bash
-cd /path/to/nsa-vibe
-git checkout -b feat/single-a100-prod
-# Stage updated files (selection packing, data pipeline, FA probes, runbooks)
-git add \
-  nsa/core/attention_kernels.py \
-  nsa/core/selection_scorer.py \
-  nsa/kernels/flash_wrappers.py \
-  scripts/train_showcase.py \
-  nsa/data_pipeline.py \
-  launch_production_50k_single_gpu.sh \
-  Documentation/Runbooks/Single-A100-80GB-Production.md \
-  a.md \
-  "Documentation/Reports/2025-08-27 Core Engineer Report - NSA Selection Varlen Packing v1.md"
-
-git commit -m "Single A100 prod: selection varlen packing + data loader prefetch + runbook"
-COMMIT_SHA=$(git rev-parse --short=12 HEAD); echo "COMMIT=$COMMIT_SHA"
-
-git push origin feat/single-a100-prod
-```
-
-Record for the report:
-- Branch: `feat/single-a100-prod`
-- Commit: `${COMMIT_SHA}`
-
-If you prefer not to push, create a tarball and upload:
-
-```bash
-git archive --format=tar.gz --output nsa-vibe_${COMMIT_SHA}.tar.gz HEAD
-# scp or upload the tarball to the new instance
-```
+This runbook provides exact, reproducible steps to run the 50k training on a single NVIDIA A100 80GB instance using SDPA‑first defaults with FA‑2 and selection‑varlen disabled (per current A100 policy). It includes env setup, config, commands, monitoring, expectations, and toggles.
 
 ## 1) Provision A100 80GB Instance
 
-- OS: Ubuntu 22.04 (recommended) or equivalent
-- Driver/CUDA: Standard NVIDIA driver (matching PyTorch CU121 wheels); CUDA toolkit not required
-- Ensure outbound network access (for Hugging Face streaming) or have a local dataset path
+- OS: Ubuntu 22.04 (recommended)
+- Driver: Recent NVIDIA driver compatible with CUDA 12.x
+- Network: outbound access for dataset streaming; otherwise prepare a local dataset path
 
-## 2) Environment Setup (on the new instance)
+## 2) Environment Setup
 
 ```bash
-# System prep
 sudo apt-get update && sudo apt-get install -y python3.11 python3.11-venv build-essential git
 
-# Clone repo and checkout branch/commit
-cd ~
-git clone https://<your_git_remote>/nsa-vibe.git
-cd nsa-vibe
-git fetch origin feat/single-a100-prod
-git checkout feat/single-a100-prod
-# Optionally pin to exact commit
-# git checkout <COMMIT_SHA>
+cd ~ && git clone <your-remote>/nsa-vibe.git && cd nsa-vibe
 
-# Create venv and install deps (Torch 2.4 CU121)
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -U pip uv
 uv pip sync -r requirements-gpu-cu121-torch24.txt
 
-# Required: FlashAttention 2 (FA‑2) for selection varlen fast path at S=2048)
-pip install -U pip wheel ninja packaging
-pip install --no-cache-dir --no-build-isolation flash-attn
-
-# Probe FA‑2 availability (must print 'FA2 varlen OK')
-python - << 'PY'
-try:
-    from flash_attn import flash_attn_varlen_func
-    print('FA2 varlen OK')
-except Exception as e:
-    raise SystemExit(f'FA2 missing: {e}')
-PY
-
-# Quick version check
+# Quick version & GPU check
 python - << 'PY'
 import torch, sys
 print('python:', sys.version)
@@ -87,104 +29,130 @@ print('device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else
 PY
 ```
 
-## 3) Configs (exact)
+## 3) Config (single‑GPU)
 
-We will use `configs/m7c_125m_2xa100_production.yaml` with runtime overrides:
-- `train.seq_len = 2048`
-- `train.batch_size = 2` (file value; we override to 1 at runtime)
-- `train.steps = 50000`
+Use the provided file `configs/m7c_125m_1xa100_prod_v1.yaml` (added in this repo) — it sets BF16, gradient checkpointing, and disables FA‑2 via thresholds and boolean policy.
 
-No file edits are required; runtime env sets `NSA_BATCH_SIZE=1` and `NSA_ACCUM=4`.
-
-## 4) Single‑GPU Smoke (200 steps)
-
-This validates kernels and the data pipeline before a long run. FA‑2 is mandatory; abort if probe fails.
-
+Validate:
 ```bash
-source .venv/bin/activate
-export CONFIG=configs/m7c_125m_2xa100_production.yaml
-
-# Training profile
-export NSA_BATCH_SIZE=1
-export NSA_ACCUM=4
-
-# NSA fast paths
-export NSA_PREFILL_BATCHED=1
-export NSA_USE_SEL_PACK=1
-export NSA_FORCE_PARITY=0
-export NSA_SEL_RANGES_V2_MIN_S=1024
-export NSA_SEL_RANGES_V2=1
-export NSA_USE_FA2=1; export NSA_USE_FA2_WIN=1; export NSA_USE_FA2_CMP=1
-
-# Data loader perf
-export NSA_FWE_DOC_BATCH=64
-export NSA_FWE_PREFETCH=1
-export NSA_FWE_Q=4
-
-# Debug & allocator
-export NSA_SDPA_AUDIT=1
-export NSA_DEBUG_TIMING=1
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True
-export PYTHONUNBUFFERED=1
-
-# Run 200 steps
-PYTHONPATH=. python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 0 --steps 200 | tee artifacts/smoke_single_a100.log
-
-# Acceptance gate: require >= 300 toks/s average (rough check)
-awk '/toks\/s/{sum+=$(NF); n++} END{if(n>0){avg=sum/n; printf("avg_toks_per_s=%.1f\n",avg); exit (avg>=300)?0:1} else {exit 1}}' artifacts/smoke_single_a100.log
+python -c "import yaml; yaml.safe_load(open('configs/m7c_125m_1xa100_prod_v1.yaml')); print('config ok')"
 ```
 
-Expected in logs:
-- Regular step lines: `toks/s XXX | fetch YYms | fetch_p50 ZZms | fetch_p95 WWms`
-- Heartbeat files under `artifacts/train_showcase/heartbeat_rank0.jsonl`
-- No OOM; `fetch_p95` typically < 50–100 ms; fallback counters near zero
-
-## 5) 50k Production Run (single GPU)
-
-Use the provided launcher script (already configured with recommended env):
+## 4) Core Environment Flags
 
 ```bash
-source .venv/bin/activate
-bash ./launch_production_50k_single_gpu.sh
+export PYTHONPATH=.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TORCH_CUDNN_ALLOW_TF32=1
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+
+# SDPA-first policy on A100
+export NSA_USE_FA2=0
+export NSA_FA2_MIN_LEN_WIN=-1
+export NSA_FA2_MIN_LEN_CMP=-1
+export NSA_USE_SEL_VARLEN=0
+export NSA_USE_TRITON_SEL=0
+export NSA_STRICT_ASSERTS=0
+
+export CONFIG=configs/m7c_125m_1xa100_prod_v1.yaml
 ```
 
-It launches:
-- Batch size 1, grad accumulation 4
-- Batched tokenization + prefetch (queue size 4)
-- Selection varlen packing with v2 ranges and FA-2 enabled (if installed)
-- Debug timing and a one-time SDPA audit
+Validate environment (recommended):
+```bash
+python scripts/validate_run_env.py --strict
+```
 
-Artifacts:
-- `artifacts/m7c_125m_2xa100_prod/production_single_gpu.log`
-- `artifacts/train_showcase/*` (heartbeats, CSVs, mem dumps)
+## 5) Data Loader Smoke (Important)
 
-## 6) Monitoring & Expectations
+Ensure first batch arrives quickly (catches dataset / connectivity issues early):
+```bash
+python scripts/automation/fwe_smoke.py --seq-len 1024 --batch 1 --timeout 60 --tokenizer byte
+```
+Expect: `[smoke][OK] first batch in X.XXs shape=(1, 1024)`
 
-- Throughput (toks/s) with FA‑2: 500–800 toks/s typical for 125M @ S=2048, batch=1. Minimum acceptance: 300 toks/s on smoke.
-- Fetch times: aim for `fetch_p95 < 80–100 ms`; if higher, increase `NSA_FWE_DOC_BATCH=128` and/or `NSA_FWE_Q=8`.
-- Memory: 80GB is sufficient at batch=1; if near OOM, unset `NSA_SDPA_AUDIT` and lower `NSA_ACCUM` to 2.
-- Stability: no rising fallback counters; gate stats not collapsed (entropy_mean > 0.5 early on).
+## 6) Launch 50k Training (Single GPU)
 
-## 7) Common Toggles
+Easiest path is the provided wrapper script:
+```bash
+bash scripts/run_m7c_1xa100_production.sh
+```
 
-- IO faster: `export NSA_FWE_DOC_BATCH=128; export NSA_FWE_Q=8`
-- Disable prefetch: `export NSA_FWE_PREFETCH=0`
-- Force selection v1: `export NSA_SEL_RANGES_V2=0` (debug only)
-- Disable FA-2: `export NSA_USE_FA2=0; export NSA_USE_FA2_WIN=0; export NSA_USE_FA2_CMP=0`
-- Byte tokenizer smoke: `export NSA_TOKENIZER=byte`
+Manual command (equivalent):
+```bash
+python -u scripts/train_showcase.py \
+  --dataset fineweb_edu \
+  --ddp 0 \
+  --fwe-report-docs 1000 \
+  --loader-timeout 120 \
+  --synthetic-on-fail \
+  2>&1 | tee training.log
+```
 
-## 8) Troubleshooting
+Artifacts: `artifacts/m7c_125m_1xa100_prod/` (CSV, heartbeat, TB logs, counters)
 
-- Loader stalls early: ensure `pip install datasets` (comes via requirements), and instance has outbound network. Try `--dataset fineweb_edu_local --local-path /data/fineweb.jsonl` as a fallback.
-- OOM: confirm batch=1, reduce `NSA_ACCUM` to 2, unset `NSA_SDPA_AUDIT`, keep `PYTORCH_CUDA_ALLOC_CONF` as provided.
-- Low toks/s with small fetch times: compute‑bound; confirm FA‑2 is installed and accepted by the probe; otherwise reduce S or proceed acknowledging lower throughput.
+## 7) Monitoring & Smoke Validation
 
-## 9) Reporting
+- Heartbeat freshness:
+  ```bash
+  tail -f artifacts/m7c_125m_1xa100_prod/heartbeat_rank0.jsonl
+  ```
+- Quick CSV trend:
+  ```bash
+  watch -n 10 "tail -n 3 artifacts/m7c_125m_1xa100_prod/training.csv"
+  ```
+- Smoke validation on run artifacts:
+  ```bash
+  python scripts/run_smoke_tests.py \
+    --csv artifacts/m7c_125m_1xa100_prod/training.csv \
+    --heartbeat artifacts/m7c_125m_1xa100_prod/heartbeat_rank0.jsonl \
+    --min-steps 200 --min-tps 10
+  ```
 
-- Save a daily report under `Documentation/Reports/`:
-  - `<yyyy-mm-dd> Test Engineer Report - Single A100 50K v1.md`
-  - Include Branch, Commit, GPU, Torch/CUDA, env, config path, toks/s trend, fetch p50/p95, gate/counters, and artifacts links.
+- Watchdog (Recommended): proactively halts on stalls/collapses
+  ```bash
+  # Auto-started by the wrapper; to run manually:
+  python scripts/_watchdog.py --dir artifacts/m7c_125m_1xa100_prod --halt 1 --interval 30 &
+  ```
+
+## 8) TensorBoard (Recommended)
+
+```bash
+tensorboard --logdir artifacts/m7c_125m_1xa100_prod/tb --port 6006 --bind_all
+```
+Open http://<host>:6006 and track loss/throughput.
+
+## 9) Optional: Bench + Baseline Snapshot (Perf Guard)
+
+Create a simple decode baseline you can compare against later (local only):
+```bash
+PYTHONPATH=. python scripts/bench_snapshot_baseline.py \
+  --csv artifacts/decode_guard.csv \
+  --out baselines/a100_decode_guard.json \
+  --S_list 512,1024 --iters 16 --warmup 4
+cat baselines/a100_decode_guard.json
+```
+
+## 10) Expectations
+
+- Heartbeat: frequent updates; `dt_step_s` stabilizes; data fetch times mostly sub‑second.
+- CSV: loss gradual decrease (not strictly monotonic); throughput stabilizes after warmup.
+- Fallback counters: low/stable; no FA‑2 fallbacks (FA‑2 is off).
+- Selection stats: not degenerate; diversity present in `k_stats.csv`.
+
+## 11) Troubleshooting
+
+- Loader stalls: re‑run `fwe_smoke.py`; keep `--synthetic-on-fail`; ensure outbound access.
+- Low throughput: ensure debug is off; confirm FA‑2 is off; SDPA will be the path on A100.
+- OOM (unlikely at 80GB): lower `train.batch_size` to 1 or `train.seq_len` to 1024; keep checkpointing.
+
+## 12) Graceful Stop / Resume
+
+- Stop:
+  ```bash
+  touch artifacts/m7c_125m_1xa100_prod/.HALT && echo "halt: manual_stop" > artifacts/m7c_125m_1xa100_prod/.HALT
+  ```
+- Resume: relaunch with `--resume <checkpoint>` (see artifacts saved every 5000 steps)
 
 ---
 
-This runbook is designed to be copy‑paste ready. Deviations (e.g., no FA‑2 wheel) are acceptable; note them in the report.
+This runbook reflects SDPA‑first defaults on A100 with FA‑2 and selection‑varlen disabled. It is copy‑paste ready for a single A100 80GB setup.
