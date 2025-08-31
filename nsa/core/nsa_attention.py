@@ -710,7 +710,14 @@ class NSAAttention(nn.Module):
                     except Exception as e:
                         self._fallback_counters["selection_mask_fails"] += 1
                         self._fallback_counters["total_fallbacks"] += 1
-                        log("warn.masked_selection_forced_fallback", error=str(e))
+                        log("warn.masked_selection_forced_fallback", 
+                            error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
+                            total_fails=self._fallback_counters["selection_mask_fails"])
                         O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
                 elif use_triton_sel:
                     try:
@@ -728,6 +735,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.triton_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_triton_fails"],
                         )
                         # Fallback to packed SDPA
@@ -750,6 +762,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.cuda_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_cuda_fails"],
                         )
                         # Fallback to packed SDPA
@@ -771,6 +788,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.packed_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_pack_fails"],
                         )
                         # Fallback to gather SDPA
@@ -789,6 +811,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.masked_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_mask_fails"],
                         )
                         # Fallback to gather SDPA
@@ -1184,7 +1211,13 @@ class NSAAttention(nn.Module):
                 # Fallback to gather SDPA
                 self._fallback_counters["selection_mask_fails"] += 1
                 self._fallback_counters["total_fallbacks"] += 1
-                log("warn.masked_selection_prefill_forced_fallback", error=str(e))
+                log("warn.masked_selection_prefill_forced_fallback", 
+                    error=str(e),
+                    Q_shape=list(Q.shape) if hasattr(Q, 'shape') else list(Q_t.shape),
+                    K_shape=list(kv.K_sel.shape) if hasattr(kv, 'K_sel') else list(K_sel_t.shape),
+                    V_shape=list(kv.V_sel.shape) if hasattr(kv, 'V_sel') else list(V_sel_t.shape),
+                    ranges_shape=list(sel_ranges_all.shape) if 'sel_ranges_all' in locals() else list(sel_ranges.shape) if sel_ranges is not None else None,
+                    total_fails=self._fallback_counters["selection_mask_fails"])
                 O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         elif use_triton_sel:
             try:
@@ -1199,6 +1232,10 @@ class NSAAttention(nn.Module):
                 log(
                     "warn.triton_selection_prefill_fallback",
                     error=str(e),
+                    Q_shape=list(Q.shape) if hasattr(Q, 'shape') else list(Q_t.shape),
+                    K_shape=list(kv.K_sel.shape) if hasattr(kv, 'K_sel') else list(K_sel_t.shape),
+                    V_shape=list(kv.V_sel.shape) if hasattr(kv, 'V_sel') else list(V_sel_t.shape),
+                    ranges_shape=list(sel_ranges_all.shape) if 'sel_ranges_all' in locals() else list(sel_ranges.shape) if 'sel_ranges' in locals() and sel_ranges is not None else None,
                     total_fails=self._fallback_counters["selection_triton_fails"],
                 )
                 # Fallback to packed SDPA
@@ -1551,7 +1588,13 @@ class NSAAttention(nn.Module):
                 except Exception as e:
                     self._fallback_counters["selection_mask_fails"] += 1
                     self._fallback_counters["total_fallbacks"] += 1
-                    log("warn.masked_selection_prefill_forced_fallback", error=str(e))
+                    log("warn.masked_selection_prefill_forced_fallback", 
+                    error=str(e),
+                    Q_shape=list(Q.shape) if hasattr(Q, 'shape') else list(Q_t.shape),
+                    K_shape=list(kv.K_sel.shape) if hasattr(kv, 'K_sel') else list(K_sel_t.shape),
+                    V_shape=list(kv.V_sel.shape) if hasattr(kv, 'V_sel') else list(V_sel_t.shape),
+                    ranges_shape=list(sel_ranges_all.shape) if 'sel_ranges_all' in locals() else list(sel_ranges.shape) if sel_ranges is not None else None,
+                    total_fails=self._fallback_counters["selection_mask_fails"])
                     O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
             elif use_triton_sel:
                 try:

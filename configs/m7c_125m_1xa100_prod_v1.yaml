@@ -1,3 +1,22 @@
+# Production Configuration for Single A100 80GB
+# 
+# Expected Performance Baselines (validated in 50k run):
+# - Throughput: 9,000-9,400 tokens/second
+# - Memory Usage: ~3 GB GPU memory
+# - Step Time: ~0.44 seconds per step
+# - Training Time (50k steps): ~6 hours
+# - Loss convergence: 5.7 → 2.6 by step 1,300
+#
+# Required Environment Variables for Optimal Performance:
+# - NSA_SDPA_NO_FLASH=1      # Use standard SDPA (more stable)
+# - NSA_FORCE_SEL_MASK=1     # Force masked selection path (critical)
+# - NSA_PREFILL_BATCHED=1    # Use batched prefill
+#
+# If performance is below 8,000 toks/s, verify:
+# 1. Masked selection path is active (check logs for "path=masked_forced")
+# 2. No excessive fallback counters in heartbeat telemetry
+# 3. GPU utilization is 60-75%
+
 model:
   dim: 768
   n_layers: 12
