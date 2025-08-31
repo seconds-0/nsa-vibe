@@ -309,6 +309,8 @@ class NSAAttention(nn.Module):
             "use_triton_sel": parse_bool("NSA_USE_TRITON_SEL", "0") or self.use_triton_sel,
             "use_cuda_sel": parse_bool("NSA_SEL_CUDA", "0"),
             "use_sel_varlen": parse_bool("NSA_USE_SEL_VARLEN", "0"),
+            # Hard override to force masked selection path (debug/triage)
+            "force_sel_mask": parse_bool("NSA_FORCE_SEL_MASK", "0"),
             "fa2_all": parse_bool("NSA_USE_FA2", "0"),
             "fa2_win": parse_bool("NSA_USE_FA2_WIN", "0"),
             "fa2_cmp": parse_bool("NSA_USE_FA2_CMP", "0"),
@@ -697,7 +699,27 @@ class NSAAttention(nn.Module):
                 use_sel_pack = env["use_sel_pack"] and not force_parity
                 use_triton_sel = env["use_triton_sel"] and not force_parity
                 use_cuda_sel = env["use_cuda_sel"] and not force_parity
-                if use_triton_sel:
+                force_sel_mask = env.get("force_sel_mask", False) and not force_parity
+                if force_sel_mask:
+                    try:
+                        O_sel_bt = grouped_selection_attention_masked(
+                            Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                        )
+                        O_sel = O_sel_bt[:, 0]
+                        log("decode.sel.path", path="masked_forced")
+                    except Exception as e:
+                        self._fallback_counters["selection_mask_fails"] += 1
+                        self._fallback_counters["total_fallbacks"] += 1
+                        log("warn.masked_selection_forced_fallback", 
+                            error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
+                            total_fails=self._fallback_counters["selection_mask_fails"])
+                        O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
+                elif use_triton_sel:
                     try:
                         from nsa.kernels.triton_sel_kernel import selection_attention_triton
 
@@ -705,6 +727,7 @@ class NSAAttention(nn.Module):
                             Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
                         )
                         O_sel = O_sel_bt[:, 0]
+                        log("decode.sel.path", path="triton")
                     except Exception as e:
                         # M8: Fallback counter - Triton selection failed
                         self._fallback_counters["selection_triton_fails"] += 1
@@ -712,6 +735,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.triton_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_triton_fails"],
                         )
                         # Fallback to packed SDPA
@@ -734,6 +762,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.cuda_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_cuda_fails"],
                         )
                         # Fallback to packed SDPA
@@ -747,6 +780,7 @@ class NSAAttention(nn.Module):
                             Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
                         )
                         O_sel = O_sel_bt[:, 0]
+                        log("decode.sel.path", path="packed")
                     except Exception as e:
                         # M8: Fallback counter - Packed selection failed
                         self._fallback_counters["selection_pack_fails"] += 1
@@ -754,6 +788,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.packed_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_pack_fails"],
                         )
                         # Fallback to gather SDPA
@@ -764,6 +803,7 @@ class NSAAttention(nn.Module):
                             Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
                         )
                         O_sel = O_sel_bt[:, 0]
+                        log("decode.sel.path", path="masked")
                     except Exception as e:
                         # M8: Fallback counter - Masked selection failed
                         self._fallback_counters["selection_mask_fails"] += 1
@@ -771,6 +811,11 @@ class NSAAttention(nn.Module):
                         log(
                             "warn.masked_selection_fallback",
                             error=str(e),
+                            step=t,
+                            Q_shape=list(Q_t.shape),
+                            K_shape=list(K_sel_t.shape),
+                            V_shape=list(V_sel_t.shape),
+                            ranges_shape=list(sel_ranges.shape) if sel_ranges is not None else None,
                             total_fails=self._fallback_counters["selection_mask_fails"],
                         )
                         # Fallback to gather SDPA
@@ -1157,11 +1202,29 @@ class NSAAttention(nn.Module):
         use_triton_sel = (
             self._env_cache.get("use_triton_sel", False) or self.use_triton_sel and not force_parity
         )
-        if use_triton_sel:
+        force_sel_mask = self._env_cache.get("force_sel_mask", False) and not force_parity
+        if force_sel_mask:
+            try:
+                O_sel = grouped_selection_attention_masked(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+                log("prefill.sel.path", path="masked_forced")
+            except Exception as e:
+                # Fallback to gather SDPA
+                self._fallback_counters["selection_mask_fails"] += 1
+                self._fallback_counters["total_fallbacks"] += 1
+                log("warn.masked_selection_prefill_forced_fallback", 
+                    error=str(e),
+                    Q_shape=list(Q.shape) if hasattr(Q, 'shape') else list(Q_t.shape),
+                    K_shape=list(kv.K_sel.shape) if hasattr(kv, 'K_sel') else list(K_sel_t.shape),
+                    V_shape=list(kv.V_sel.shape) if hasattr(kv, 'V_sel') else list(V_sel_t.shape),
+                    ranges_shape=list(sel_ranges_all.shape) if 'sel_ranges_all' in locals() else list(sel_ranges.shape) if sel_ranges is not None else None,
+                    total_fails=self._fallback_counters["selection_mask_fails"])
+                O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+        elif use_triton_sel:
             try:
                 from nsa.kernels.triton_sel_kernel import selection_attention_triton
 
                 O_sel = selection_attention_triton(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+                log("prefill.sel.path", path="triton")
             except Exception as e:
                 # M8: Fallback counter - Triton selection failed in prefill
                 self._fallback_counters["selection_triton_fails"] += 1
@@ -1169,6 +1232,10 @@ class NSAAttention(nn.Module):
                 log(
                     "warn.triton_selection_prefill_fallback",
                     error=str(e),
+                    Q_shape=list(Q.shape) if hasattr(Q, 'shape') else list(Q_t.shape),
+                    K_shape=list(kv.K_sel.shape) if hasattr(kv, 'K_sel') else list(K_sel_t.shape),
+                    V_shape=list(kv.V_sel.shape) if hasattr(kv, 'V_sel') else list(V_sel_t.shape),
+                    ranges_shape=list(sel_ranges_all.shape) if 'sel_ranges_all' in locals() else list(sel_ranges.shape) if 'sel_ranges' in locals() and sel_ranges is not None else None,
                     total_fails=self._fallback_counters["selection_triton_fails"],
                 )
                 # Fallback to packed SDPA
@@ -1178,6 +1245,7 @@ class NSAAttention(nn.Module):
                 from nsa.core.attention_kernels import selection_attention_varlen_all
 
                 O_sel = selection_attention_varlen_all(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+                log("prefill.sel.path", path="varlen")
             except Exception as e:
                 # Fallback counter reuse for selection pack failures
                 self._fallback_counters["selection_pack_fails"] += 1
@@ -1189,6 +1257,7 @@ class NSAAttention(nn.Module):
                 )
                 # Fallback to packed SDPA
                 O_sel = grouped_selection_attention_packed(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+                log("prefill.sel.path", path="packed")
         elif use_sel_pack:
             try:
                 O_sel = grouped_selection_attention_packed(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
@@ -1206,6 +1275,7 @@ class NSAAttention(nn.Module):
         elif self._env_cache.get("use_sel_mask", False):
             try:
                 O_sel = grouped_selection_attention_masked(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+                log("prefill.sel.path", path="masked")
             except Exception as e:
                 # M8: Fallback counter - Masked selection failed in prefill
                 self._fallback_counters["selection_mask_fails"] += 1
@@ -1219,6 +1289,7 @@ class NSAAttention(nn.Module):
                 O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
         else:
             O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
+            log("prefill.sel.path", path="gather")
         if strict_asserts and not torch.isfinite(O_sel).all():
             log("warn.prefill_sel_nonfinite_fallback")
             O_sel = grouped_selection_attention(Q, kv.K_sel, kv.V_sel, sel_ranges_all)
@@ -1501,7 +1572,113 @@ class NSAAttention(nn.Module):
             Q_t = Q[:, t]
             K_sel_t = kv.K_sel[:, :, : t + 1, :]
             V_sel_t = kv.V_sel[:, :, : t + 1, :]
-            O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
+            # Selection attention routing (mirror decode/batched semantics)
+            force_parity = self._env_cache.get("force_parity", False)
+            use_sel_pack = self._env_cache.get("use_sel_pack", True) and not force_parity
+            use_triton_sel = self._env_cache.get("use_triton_sel", False) and not force_parity
+            use_cuda_sel = self._env_cache.get("use_cuda_sel", False) and not force_parity
+            force_sel_mask = self._env_cache.get("force_sel_mask", False) and not force_parity
+            if force_sel_mask:
+                try:
+                    O_sel_bt = grouped_selection_attention_masked(
+                        Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                    )
+                    O_sel = O_sel_bt[:, 0]
+                    log("prefill.sel.path", path="masked_forced")
+                except Exception as e:
+                    self._fallback_counters["selection_mask_fails"] += 1
+                    self._fallback_counters["total_fallbacks"] += 1
+                    log("warn.masked_selection_prefill_forced_fallback", 
+                    error=str(e),
+                    Q_shape=list(Q.shape) if hasattr(Q, 'shape') else list(Q_t.shape),
+                    K_shape=list(kv.K_sel.shape) if hasattr(kv, 'K_sel') else list(K_sel_t.shape),
+                    V_shape=list(kv.V_sel.shape) if hasattr(kv, 'V_sel') else list(V_sel_t.shape),
+                    ranges_shape=list(sel_ranges_all.shape) if 'sel_ranges_all' in locals() else list(sel_ranges.shape) if sel_ranges is not None else None,
+                    total_fails=self._fallback_counters["selection_mask_fails"])
+                    O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
+            elif use_triton_sel:
+                try:
+                    from nsa.kernels.triton_sel_kernel import selection_attention_triton
+
+                    O_sel_bt = selection_attention_triton(
+                        Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                    )
+                    O_sel = O_sel_bt[:, 0]
+                    log("prefill.sel.path", path="triton")
+                except Exception as e:
+                    # Fallback counter - Triton selection failed (sequential prefill)
+                    self._fallback_counters["selection_triton_fails"] += 1
+                    self._fallback_counters["total_fallbacks"] += 1
+                    log(
+                        "warn.triton_selection_prefill_fallback",
+                        error=str(e),
+                        total_fails=self._fallback_counters["selection_triton_fails"],
+                    )
+                    # Fallback to packed SDPA
+                    O_sel_bt = grouped_selection_attention_packed(
+                        Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                    )
+                    O_sel = O_sel_bt[:, 0]
+            elif use_cuda_sel:
+                try:
+                    from nsa.kernels.cuda_sel_kernel import selection_attention_cuda
+
+                    O_sel_bt = selection_attention_cuda(
+                        Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                    )
+                    O_sel = O_sel_bt[:, 0]
+                except Exception as e:
+                    # Fallback counter - CUDA selection failed (sequential prefill)
+                    self._fallback_counters["selection_cuda_fails"] += 1
+                    self._fallback_counters["total_fallbacks"] += 1
+                    log(
+                        "warn.cuda_selection_prefill_fallback",
+                        error=str(e),
+                        total_fails=self._fallback_counters["selection_cuda_fails"],
+                    )
+                    # Fallback to packed SDPA
+                    O_sel_bt = grouped_selection_attention_packed(
+                        Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                    )
+                    O_sel = O_sel_bt[:, 0]
+            elif use_sel_pack:
+                try:
+                    O_sel_bt = grouped_selection_attention_packed(
+                        Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                    )
+                    O_sel = O_sel_bt[:, 0]
+                    log("prefill.sel.path", path="packed")
+                except Exception as e:
+                    # Fallback counter - Packed selection failed (sequential prefill)
+                    self._fallback_counters["selection_pack_fails"] += 1
+                    self._fallback_counters["total_fallbacks"] += 1
+                    log(
+                        "warn.packed_selection_prefill_fallback",
+                        error=str(e),
+                        total_fails=self._fallback_counters["selection_pack_fails"],
+                    )
+                    # Fallback to gather SDPA
+                    O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
+            elif self._env_cache.get("use_sel_mask", False) and not force_parity:
+                try:
+                    O_sel_bt = grouped_selection_attention_masked(
+                        Q_t.unsqueeze(1), K_sel_t, V_sel_t, sel_ranges.unsqueeze(1)
+                    )
+                    O_sel = O_sel_bt[:, 0]
+                    log("prefill.sel.path", path="masked")
+                except Exception as e:
+                    # Fallback counter - Masked selection failed (sequential prefill)
+                    self._fallback_counters["selection_mask_fails"] += 1
+                    self._fallback_counters["total_fallbacks"] += 1
+                    log(
+                        "warn.masked_selection_prefill_fallback",
+                        error=str(e),
+                        total_fails=self._fallback_counters["selection_mask_fails"],
+                    )
+                    # Fallback to gather SDPA
+                    O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
+            else:
+                O_sel = self._sdpa_over_ranges(Q_t, K_sel_t, V_sel_t, sel_ranges)
             win_len = min(self.w, t + 1)
             K_w = kv.K_win[:, :, t + 1 - win_len : t + 1, :]
             V_w = kv.V_win[:, :, t + 1 - win_len : t + 1, :]

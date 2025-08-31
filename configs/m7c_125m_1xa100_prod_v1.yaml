@@ -1,0 +1,61 @@
+# Production Configuration for Single A100 80GB
+# 
+# Expected Performance Baselines (validated in 50k run):
+# - Throughput: 9,000-9,400 tokens/second
+# - Memory Usage: ~3 GB GPU memory
+# - Step Time: ~0.44 seconds per step
+# - Training Time (50k steps): ~6 hours
+# - Loss convergence: 5.7 → 2.6 by step 1,300
+#
+# Required Environment Variables for Optimal Performance:
+# - NSA_SDPA_NO_FLASH=1      # Use standard SDPA (more stable)
+# - NSA_FORCE_SEL_MASK=1     # Force masked selection path (critical)
+# - NSA_PREFILL_BATCHED=1    # Use batched prefill
+#
+# If performance is below 8,000 toks/s, verify:
+# 1. Masked selection path is active (check logs for "path=masked_forced")
+# 2. No excessive fallback counters in heartbeat telemetry
+# 3. GPU utilization is 60-75%
+
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_groups: 2
+  d_k: 64
+  d_v: 64
+nsa:
+  l: 32
+  d: 16
+  l_sel: 64
+  n_sel: 16
+  w: 512
+  phi: "avg"
+runtime:
+  device: "cuda"
+  precision: "bf16"
+  use_flash: true            # keep true; FA‑2 disabled via flags below
+  use_triton_sel: false      # SDPA selection in production
+  gradient_checkpointing: true
+  # FA‑2 policy on A100: disabled by default
+  fa2_enabled: false
+  fa2_min_len_win: -1
+  fa2_min_len_cmp: -1
+  # Keep Triton selection fully off via threshold (defensive)
+  sel_triton_min_L: 4096
+train:
+  steps: 50000
+  seq_len: 2048
+  batch_size: 2
+  accumulate_grad_batches: 2
+  lr: 2.0e-4
+  lr_schedule: "cosine"
+  warmup_steps: 2000
+  weight_decay: 0.01
+  grad_clip: 1.0
+  log_every: 20
+  eval_every: 1000
+  save_every: 5000
+  seed: 1337
+  out_dir: "artifacts/m7c_125m_1xa100_prod"
+

@@ -287,6 +287,13 @@ def main():
     cli.add_argument("--synthetic-on-fail", action="store_true", help="Fallback to synthetic if FineWeb‑Edu stalls")
     cli.add_argument("--local-path", type=str, default="", help="Path for --dataset fineweb_edu_local (text or JSONL)")
     cli.add_argument("--steps", type=int, default=None, help="Override training steps for quick traces")
+    # Performance-critical runtime overrides (single-GPU and canaries)
+    cli.add_argument("--seq-len", type=int, default=None, help="Override training sequence length")
+    cli.add_argument("--batch-size", type=int, default=None, help="Override global batch size")
+    cli.add_argument(
+        "--accum-batches", type=int, default=None, help="Override gradient accumulation steps"
+    )
+    cli.add_argument("--no-gc", action="store_true", help="Disable gradient checkpointing")
     cli_args, _ = cli.parse_known_args()
     cfg_path = os.environ.get("CONFIG", "configs/train_showcase.yaml")
     print(f"[boot] loading config {cfg_path}", flush=True)
@@ -322,6 +329,68 @@ def main():
             os.environ["NSA_FA2_MIN_LEN_CMP"] = str(int(rt.fa2_min_len_cmp))
     except Exception as _e:
         print(f"[env-policy] skipped applying FA-2 policy: {_e}")
+
+    # Apply FA-2 policy from config → env without overriding explicit env
+    try:
+        rt = cfg.get("runtime", {}) if hasattr(cfg, "get") else {}
+        # Boolean master switch: runtime.fa2_enabled (default: None)
+        if "fa2_enabled" in rt and "NSA_USE_FA2" not in os.environ:
+            os.environ["NSA_USE_FA2"] = "1" if bool(rt.fa2_enabled) else "0"
+            # Keep branch flags aligned if unset
+            if "NSA_USE_FA2_WIN" not in os.environ:
+                os.environ["NSA_USE_FA2_WIN"] = os.environ["NSA_USE_FA2"]
+            if "NSA_USE_FA2_CMP" not in os.environ:
+                os.environ["NSA_USE_FA2_CMP"] = os.environ["NSA_USE_FA2"]
+        # Thresholds: runtime.fa2_min_len_win/cmp → NSA_FA2_MIN_LEN_*
+        if "fa2_min_len_win" in rt and "NSA_FA2_MIN_LEN_WIN" not in os.environ:
+            os.environ["NSA_FA2_MIN_LEN_WIN"] = str(int(rt.fa2_min_len_win))
+        if "fa2_min_len_cmp" in rt and "NSA_FA2_MIN_LEN_CMP" not in os.environ:
+            os.environ["NSA_FA2_MIN_LEN_CMP"] = str(int(rt.fa2_min_len_cmp))
+    except Exception as _e:
+        print(f"[env-policy] skipped applying FA-2 policy: {_e}")
+
+    # Apply CLI/env overrides for seq_len, batch_size, accumulate_grad_batches, and GC
+    try:
+        if cli_args.seq_len is not None:
+            cfg.train.seq_len = int(cli_args.seq_len)
+        elif os.getenv("NSA_SEQ_LEN"):
+            cfg.train.seq_len = int(os.getenv("NSA_SEQ_LEN", "0") or 0)
+    except Exception as _e:
+        print(f"[override] failed to set seq_len: {_e}")
+    try:
+        if cli_args.batch_size is not None:
+            cfg.train.batch_size = int(cli_args.batch_size)
+        elif os.getenv("NSA_BATCH_SIZE"):
+            cfg.train.batch_size = int(os.getenv("NSA_BATCH_SIZE", "0") or 0)
+    except Exception as _e:
+        print(f"[override] failed to set batch_size: {_e}")
+    try:
+        if cli_args.accum_batches is not None:
+            cfg.train.accumulate_grad_batches = int(cli_args.accum_batches)
+        elif os.getenv("NSA_ACCUM"):
+            cfg.train.accumulate_grad_batches = int(os.getenv("NSA_ACCUM", "1") or 1)
+    except Exception as _e:
+        print(f"[override] failed to set accumulate_grad_batches: {_e}")
+    try:
+        if cli_args.no_gc or os.getenv("NSA_NO_GC", "0").lower() in ("1", "true", "yes"):
+            if hasattr(cfg.runtime, "gradient_checkpointing"):
+                cfg.runtime.gradient_checkpointing = False
+            else:
+                # minimal compat
+                cfg.runtime["gradient_checkpointing"] = False
+    except Exception as _e:
+        print(f"[override] failed to apply no-gc: {_e}")
+
+    # Log effective training overrides summary
+    try:
+        gc_flag = bool(cfg.runtime.get("gradient_checkpointing", False))
+        print(
+            f"[boot] effective config: S={int(cfg.train.seq_len)} B={int(cfg.train.batch_size)} "
+            f"accum={int(cfg.train.get('accumulate_grad_batches', 1))} gc={'on' if gc_flag else 'off'}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
     _dump_env_info(out_dir)
     _register_signal_dump(out_dir)
@@ -1171,18 +1240,26 @@ def main():
         # Optional per-step memory snapshot before forward
         if mem_every and (step % mem_every == 1 or mem_every == 1):
             _dump_mem(out_dir, f"pre_step{step}")
+        # Forward pass under selected SDPA policy and autocast when enabled
         with _sdp_kernel_ctx():
             if use_amp and amp_dtype is not None:
                 with torch.cuda.amp.autocast(dtype=amp_dtype):
                     logits = model(x)
             else:
                 logits = model(x)
-        logits_trim = logits[:, :-1, :].contiguous()
-        if use_amp and amp_dtype is not None:
-            with torch.cuda.amp.autocast(dtype=amp_dtype):
-                raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1)))
-        else:
-            raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1)))
+        # Compute loss in float32 for numerical stability, even when amp is enabled
+        logits_trim = logits[:, :-1, :].contiguous().float()
+        target = y.view(B_local * (S - 1))
+        raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), target)
+        # Optional early diagnostics on first steps
+        if rank == 0 and step <= 3 and os.getenv("NSA_DEBUG_LOSS", "0").lower() in ("1", "true", "yes"):
+            try:
+                _mn = float(logits_trim.min().item())
+                _mx = float(logits_trim.max().item())
+                _isfinite = bool(torch.isfinite(raw_loss))
+                print(f"[debug] step {step}: logits[min={_mn:.2e}, max={_mx:.2e}] loss_finite={_isfinite}", flush=True)
+            except Exception:
+                pass
         loss = raw_loss / max(1, accum)
         # Early abort on NaN/Inf — coherently across all ranks to avoid DDP hangs
         stop_local = 1 if (not torch.isfinite(loss)) else 0
