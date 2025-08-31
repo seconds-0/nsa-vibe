@@ -1240,18 +1240,26 @@ def main():
         # Optional per-step memory snapshot before forward
         if mem_every and (step % mem_every == 1 or mem_every == 1):
             _dump_mem(out_dir, f"pre_step{step}")
+        # Forward pass under selected SDPA policy and autocast when enabled
         with _sdp_kernel_ctx():
             if use_amp and amp_dtype is not None:
                 with torch.cuda.amp.autocast(dtype=amp_dtype):
                     logits = model(x)
             else:
                 logits = model(x)
-        logits_trim = logits[:, :-1, :].contiguous()
-        if use_amp and amp_dtype is not None:
-            with torch.cuda.amp.autocast(dtype=amp_dtype):
-                raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1)))
-        else:
-            raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), y.view(B_local * (S - 1)))
+        # Compute loss in float32 for numerical stability, even when amp is enabled
+        logits_trim = logits[:, :-1, :].contiguous().float()
+        target = y.view(B_local * (S - 1))
+        raw_loss = loss_fn(logits_trim.view(B_local * (S - 1), vocab), target)
+        # Optional early diagnostics on first steps
+        if rank == 0 and step <= 3 and os.getenv("NSA_DEBUG_LOSS", "0").lower() in ("1", "true", "yes"):
+            try:
+                _mn = float(logits_trim.min().item())
+                _mx = float(logits_trim.max().item())
+                _isfinite = bool(torch.isfinite(raw_loss))
+                print(f"[debug] step {step}: logits[min={_mn:.2e}, max={_mx:.2e}] loss_finite={_isfinite}", flush=True)
+            except Exception:
+                pass
         loss = raw_loss / max(1, accum)
         # Early abort on NaN/Inf — coherently across all ranks to avoid DDP hangs
         stop_local = 1 if (not torch.isfinite(loss)) else 0

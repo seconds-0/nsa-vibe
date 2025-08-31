@@ -54,6 +54,10 @@ def main() -> int:
         issues.append(Issue("WARN", "NSA_USE_TRITON_SEL is enabled; recommend 0 for production"))
     if not env_bool("NSA_USE_SEL_MASK", "0"):
         issues.append(Issue("WARN", "NSA_USE_SEL_MASK is not enabled; prefer masked selection over packed for perf"))
+    if env_bool("NSA_FORCE_PARITY", "0"):
+        issues.append(Issue("FAIL", "NSA_FORCE_PARITY=1 will bypass masked selection and force gather/parity"))
+    if os.getenv("NSA_FORCE_BRANCH"):
+        issues.append(Issue("WARN", "NSA_FORCE_BRANCH is set; routing forced to a single branch (debug only)"))
 
     # Allocator & TF32
     alloc = os.getenv("PYTORCH_CUDA_ALLOC_CONF", "")
