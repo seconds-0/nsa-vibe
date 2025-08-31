@@ -731,14 +731,32 @@ def grouped_selection_attention_masked(
     diff.scatter_add_(1, ends_f, -one)
     allowed = diff[:, :-1].cumsum(dim=1).gt(0).reshape(B, S, G, S_kv)
 
+    # Detect rows with no allowed keys (all False along key dimension)
+    row_has_any = allowed.any(dim=-1)  # [B,S,G]
+    row_empty = ~row_has_any
+
+    # Prevent SDPA from seeing an all-−inf row which can produce NaNs.
+    # For originally empty rows, force a single safe key (index 0) to True,
+    # run SDPA, then zero their outputs afterward to preserve semantics.
+    if row_empty.any():
+        allowed_safe = allowed.clone()
+        flat = allowed_safe.view(B * S * G, S_kv)
+        row_empty_flat = row_empty.reshape(B * S * G)
+        if S_kv > 0:
+            flat[row_empty_flat, 0] = True
+        allowed_safe = flat.view_as(allowed_safe)
+    else:
+        allowed_safe = allowed
+
     # Prepare SDPA tensors: [B,G*h,S, D*] and mask [B,G*h,S,S_kv]
     Qf = Q.reshape(B, S, G * h, Dk).transpose(1, 2).contiguous()  # [B,G*h,S,Dk]
     Kf = K.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(B, G * h, S_kv, Dk).contiguous()
     Vf = V.unsqueeze(2).expand(-1, -1, h, -1, -1).reshape(B, G * h, S_kv, V.shape[-1]).contiguous()
-    zeros = torch.zeros((B, G * h, S, S_kv), dtype=Qf.dtype, device=device)
-    neg_inf = torch.full((B, G * h, S, S_kv), float("-inf"), dtype=Qf.dtype, device=device)
+    # Build additive mask in float32 for numerical stability with -inf
+    zeros = torch.zeros((B, G * h, S, S_kv), dtype=torch.float32, device=device)
+    neg_inf = torch.full((B, G * h, S, S_kv), float("-inf"), dtype=torch.float32, device=device)
     Mf = torch.where(
-        allowed.transpose(1, 2)  # [B,G,S,S_kv]
+        allowed_safe.transpose(1, 2)  # [B,G,S,S_kv]
         .unsqueeze(2)
         .expand(-1, -1, h, -1, -1)
         .reshape(B, G * h, S, S_kv),
@@ -748,9 +766,9 @@ def grouped_selection_attention_masked(
 
     Of = F.scaled_dot_product_attention(Qf, Kf, Vf, attn_mask=Mf)  # [B,G*h,S,Dv]
     Of = Of.transpose(1, 2).reshape(B, S, G, h, V.shape[-1])
-    # Guard against rows with no allowed keys (all -inf mask) → zero them
-    row_has_any = allowed.any(dim=-1)  # [B,S,G]
-    Of = torch.where(row_has_any.unsqueeze(-1).unsqueeze(-1), Of, torch.zeros_like(Of))
+    # Zero outputs for originally empty rows to preserve semantics
+    if row_empty.any():
+        Of = torch.where(row_has_any.unsqueeze(-1).unsqueeze(-1), Of, torch.zeros_like(Of))
     return Of
 
 
