@@ -785,3 +785,4 @@ ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/run_smoke_tests.py --csv artifac
 - TensorBoard events: `artifacts/m7c_125m/tb/`
 - Checkpoints: `artifacts/m7c_125m/checkpoint_step*.pt`
 - Stack dumps: `artifacts/train_showcase/stackdump_*.txt`
+

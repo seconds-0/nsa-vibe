@@ -52,6 +52,8 @@ export NSA_FA2_MIN_LEN_WIN=-1
 export NSA_FA2_MIN_LEN_CMP=-1
 export NSA_USE_SEL_VARLEN=0
 export NSA_USE_TRITON_SEL=0
+export NSA_USE_SEL_PACK=0
+export NSA_USE_SEL_MASK=1
 export NSA_STRICT_ASSERTS=0
 
 export CONFIG=configs/m7c_125m_1xa100_prod_v1.yaml

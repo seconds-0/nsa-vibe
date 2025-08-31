@@ -52,6 +52,8 @@ def main() -> int:
         issues.append(Issue("FAIL", "NSA_USE_SEL_VARLEN is enabled; expected 0"))
     if env_bool("NSA_USE_TRITON_SEL", "0"):
         issues.append(Issue("WARN", "NSA_USE_TRITON_SEL is enabled; recommend 0 for production"))
+    if not env_bool("NSA_USE_SEL_MASK", "0"):
+        issues.append(Issue("WARN", "NSA_USE_SEL_MASK is not enabled; prefer masked selection over packed for perf"))
 
     # Allocator & TF32
     alloc = os.getenv("PYTORCH_CUDA_ALLOC_CONF", "")
