@@ -105,6 +105,48 @@ def audit_fa2_support(head_dim: int, heads: int = 8) -> None:
         pass
 
 
+def log_fa2_support_matrix(head_dims: tuple[int, ...] = (64, 96, 128, 192, 256)) -> None:
+    """Log a concise FA‑2 support matrix for common head_dims and dtypes.
+
+    Logs rows like: fa2.audit.matrix sm=90 D=128 dt=float16 dense_ok=True varlen_ok=True
+    """
+    try:
+        if not _audit_enabled() or not torch.cuda.is_available():
+            return
+        dev = torch.device("cuda")
+        sm = torch.cuda.get_device_capability(dev)
+        smi = 10 * sm[0] + sm[1]
+        for D in head_dims:
+            for dt in (torch.float16, torch.bfloat16):
+                # Dense probe tensors
+                q = torch.randn(1, 16, 8, D, device=dev, dtype=dt).contiguous()
+                k = torch.randn(1, 16, 8, D, device=dev, dtype=dt).contiguous()
+                v = torch.randn(1, 16, 8, D, device=dev, dtype=dt).contiguous()
+                dense_ok, d_detail = contracts_fa2_supported_verbose(q=q, k=k, v=v, head_dim=D, is_varlen=False)
+                # Varlen probe tensors (packed-like shapes)
+                qv = torch.randn(16, 8, D, device=dev, dtype=dt).contiguous()
+                kv = torch.randn(64, 8, D, device=dev, dtype=dt).contiguous()
+                varlen_ok, v_detail = contracts_fa2_supported_verbose(q=qv, k=kv, v=kv, head_dim=D, is_varlen=True)
+                log(
+                    "fa2.audit.matrix",
+                    sm=smi,
+                    D=int(D),
+                    dt=str(dt),
+                    dense_ok=bool(dense_ok),
+                    varlen_ok=bool(varlen_ok),
+                    dense_reasons=d_detail.get("reasons", []),
+                    varlen_reasons=v_detail.get("reasons", []),
+                )
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _log_perf_fallback(tag: str, **kwargs) -> None:
+    """Log expected perf impact on fallback when audit/timing is enabled."""
+    if _env_bool("NSA_DEBUG_TIMING") or _env_bool("NSA_SDPA_AUDIT"):
+        log(tag, **kwargs)
+
+
 def fa2_supported_verbose(
     device: torch.device, dtype: torch.dtype, head_dim: int
 ) -> tuple[bool, str]:
@@ -201,8 +243,28 @@ def attention_bgh(
                 if not torch.isfinite(o).all():
                     log("warn.flash_bgh_nonfinite", path="fa2.dense")
                 return torch.nan_to_num(o, nan=0.0)
+            else:
+                # Contracts blocked: log fallback + expected slowdown band
+                reasons = _detail.get("reasons", []) if isinstance(_detail, dict) else []
+                _log_perf_fallback(
+                    "fa2.fallback",
+                    path="bgh",
+                    reason=(reasons[0] if reasons else "contracts_block"),
+                    expected_slowdown="10-30x",
+                    B=int(B),
+                    S=int(S),
+                    D=int(Dk),
+                )
         except Exception:
-            pass
+            _log_perf_fallback(
+                "fa2.fallback",
+                path="bgh",
+                reason="exception_in_flash_call",
+                expected_slowdown="10-30x",
+                B=int(B),
+                S=int(S),
+                D=int(Dk),
+            )
     # SDPA fallback
     if _env_bool("NSA_DEBUG_TIMING"):
         log("fa2.bgh.path", path="sdpa", B=B, G=G, h=h, S=S, Dk=Dk)
@@ -259,9 +321,21 @@ def attention_fa2_dense_batch(
                 D=int(q.shape[3]),
                 dtype=str(q.dtype),
             )
-        ok_contracts, _ = contracts_fa2_supported_verbose(q=q, k=k, v=v, head_dim=int(q.shape[-1]), is_varlen=False)
+        ok_contracts, _detail = contracts_fa2_supported_verbose(q=q, k=k, v=v, head_dim=int(q.shape[-1]), is_varlen=False)
         if ok_contracts:
             return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
+        else:
+            reasons = _detail.get("reasons", []) if isinstance(_detail, dict) else []
+            _log_perf_fallback(
+                "fa2.fallback",
+                path="dense_batch",
+                reason=(reasons[0] if reasons else "contracts_block"),
+                expected_slowdown="5-20x",
+                N=int(q.shape[0]),
+                Tq=int(q.shape[1]),
+                Tk=int(k.shape[1]),
+                D=int(q.shape[3]),
+            )
     except Exception:
         # SDPA fallback per row
         N, Tq, h, D = q.shape
@@ -269,6 +343,16 @@ def attention_fa2_dense_batch(
         Dv = v.shape[-1]
         if _env_bool("NSA_DEBUG_TIMING"):
             log("fa2.batch.path", path="sdpa", N=int(N), Tq=int(Tq), Tk=int(Tk))
+        _log_perf_fallback(
+            "fa2.fallback",
+            path="dense_batch",
+            reason="exception_in_flash_call",
+            expected_slowdown="5-20x",
+            N=int(N),
+            Tq=int(Tq),
+            Tk=int(Tk),
+            D=int(D),
+        )
         q2 = q.reshape(N * h, Tq, D)
         k2 = k.reshape(N * h, Tk, D)
         v2 = v.reshape(N * h, Tk, Dv)
@@ -344,6 +428,16 @@ def attention_fa2_varlen(
                 softmax_scale=None,
                 causal=causal,
             )
+        else:
+            reasons = _detail.get("reasons", []) if isinstance(_detail, dict) else []
+            _log_perf_fallback(
+                "fa2.fallback",
+                path="varlen",
+                reason=(reasons[0] if reasons else "contracts_block"),
+                expected_slowdown="5-20x",
+                N=int(cu_seqlens_q.numel() - 1),
+                D=int(q.shape[2]),
+            )
     except Exception:
         # Try KV-packed API variant
         try:
@@ -377,5 +471,23 @@ def attention_fa2_varlen(
                     softmax_scale=None,
                     causal=causal,
                 )
+            else:
+                reasons = _detail.get("reasons", []) if isinstance(_detail, dict) else []
+                _log_perf_fallback(
+                    "fa2.fallback",
+                    path="varlen_kvpacked",
+                    reason=(reasons[0] if reasons else "contracts_block"),
+                    expected_slowdown="5-20x",
+                    N=int(cu_seqlens_q.numel() - 1),
+                    D=int(q.shape[2]),
+                )
         except Exception:
+            _log_perf_fallback(
+                "fa2.fallback",
+                path="varlen",
+                reason="exception_in_flash_call",
+                expected_slowdown="5-20x",
+                N=int(cu_seqlens_q.numel() - 1),
+                D=int(q.shape[2]),
+            )
             raise NotImplementedError("FA-2 varlen API not available; caller should fallback")

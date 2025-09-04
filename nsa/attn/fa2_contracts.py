@@ -49,6 +49,13 @@ def fa2_supported_verbose(
             or (sm < 90 and (hd <= 128 or (allow_d_gt_128 and hd <= 256)))
         )
     )
+    # Estimate a batch-like size from the first dim when available
+    b_est = None
+    if q is not None and q.dim() >= 3:
+        b_est = int(q.shape[0])
+    elif qkv is not None and qkv.dim() >= 3:
+        b_est = int(qkv.shape[0])
+
     reasons: list[str] = []
     if not dtype_ok:
         reasons.append("dtype must be fp16/bf16")
@@ -58,7 +65,12 @@ def fa2_supported_verbose(
         reasons.append(
             f"head_dim={hd} invalid for SM{sm}; need %8==0 and ≤{256 if sm>=90 else (128 if not allow_d_gt_128 else 256)}"
         )
-    return (dtype_ok and contig_ok and hd_ok), {"sm": sm, "hd": hd, "reasons": reasons}
+    # Batch size awareness: warn/gate very large batches unless explicitly allowed
+    allow_large_batch = _env_bool("NSA_FA2_ALLOW_LARGE_BATCH", False)
+    if b_est is not None and b_est > 1024 and not allow_large_batch:
+        reasons.append(f"batch_size={b_est} > 1024 without override")
+    ok = (dtype_ok and contig_ok and hd_ok and not (b_est is not None and b_est > 1024 and not allow_large_batch))
+    return ok, {"sm": sm, "hd": hd, "reasons": reasons}
 
 
 def check_cu_seqlens(cu: torch.Tensor, nnz: int, B: int) -> bool:

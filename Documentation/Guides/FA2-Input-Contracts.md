@@ -36,3 +36,4 @@ Cheap runtime asserts to add
 - contiguity: `.is_contiguous()` on q/k/v or qkv along the packed dims.
 - varlen: `cu.dtype==torch.int32`; `cu.numel()==B+1`; `cu[0]==0`; `torch.all(cu[1:]>=cu[:-1])`.
 - decode safety: when passing `causal=False`, assert that the K slice ends at t.
+- batch size: if effective batch `B > 1024`, require `NSA_FA2_ALLOW_LARGE_BATCH=1` or fallback.
