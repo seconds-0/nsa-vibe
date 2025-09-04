@@ -26,7 +26,7 @@ from nsa.core.selection_scorer import (
     select_topn_ranges_batched,
     verify_mapping_equivalence,
 )
-from nsa.kernels.flash_wrappers import attention_bgh
+from nsa.kernels.flash_wrappers import attention_bgh, audit_fa2_support, log_fa2_support_matrix
 
 
 class GateMLP(nn.Module):
@@ -288,7 +288,14 @@ class NSAAttention(nn.Module):
                 self.phi_v_conv.weight.fill_(1.0 / float(self.l))
         else:
             self.phi_k_conv = None
-            self.phi_v_conv = None
+        self.phi_v_conv = None
+        # Optional FA-2 audit on init (best-effort; logs only)
+        try:
+            if os.getenv("NSA_FA2_AUDIT", "0").lower() in ("1", "true", "yes", "on"):
+                audit_fa2_support(self.d_k, heads=self.h_per_group)
+                log_fa2_support_matrix()
+        except Exception:
+            pass
 
     def _cache_env_vars(self) -> None:
         """Cache environment variables to avoid repeated parsing in hot path."""
