@@ -4,6 +4,10 @@ import torch
 import torch.nn.functional as F
 
 from nsa.core.debug import log
+from nsa.attn.fa2_contracts import (
+    fa2_supported_verbose as contracts_fa2_supported_verbose,
+    check_cu_seqlens as _check_cu_seqlens,
+)
 
 
 def _capability(device: torch.device) -> tuple[int, int] | None:
@@ -56,6 +60,49 @@ def is_flash_varlen_available() -> bool:
             return True
         except Exception:
             return False
+
+
+def _audit_enabled() -> bool:
+    return _env_bool("NSA_FA2_AUDIT", False)
+
+
+def audit_fa2_support(head_dim: int, heads: int = 8) -> None:
+    """Optional startup audit to proactively validate FA‑2 availability.
+
+    - Checks imports and SM/head_dim contracts
+    - Runs a tiny dense forward if eligible; logs pass/fail
+    - No exception bubbles out; this is best-effort observability
+    """
+    try:
+        if not _audit_enabled():
+            return
+        if not torch.cuda.is_available():
+            log("fa2.audit.skip", reason="no_cuda")
+            return
+        dev = torch.device("cuda")
+        sm = torch.cuda.get_device_capability(dev)
+        smi = 10 * sm[0] + sm[1]
+        # Minimal shapes
+        B, T = 1, 16
+        H = max(1, heads)
+        dt = torch.float16
+        q = torch.randn(B, T, H, head_dim, device=dev, dtype=dt).contiguous()
+        k = torch.randn(B, T, H, head_dim, device=dev, dtype=dt).contiguous()
+        v = torch.randn(B, T, H, head_dim, device=dev, dtype=dt).contiguous()
+        ok, detail = contracts_fa2_supported_verbose(q=q, k=k, v=v, head_dim=head_dim, is_varlen=False)
+        if not ok:
+            log("fa2.audit.result", ok=False, sm=smi, head_dim=int(head_dim), reasons=detail.get("reasons"))
+            return
+        try:
+            from flash_attn import flash_attn_func  # type: ignore
+
+            _ = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=True)
+            log("fa2.audit.result", ok=True, sm=smi, head_dim=int(head_dim), dtype=str(dt))
+        except Exception as e:  # pragma: no cover
+            log("fa2.audit.fail", sm=smi, head_dim=int(head_dim), err=repr(e))
+    except Exception:  # pragma: no cover
+        # Never fail caller due to audit
+        pass
 
 
 def fa2_supported_verbose(
@@ -133,10 +180,14 @@ def attention_bgh(
                 q = q.to(dq)
                 k = k.to(dq)
                 v = v.to(dq)
+            # Contracts after shaping/contiguity to avoid false negatives
+            ok_contracts, _detail = contracts_fa2_supported_verbose(
+                q=q, k=k, v=v, head_dim=Dk, is_varlen=False
+            )
             if _env_bool("NSA_DEBUG_TIMING"):
                 log(
                     "fa2.bgh.path",
-                    path="fa2.dense",
+                    path="fa2.dense" if ok_contracts else "sdpa.contracts_block",
                     B=B,
                     G=G,
                     h=h,
@@ -144,11 +195,12 @@ def attention_bgh(
                     Dk=Dk,
                     dtype=str(q.dtype),
                 )
-            o = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
-            o = o.reshape(B, G, h, -1)
-            if not torch.isfinite(o).all():
-                log("warn.flash_bgh_nonfinite", path="fa2.dense")
-            return torch.nan_to_num(o, nan=0.0)
+            if ok_contracts:
+                o = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
+                o = o.reshape(B, G, h, -1)
+                if not torch.isfinite(o).all():
+                    log("warn.flash_bgh_nonfinite", path="fa2.dense")
+                return torch.nan_to_num(o, nan=0.0)
         except Exception:
             pass
     # SDPA fallback
@@ -207,7 +259,9 @@ def attention_fa2_dense_batch(
                 D=int(q.shape[3]),
                 dtype=str(q.dtype),
             )
-        return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
+        ok_contracts, _ = contracts_fa2_supported_verbose(q=q, k=k, v=v, head_dim=int(q.shape[-1]), is_varlen=False)
+        if ok_contracts:
+            return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
     except Exception:
         # SDPA fallback per row
         N, Tq, h, D = q.shape
@@ -251,13 +305,16 @@ def attention_fa2_varlen(
         k = k.to(dq)
         v = v.to(dq)
     # Validate cu_seqlens invariants to avoid kernel crashes
-    assert cu_seqlens_q.dtype == torch.int32 and cu_seqlens_k.dtype == torch.int32
     assert cu_seqlens_q.is_cuda and cu_seqlens_k.is_cuda
     assert cu_seqlens_q.numel() >= 2 and cu_seqlens_k.numel() >= 2
-    if not torch.all(cu_seqlens_q[1:] >= cu_seqlens_q[:-1]):
-        raise ValueError("cu_seqlens_q must be non-decreasing")
-    if not torch.all(cu_seqlens_k[1:] >= cu_seqlens_k[:-1]):
-        raise ValueError("cu_seqlens_k must be non-decreasing")
+    if not _check_cu_seqlens(cu_seqlens_q, int(q.shape[0]), int(cu_seqlens_q.numel() - 1)):
+        raise ValueError("invalid cu_seqlens_q")
+    if not _check_cu_seqlens(cu_seqlens_k, int(k.shape[0]), int(cu_seqlens_k.numel() - 1)):
+        raise ValueError("invalid cu_seqlens_k")
+    # Contracts on shaped/contiguous tensors
+    ok_contracts, _detail = contracts_fa2_supported_verbose(
+        q=q, k=k, v=v, head_dim=int(q.shape[-1]), is_varlen=True
+    )
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore
         if _env_bool("NSA_DEBUG_TIMING"):
@@ -265,7 +322,7 @@ def attention_fa2_varlen(
             Tk = int(cu_seqlens_k[-1].item())
             log(
                 "fa2.varlen.path",
-                path="fa2.varlen",
+                path="fa2.varlen" if ok_contracts else "sdpa.contracts_block",
                 N=N,
                 max_q=int(max_seqlen_q),
                 max_k=int(max_seqlen_k),
@@ -274,18 +331,19 @@ def attention_fa2_varlen(
                 D=int(q.shape[2]),
                 dtype=str(q.dtype),
             )
-        return flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p=0.0,
-            softmax_scale=None,
-            causal=causal,
-        )
+        if ok_contracts:
+            return flash_attn_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                dropout_p=0.0,
+                softmax_scale=None,
+                causal=causal,
+            )
     except Exception:
         # Try KV-packed API variant
         try:
@@ -298,7 +356,7 @@ def attention_fa2_varlen(
                 Tk = int(cu_seqlens_k[-1].item())
                 log(
                     "fa2.varlen.path",
-                    path="fa2.varlen_kvpacked",
+                    path="fa2.varlen_kvpacked" if ok_contracts else "sdpa.contracts_block",
                     N=N,
                     max_q=int(max_seqlen_q),
                     max_k=int(max_seqlen_k),
@@ -307,16 +365,17 @@ def attention_fa2_varlen(
                     D=int(q.shape[2]),
                     dtype=str(q.dtype),
                 )
-            return flash_attn_varlen_kvpacked_func(
-                q,
-                kv_packed,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_q,
-                max_seqlen_k,
-                dropout_p=0.0,
-                softmax_scale=None,
-                causal=causal,
-            )
+            if ok_contracts:
+                return flash_attn_varlen_kvpacked_func(
+                    q,
+                    kv_packed,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    dropout_p=0.0,
+                    softmax_scale=None,
+                    causal=causal,
+                )
         except Exception:
             raise NotImplementedError("FA-2 varlen API not available; caller should fallback")

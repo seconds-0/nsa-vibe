@@ -1,4 +1,8 @@
 import time
+import os
+import csv
+import json
+import platform
 
 import torch
 
@@ -9,6 +13,51 @@ from nsa.core.attention_kernels import (
     sliding_window_attention_masked,
 )
 from nsa.kernels.flash_wrappers import fa2_supported
+from nsa.attn.fa2_contracts import fa2_supported_verbose as contracts_fa2_supported_verbose
+
+
+def _env_snapshot():
+    if not torch.cuda.is_available():
+        return {
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "device": "cpu",
+            "sm": 0,
+            "python": platform.python_version(),
+            "flash_attn": getattr(__import__("flash_attn"), "__version__", "unknown") if _try_import_fa() else "missing",
+        }
+    dev = torch.cuda.current_device()
+    cc = torch.cuda.get_device_capability(dev)
+    return {
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "device": torch.cuda.get_device_name(dev),
+        "sm": 10 * cc[0] + cc[1],
+        "python": platform.python_version(),
+        "flash_attn": getattr(__import__("flash_attn"), "__version__", "unknown") if _try_import_fa() else "missing",
+    }
+
+
+def _try_import_fa():
+    try:
+        import flash_attn  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _timeit(fn, iters: int = 50, warmup: int = 10) -> float:
+    for _ in range(warmup):
+        _ = fn()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        _ = fn()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return (time.perf_counter() - t0) * 1000.0 / iters
 
 
 def bench_pair(fn_ref, fn_new, *args, iters=10):
@@ -169,6 +218,8 @@ if __name__ == "__main__":
     parser.add_argument("--d", type=int, default=16, help="Compressed stride")
     parser.add_argument("--iters", type=int, default=100, help="Benchmark iterations")
     parser.add_argument("--device", default="auto", help="Device (auto, cuda, cpu)")
+    parser.add_argument("--csv-sweep", action="store_true", help="Run CSV sweep of D×T and write artifacts")
+    parser.add_argument("--csv-outdir", default="artifacts/2025-09-04/fa2_harden", help="Output dir for CSV/env")
 
     args = parser.parse_args()
 
@@ -185,7 +236,51 @@ if __name__ == "__main__":
         print("FA-2 benchmarks require CUDA; falling back to legacy mode")
         args.mode = "legacy"
 
-    if args.mode == "win":
+    if args.csv_sweep and torch.cuda.is_available():
+        # Simple CSV sweep capturing SDPA vs FA-2 for dense windowed case
+        env = _env_snapshot()
+        print("[bench] env:", env)
+        rows = []
+        dtypes = [torch.float16, torch.bfloat16]
+        for D in [64, 96, 128, 192, 256]:
+            for T in [16, 32, 64, 96, 128, 192, 256, 384, 512]:
+                for dt in dtypes:
+                    B, H = 1, 8
+                    q = torch.randn(B, T, H, D, device="cuda", dtype=dt)
+                    k = torch.randn(B, T, H, D, device="cuda", dtype=dt)
+                    v = torch.randn(B, T, H, D, device="cuda", dtype=dt)
+                    # SDPA baseline
+                    def sdpa_call():
+                        return torch.nn.functional.scaled_dot_product_attention(
+                            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True, dropout_p=0.0
+                        )
+
+                    # FA-2 if contracts allow
+                    def fa2_call():
+                        from flash_attn import flash_attn_func
+
+                        return flash_attn_func(q, k, v, dropout_p=0.0, causal=True, window_size=(T, 0))
+
+                    ok, detail = contracts_fa2_supported_verbose(q=q, k=k, v=v, head_dim=D, is_varlen=False)
+                    # timeit
+                    sdpa_ms = _timeit(sdpa_call)
+                    if ok:
+                        fa_ms = _timeit(fa2_call)
+                    else:
+                        fa_ms = float("inf")
+                    speed = (sdpa_ms / fa_ms) if fa_ms != float("inf") else 0.0
+                    rows.append(
+                        dict(D=D, T=T, dtype=str(dt), sdpa_ms=sdpa_ms, fa_ms=fa_ms, speedup=speed, sm=env["sm"], device=env["device"])
+                    )
+                    print(f"[bench] D={D:3d} T={T:3d} {dt}: sdpa={sdpa_ms:.2f}ms fa2={fa_ms:.2f}ms x{speed:.2f}")
+        outdir = args.csv_outdir
+        os.makedirs(outdir, exist_ok=True)
+        with open(f"{outdir}/fa2_vs_sdpa.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=rows[0].keys())
+            w.writeheader(); w.writerows(rows)
+        with open(f"{outdir}/bench_env.json", "w") as f:
+            json.dump(env, f, indent=2)
+    elif args.mode == "win":
         run_sliding_benchmark(args.heads, args.dk, args.dv, S_list, args.w, args.iters, device)
     elif args.mode == "cmp":
         run_compressed_benchmark(
