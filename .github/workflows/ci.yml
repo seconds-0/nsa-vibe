@@ -91,7 +91,8 @@ jobs:
             nsa/tests/test_equiv_small.py \
             nsa/tests/test_equiv_full_coverage.py \
             nsa/tests/test_decode_reads_trend.py \
-            nsa/tests/test_phi_mlp_equiv.py
+            nsa/tests/test_phi_mlp_equiv.py \
+            | tee test-output.txt
 
       - name: Upload batched smoke log
         if: always()
