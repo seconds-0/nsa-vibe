@@ -6,6 +6,15 @@ import torch.nn.functional as F
 from nsa.core.debug import log
 
 
+def _capability(device: torch.device) -> tuple[int, int] | None:
+    if device.type != "cuda":
+        return None
+    try:
+        return torch.cuda.get_device_capability(device)
+    except Exception:
+        return None
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     v = str(name and __import__("os").getenv(name, "1" if default else "0")).lower()
     return v in ("1", "true", "yes", "on")
@@ -60,6 +69,20 @@ def fa2_supported_verbose(
         return False, "device_not_cuda"
     if head_dim % 8 != 0:
         return False, "head_dim_not_multiple_of_8"
+    # Dtype guard: flash-attn v2 expects fp16/bf16 (fp32 unsupported by kernels)
+    allow_fp32 = _env_bool("NSA_FA2_ALLOW_FP32", False)
+    if dtype not in (torch.float16, torch.bfloat16) and not allow_fp32:
+        return False, f"unsupported_dtype_{str(dtype).split('.')[-1]}"
+    # SM- and head-dim-specific guardrails (best-effort, avoids kernel FPE)
+    cap = _capability(device)
+    if cap is not None:
+        major, minor = cap
+        # A100/Ampere (sm80/sm86): head_dim must be <= 128
+        if major == 8 and head_dim > 128:
+            return False, "head_dim_gt_128_on_sm8x"
+        # H100/Hopper (sm90): head_dim must be <= 256 per FA2 docs
+        if major >= 9 and head_dim > 256:
+            return False, "head_dim_gt_256_on_sm9x"
     if not (is_flash_varlen_available() or is_flash_available()):
         return False, "flash_attn_not_importable"
     # Optional version floor (best-effort)
@@ -91,13 +114,36 @@ def attention_bgh(
             from flash_attn import flash_attn_func  # type: ignore
 
             # Reshape without materializing copies
-            q = Q.transpose(1, 2).reshape(B, G * h, 1, Dk)  # [B,G*h,1,Dk]
-            k = K.unsqueeze(2).expand(B, G, h, S, Dk).reshape(B, G * h, S, Dk)  # [B,G*h,S,Dk]
+            q = Q.transpose(1, 2).reshape(B, G * h, 1, Dk).contiguous()  # [B,G*h,1,Dk]
+            k = (
+                K.unsqueeze(2)
+                .expand(B, G, h, S, Dk)
+                .reshape(B, G * h, S, Dk)
+                .contiguous()
+            )  # [B,G*h,S,Dk]
             v = (
-                V.unsqueeze(2).expand(B, G, h, S, V.shape[-1]).reshape(B, G * h, S, V.shape[-1])
+                V.unsqueeze(2)
+                .expand(B, G, h, S, V.shape[-1])
+                .reshape(B, G * h, S, V.shape[-1])
+                .contiguous()
             )  # [B,G*h,S,Dv]
+            # Enforce dtype compatibility (cast if needed)
+            if q.dtype not in (torch.float16, torch.bfloat16):
+                dq = torch.float16 if _env_bool("NSA_FA2_PREF_FP16", True) else torch.bfloat16
+                q = q.to(dq)
+                k = k.to(dq)
+                v = v.to(dq)
             if _env_bool("NSA_DEBUG_TIMING"):
-                log("fa2.bgh.path", path="fa2.dense", B=B, G=G, h=h, S=S, Dk=Dk)
+                log(
+                    "fa2.bgh.path",
+                    path="fa2.dense",
+                    B=B,
+                    G=G,
+                    h=h,
+                    S=S,
+                    Dk=Dk,
+                    dtype=str(q.dtype),
+                )
             o = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
             o = o.reshape(B, G, h, -1)
             if not torch.isfinite(o).all():
@@ -138,10 +184,15 @@ def attention_fa2_dense_batch(
     Returns: o [N, Tq, h, Dv]
     Falls back to SDPA if flash-attn unavailable.
     """
-    # Ensure contiguous tensors for FA-2
+    # Ensure contiguous tensors for FA-2 and compatible dtype
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        dq = torch.float16 if _env_bool("NSA_FA2_PREF_FP16", True) else torch.bfloat16
+        q = q.to(dq)
+        k = k.to(dq)
+        v = v.to(dq)
     try:
         from flash_attn import flash_attn_func  # type: ignore
 
@@ -152,6 +203,9 @@ def attention_fa2_dense_batch(
                 N=int(q.shape[0]),
                 Tq=int(q.shape[1]),
                 Tk=int(k.shape[1]),
+                h=int(q.shape[2]),
+                D=int(q.shape[3]),
+                dtype=str(q.dtype),
             )
         return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=causal)
     except Exception:
@@ -187,13 +241,39 @@ def attention_fa2_varlen(
     Returns: [total_q, h, Dv] packed output.
     Falls back to dense batching by padding per bucket if varlen API unavailable.
     """
-    # Ensure contiguous tensors for FA-2
+    # Ensure contiguous tensors for FA-2 and compatible dtype
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        dq = torch.float16 if _env_bool("NSA_FA2_PREF_FP16", True) else torch.bfloat16
+        q = q.to(dq)
+        k = k.to(dq)
+        v = v.to(dq)
+    # Validate cu_seqlens invariants to avoid kernel crashes
+    assert cu_seqlens_q.dtype == torch.int32 and cu_seqlens_k.dtype == torch.int32
+    assert cu_seqlens_q.is_cuda and cu_seqlens_k.is_cuda
+    assert cu_seqlens_q.numel() >= 2 and cu_seqlens_k.numel() >= 2
+    if not torch.all(cu_seqlens_q[1:] >= cu_seqlens_q[:-1]):
+        raise ValueError("cu_seqlens_q must be non-decreasing")
+    if not torch.all(cu_seqlens_k[1:] >= cu_seqlens_k[:-1]):
+        raise ValueError("cu_seqlens_k must be non-decreasing")
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore
-
+        if _env_bool("NSA_DEBUG_TIMING"):
+            N = int(cu_seqlens_q.numel() - 1)
+            Tk = int(cu_seqlens_k[-1].item())
+            log(
+                "fa2.varlen.path",
+                path="fa2.varlen",
+                N=N,
+                max_q=int(max_seqlen_q),
+                max_k=int(max_seqlen_k),
+                total_k=Tk,
+                h=int(q.shape[1]),
+                D=int(q.shape[2]),
+                dtype=str(q.dtype),
+            )
         return flash_attn_varlen_func(
             q,
             k,
@@ -213,6 +293,20 @@ def attention_fa2_varlen(
 
             # Build KV packed as [total_k, 2, h, D]
             kv_packed = torch.stack([k, v], dim=1).contiguous()
+            if _env_bool("NSA_DEBUG_TIMING"):
+                N = int(cu_seqlens_q.numel() - 1)
+                Tk = int(cu_seqlens_k[-1].item())
+                log(
+                    "fa2.varlen.path",
+                    path="fa2.varlen_kvpacked",
+                    N=N,
+                    max_q=int(max_seqlen_q),
+                    max_k=int(max_seqlen_k),
+                    total_k=Tk,
+                    h=int(q.shape[1]),
+                    D=int(q.shape[2]),
+                    dtype=str(q.dtype),
+                )
             return flash_attn_varlen_kvpacked_func(
                 q,
                 kv_packed,
