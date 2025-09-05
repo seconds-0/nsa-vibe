@@ -1,9 +1,10 @@
 FA‑2 Integration Guide (NSA)
 
 What’s routed to FA‑2
-- Sliding window (win) decode: dense FA‑2 (`flash_attn_func`) when head_dim, dtype, and contiguity pass contracts; fallback to SDPA masked.
-- Compressed (cmp) decode: dense FA‑2 for per‑row batches; fallback to masked SDPA.
-- Selection: remains SDPA (packed/masked) for now; future varlen FA‑2 optional.
+- Optional only (OFF by default). When explicitly enabled and contracts pass:
+  - Sliding window (win): dense FA‑2 (`flash_attn_func`), else SDPA masked.
+  - Compressed (cmp): dense FA‑2 per‑row batches, else SDPA masked.
+  - Selection: remains SDPA (packed/masked); future varlen FA‑2 optional.
 
 Preconditions (runtime enforced)
 - Device: CUDA on SM80/89/90 GPUs.
@@ -17,10 +18,10 @@ Fallback rules
 - Kernel import fails or raises → SDPA path (dense or masked) with log.
 
 Flags
-- `NSA_USE_FA2` (master switch), `NSA_USE_FA2_WIN`, `NSA_USE_FA2_CMP` (per‑branch).
-- `NSA_FA2_MIN_LEN_WIN`, `NSA_FA2_MIN_LEN_CMP` (min lengths to choose FA‑2).
+- `NSA_USE_FA2` (master switch), `NSA_USE_FA2_WIN`, `NSA_USE_FA2_CMP` (per‑branch). Default OFF.
+- `NSA_FA2_MIN_LEN_WIN`, `NSA_FA2_MIN_LEN_CMP` (min lengths to choose FA‑2). Use large sentinels (e.g., 8192) until sweeps justify lower.
 - `NSA_FA2_PREF_FP16` (prefer fp16 casts), `NSA_FA2_ALLOW_FP32` (rarely true).
-- `NSA_FA2_ALLOW_D_GT_128` (permit D>128 on SM8x with caution).
+- `NSA_FA2_ALLOW_D_GT_128` (permit D>128 on SM8x with caution; default 0).
 - `NSA_FA2_AUDIT` (optional startup probe), `NSA_FA2_HARD_FAIL` (raise if eligible but blocked).
 
 Thresholds (starting points; tune via benches)

@@ -6,6 +6,12 @@ import platform
 
 import torch
 
+# Force SDPA flash backend for consistent comparisons
+if torch.cuda.is_available():
+    from torch.backends.cuda import sdp_kernel as _sdp
+    with _sdp(enable_flash=True, enable_mem_efficient=False, enable_math=False):
+        pass  # Configure backend globally
+
 from nsa.core.attention_kernels import (
     batched_causal_attention_compressed_masked,
     compressed_attention_fa2,
@@ -243,7 +249,7 @@ if __name__ == "__main__":
         rows = []
         dtypes = [torch.float16, torch.bfloat16]
         for D in [64, 96, 128, 192, 256]:
-            for T in [16, 32, 64, 96, 128, 192, 256, 384, 512]:
+            for T in [16, 32, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048]:
                 for dt in dtypes:
                     B, H = 1, 8
                     q = torch.randn(B, T, H, D, device="cuda", dtype=dt)

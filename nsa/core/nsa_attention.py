@@ -349,13 +349,12 @@ class NSAAttention(nn.Module):
         fa2_cmp_env = self._env_cache["fa2_cmp"]
 
         # Defaults when no explicit env flags are provided:
-        # - Enable compressed FA‑2 by default (robustly capability-gated at call sites)
-        # - Keep sliding FA‑2 off by default due to API semantics
+        # - Keep FA‑2 OFF by default for both compressed and sliding branches.
         # - Do not use the global "all" default to avoid inadvertently enabling sliding
         if not (fa2_all_set or fa2_win_set or fa2_cmp_set):
             fa2_all_eff = False
             fa2_win_eff = False
-            fa2_cmp_eff = True
+            fa2_cmp_eff = False
         else:
             # If NSA_USE_FA2 not set, fall back to model default; else honor explicit value
             fa2_all_eff = self.use_flash_default if not fa2_all_set else fa2_all_env

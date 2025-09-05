@@ -9,13 +9,14 @@ Purpose
 ```bash
 export NSA_FORCE_SEL_MASK=1     # MANDATORY: Enables 9,200+ toks/s (vs 0)
 export NSA_PREFILL_BATCHED=1    # 10-15% throughput improvement
-# Prefer FA‑2 on supported GPUs (H100/A100) for cmp/win; keep robust fallbacks
-export NSA_USE_FA2=1
-export NSA_USE_FA2_WIN=1
-export NSA_USE_FA2_CMP=1
-# Conservative length thresholds (override per bench):
-export NSA_FA2_MIN_LEN_WIN=16
-export NSA_FA2_MIN_LEN_CMP=16
+# SDPA flash is the default fast path. FA‑2 is optional/guarded and OFF by default.
+# Enable FA‑2 only when perf sweeps show wins; otherwise omit these flags.
+# (If enabling experimentally)
+# export NSA_USE_FA2=1
+# export NSA_USE_FA2_WIN=1
+# export NSA_USE_FA2_CMP=1
+# export NSA_FA2_MIN_LEN_WIN=8192   # set high to avoid accidental use
+# export NSA_FA2_MIN_LEN_CMP=8192
 ```
 
 **Expected Performance Baselines** (A100 80GB, 117M model, S=2048):
@@ -25,7 +26,7 @@ export NSA_FA2_MIN_LEN_CMP=16
 
 Summary
 - Three causal branches — Compressed (cmp), Selected (sel), and Sliding window (win) — combined by a learned gate (softmax, τ=1.0; last layer zero‑init). All branches are strictly causal and respect GQA group consistency.
-- FA‑2 is the default fast path for cmp/win on supported GPUs (H100/A100) with strict guards (dtype/head_dim/SM). Selection remains SDPA (masked/packed). All FA‑2 calls have hard SDPA fallbacks for parity and CI.
+- SDPA flash is the default fast path. FA‑2 is optional, guarded, and OFF by default. Selection remains SDPA (masked/packed). All FA‑2 calls have hard SDPA fallbacks.
 - Observability is built‑in: per‑branch read counters, gate stats, and debug heatmaps when enabled.
 - **Complexity Reduction**: O(S²) → O(n_sel·l_sel + w + compressed), achieving ~40x reduction at S=2048.
 
@@ -63,8 +64,8 @@ Defaults and Constraints
 - Divisibility: enforce d | l and d | l′.
 
 Execution Policy
-- GPU (production): Enable FA‑2 for cmp/win by default; enforce guards via `fa2_supported_verbose` (SM, dtype, head_dim). On failure or unsupported shapes, fallback to SDPA automatically. Selection remains SDPA (masked/packed).
-- CPU/CI: SDPA only, deterministic path. FA‑2 is disabled by flags in CI.
+- GPU (production): Use SDPA flash by default. FA‑2 is optional and disabled by default; enable only where device/head_dim/length sweeps demonstrate clear wins. Selection remains SDPA (masked/packed). On any FA‑2 guard failure, fallback to SDPA automatically.
+- CPU/CI: SDPA only, deterministic path. FA‑2 disabled in CI.
 
 Observability and Debug
 - Gate stats (mean/std), per‑branch token reads, optional NVTX ranges for prefill stages, selection mapping tracing.
