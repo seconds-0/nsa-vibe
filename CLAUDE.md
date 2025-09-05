@@ -90,23 +90,42 @@ PYTHONPATH=. torchrun --nproc_per_node=2 scripts/train_showcase_fsdp.py --datase
 
 Always pin and verify the training config before launching multi‑hour GPU runs.
 
+### CRITICAL PERFORMANCE FLAGS (MUST SET)
+```bash
+# MANDATORY: Without this, training runs at <10 tok/s instead of 9,200+ tok/s
+export NSA_FORCE_SEL_MASK=1  # Forces fast masked attention path (1000x speedup)
+
+# IMPORTANT: Gradient checkpointing MUST be OFF
+# With gradient_checkpointing: true -> <10 tok/s
+# With gradient_checkpointing: false -> 1000+ tok/s
+```
+
+### Common Performance Issues and Fixes
+1. **Training at <10 tok/s**: Set `NSA_FORCE_SEL_MASK=1` (fixes slow _sdpa_over_ranges path)
+2. **Training at 10-50 tok/s**: Disable gradient checkpointing in config
+3. **FA-2 slowdown**: FA-2 is 2.4-3.4x SLOWER than SDPA. Keep `NSA_USE_FA2=0` (default)
+
+### Production Configuration
 - Use production profiles on A100/H100: `configs/m7c_125m_2xa100_production.yaml`.
 - Required settings for long runs:
   - `runtime.precision: bf16`
-  - `runtime.gradient_checkpointing: true`
-  - `runtime.use_flash: true`
+  - `runtime.gradient_checkpointing: false`  # MUST be false
+  - `runtime.use_flash: true`  # SDPA flash, not FA-2
   - `train.save_every: >= 1000` (recommend 5000)
   - Distinct `train.out_dir` per run
+
 - Preflight checklist (must be green before launch):
   - Printed `CONFIG=...` path matches intended file
-  - Precision shows bf16 in logs; gradient checkpointing “on”; flash enabled
+  - Precision shows bf16 in logs; gradient checkpointing "off"
+  - `NSA_FORCE_SEL_MASK=1` is set
   - `save_every` > 0; `seq_len`, `batch_size`, `steps` match the plan
   - `out_dir` is empty or a new folder
 
 One‑liner example:
 ```bash
 CONFIG=configs/m7c_125m_2xa100_production.yaml \
-NSA_USE_FA2=1 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True \
+NSA_FORCE_SEL_MASK=1 NSA_PREFILL_BATCHED=1 \
+PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True \
 NCCL_P2P_DISABLE=0 IB_DISABLE=0 \
 python -u scripts/train_showcase.py --dataset fineweb_edu --ddp 1
 ```
@@ -199,20 +218,40 @@ ssh $REMOTE_HOST 'cd nsa-vibe && ps aux | grep _watchdog'
 
 ### Emergency Procedures and Troubleshooting
 
------ CURRENT RUN BOOK -------
+## FA-2 Policy (2025-09-04)
 
-## Optional FA‑2 Enablement Test (GPU)
+**Status: FA-2 is deprecated as the primary attention backend.**
 
-SDPA flash is our default fast path. FA‑2 is optional and OFF by default. Use this only if you explicitly want to test FA‑2 on a box.
+Comprehensive testing shows FA-2 underperforms SDPA by 2.4-3.4× across all configurations on H100 and A100.
+See `Documentation/Decisions/ADR-2025-09-04-FA2-Deprecation.md` for full details.
 
-Quick steps:
-- Setup: `uv venv -p 3.11 .venv && uv pip sync -r requirements-gpu-cu121-torch24.txt && pip install --no-build-isolation flash-attn`
-- Enable (experimentally): `export NSA_USE_FA2=1; export NSA_USE_FA2_WIN=1; export NSA_USE_FA2_CMP=1; export NSA_FA2_MIN_LEN_WIN=8192; export NSA_FA2_MIN_LEN_CMP=8192`
-- Probe: `python -c "from flash_attn import flash_attn_func as f; print('FA2 dense OK')"`
-- Tests (opt-in): `NSA_TEST_FA2=1 uv run -q pytest -k "fa2_parity_gpu or fa2_varlen_parity_gpu"`
-- Smoke CSV: `PYTHONPATH=. NSA_USE_FA2=1 uv run -q python bench/bench_fa2.py --csv-sweep`
+### Production Configuration (Required)
+```bash
+# SDPA flash backend is default - no env vars needed
+# Or explicitly disable FA-2:
+export NSA_USE_FA2=0
+export NSA_USE_FA2_WIN=0
+export NSA_USE_FA2_CMP=0
+```
 
-This is a temporary section showing the current runbook for the active test on 2025-08-28T15:19:56Z. When we are finished with the test, would you like me to remove this section from CLAUDE.md?
+### Experimental FA-2 Testing (Not Recommended)
+If you need to test FA-2 for research purposes:
+```bash
+# Enable FA-2 (expect 2-3× performance degradation)
+export NSA_USE_FA2=1
+export NSA_USE_FA2_WIN=1
+export NSA_USE_FA2_CMP=1
+# Use high thresholds to minimize activation
+export NSA_FA2_MIN_LEN_WIN=8192
+export NSA_FA2_MIN_LEN_CMP=8192
+# Required for A100/SM80 stability
+export NSA_FA2_ALLOW_D_GT_128=0
+```
+
+### Performance Analysis Tools
+- CSV sweep: `python bench/bench_fa2.py --csv-sweep`
+- Knee point analysis: `python scripts/fa2_knee_analyzer.py`
+- Test artifacts: `artifacts/fa2_vs_sdpa_*.csv`
 
 # Single A100 (80GB) Production Runbook — NSA Selection Varlen Packed
 
@@ -330,7 +369,7 @@ export NSA_USE_SEL_PACK=1
 export NSA_FORCE_PARITY=0
 export NSA_SEL_RANGES_V2_MIN_S=1024
 export NSA_SEL_RANGES_V2=1
-# FA‑2 (optional): keep OFF by default unless experimenting
+# FA‑2 is OFF by default (SDPA is faster). Only enable for experiments:
 # export NSA_USE_FA2=1; export NSA_USE_FA2_WIN=1; export NSA_USE_FA2_CMP=1
 # export NSA_FA2_MIN_LEN_WIN=8192; export NSA_FA2_MIN_LEN_CMP=8192
 
@@ -388,7 +427,7 @@ Artifacts:
 - IO faster: `export NSA_FWE_DOC_BATCH=128; export NSA_FWE_Q=8`
 - Disable prefetch: `export NSA_FWE_PREFETCH=0`
 - Force selection v1: `export NSA_SEL_RANGES_V2=0` (debug only)
-- Disable FA-2: `export NSA_USE_FA2=0; export NSA_USE_FA2_WIN=0; export NSA_USE_FA2_CMP=0`
+- FA-2 is OFF by default (no action needed). To explicitly disable: `export NSA_USE_FA2=0; export NSA_USE_FA2_WIN=0; export NSA_USE_FA2_CMP=0`
 - Byte tokenizer smoke: `export NSA_TOKENIZER=byte`
 
 ## 8) Troubleshooting

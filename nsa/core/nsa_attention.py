@@ -316,8 +316,9 @@ class NSAAttention(nn.Module):
             "use_triton_sel": parse_bool("NSA_USE_TRITON_SEL", "0") or self.use_triton_sel,
             "use_cuda_sel": parse_bool("NSA_SEL_CUDA", "0"),
             "use_sel_varlen": parse_bool("NSA_USE_SEL_VARLEN", "0"),
-            # Hard override to force masked selection path (debug/triage)
-            "force_sel_mask": parse_bool("NSA_FORCE_SEL_MASK", "0"),
+            # Force optimized selection path - critical for performance (9,200+ tok/s vs 0)
+            # Default to True to prevent catastrophic slowdown from _sdpa_over_ranges
+            "force_sel_mask": parse_bool("NSA_FORCE_SEL_MASK", "1"),  # Changed default: 0->1 for performance
             "fa2_all": parse_bool("NSA_USE_FA2", "0"),
             "fa2_win": parse_bool("NSA_USE_FA2_WIN", "0"),
             "fa2_cmp": parse_bool("NSA_USE_FA2_CMP", "0"),
@@ -1785,6 +1786,13 @@ class NSAAttention(nn.Module):
     ) -> torch.Tensor:
         """
         SDPA over concatenated gathered tokens per (B,G) according to `ranges`.
+        
+        WARNING: This is the SLOW PATH with nested Python loops!
+        This function is 1000x slower than vectorized alternatives.
+        It should only be used as a last-resort fallback.
+        
+        If you're seeing this in production, set NSA_FORCE_SEL_MASK=1
+        to use the fast masked attention path instead.
 
         Args:
             Q: [B,G,h,Dk]
@@ -1802,6 +1810,18 @@ class NSAAttention(nn.Module):
         strict_asserts = (
             self._env_cache.get("strict_asserts", False) if hasattr(self, "_env_cache") else False
         )
+        
+        # Emit warning when this slow path is used
+        import warnings
+        warnings.warn(
+            "WARNING: Using slow _sdpa_over_ranges with nested Python loops! "
+            "This is 1000x slower than optimized paths. "
+            "Set NSA_FORCE_SEL_MASK=1 for 9,200+ tok/s performance. "
+            "Current performance will be <10 tok/s.",
+            RuntimeWarning,
+            stacklevel=2
+        )
+        
         for b in range(B):
             row = []
             for g in range(G):
