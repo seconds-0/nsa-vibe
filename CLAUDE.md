@@ -201,18 +201,16 @@ ssh $REMOTE_HOST 'cd nsa-vibe && ps aux | grep _watchdog'
 
 ----- CURRENT RUN BOOK -------
 
-## FlashAttention Quick Test (GPU)
+## Optional FA‑2 Enablement Test (GPU)
 
-Use this when you only need to validate that FlashAttention‑2 is enabled and working before broader testing. Full details live in `Documentation/Runbooks/FlashAttention-Enablement-Test.md`.
+SDPA flash is our default fast path. FA‑2 is optional and OFF by default. Use this only if you explicitly want to test FA‑2 on a box.
 
 Quick steps:
 - Setup: `uv venv -p 3.11 .venv && uv pip sync -r requirements-gpu-cu121-torch24.txt && pip install --no-build-isolation flash-attn`
-- Enable: `export NSA_USE_FA2=1; export NSA_FA2_MIN_LEN_WIN=1; export NSA_FA2_MIN_LEN_CMP=1`
+- Enable (experimentally): `export NSA_USE_FA2=1; export NSA_USE_FA2_WIN=1; export NSA_USE_FA2_CMP=1; export NSA_FA2_MIN_LEN_WIN=8192; export NSA_FA2_MIN_LEN_CMP=8192`
 - Probe: `python -c "from flash_attn import flash_attn_func as f; print('FA2 dense OK')"`
-- Tests: `NSA_TEST_FA2=1 uv run -q pytest -k "fa2_parity or backward_varlen"`
-- Smoke: `PYTHONPATH=. NSA_USE_FA2=1 uv run -q python bench/bench_fa2.py`
-
-If these pass and throughput looks reasonable, continue with the Single‑A100 Production Runbook below.
+- Tests (opt-in): `NSA_TEST_FA2=1 uv run -q pytest -k "fa2_parity_gpu or fa2_varlen_parity_gpu"`
+- Smoke CSV: `PYTHONPATH=. NSA_USE_FA2=1 uv run -q python bench/bench_fa2.py --csv-sweep`
 
 This is a temporary section showing the current runbook for the active test on 2025-08-28T15:19:56Z. When we are finished with the test, would you like me to remove this section from CLAUDE.md?
 
@@ -316,7 +314,7 @@ No file edits are required; runtime env sets `NSA_BATCH_SIZE=1` and `NSA_ACCUM=4
 
 ## 4) Single‑GPU Smoke (200 steps)
 
-This validates kernels and the data pipeline before a long run. FA‑2 is mandatory; abort if probe fails.
+This validates kernels and the data pipeline before a long run. FA‑2 is not required; SDPA flash is the default.
 
 ```bash
 source .venv/bin/activate
@@ -332,7 +330,9 @@ export NSA_USE_SEL_PACK=1
 export NSA_FORCE_PARITY=0
 export NSA_SEL_RANGES_V2_MIN_S=1024
 export NSA_SEL_RANGES_V2=1
-export NSA_USE_FA2=1; export NSA_USE_FA2_WIN=1; export NSA_USE_FA2_CMP=1
+# FA‑2 (optional): keep OFF by default unless experimenting
+# export NSA_USE_FA2=1; export NSA_USE_FA2_WIN=1; export NSA_USE_FA2_CMP=1
+# export NSA_FA2_MIN_LEN_WIN=8192; export NSA_FA2_MIN_LEN_CMP=8192
 
 # Data loader perf
 export NSA_FWE_DOC_BATCH=64
@@ -378,7 +378,7 @@ Artifacts:
 
 ## 6) Monitoring & Expectations
 
-- Throughput (toks/s) with FA‑2: 500–800 toks/s typical for 125M @ S=2048, batch=1. Minimum acceptance: 300 toks/s on smoke.
+- Throughput (toks/s): depend on hardware and config; SDPA flash is typical baseline. Use threshold bands from production runbook for acceptance.
 - Fetch times: aim for `fetch_p95 < 80–100 ms`; if higher, increase `NSA_FWE_DOC_BATCH=128` and/or `NSA_FWE_Q=8`.
 - Memory: 80GB is sufficient at batch=1; if near OOM, unset `NSA_SDPA_AUDIT` and lower `NSA_ACCUM=2`.
 - Stability: no rising fallback counters; gate stats not collapsed (entropy_mean > 0.5 early on).
@@ -785,4 +785,3 @@ ssh $REMOTE_HOST 'cd nsa-vibe && python scripts/run_smoke_tests.py --csv artifac
 - TensorBoard events: `artifacts/m7c_125m/tb/`
 - Checkpoints: `artifacts/m7c_125m/checkpoint_step*.pt`
 - Stack dumps: `artifacts/train_showcase/stackdump_*.txt`
-

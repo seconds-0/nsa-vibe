@@ -139,7 +139,7 @@ PYTHONPATH=. torchrun --nproc_per_node=2 scripts/train_showcase.py --dataset fin
   - Keep per‑GPU batch at 1; avoid accumulation initially (`NSA_ACCUM=1`).
   - If overlap is poor or variance high, sweep `NSA_DDP_BUCKET_MB` in {25, 100}.
   - Selection v2 is on; disable only for A/B (`NSA_SEL_RANGES_V2=0`).
-  - Optional FA‑2 (A100): `NSA_USE_FA2=1 NSA_USE_FA2_WIN=1 NSA_USE_FA2_CMP=1` (auto‑fallbacks in code).
+  - Experimental FA‑2 (opt‑in): `NSA_USE_FA2=1 NSA_USE_FA2_WIN=1 NSA_USE_FA2_CMP=1 NSA_FA2_MIN_LEN_WIN=8192 NSA_FA2_MIN_LEN_CMP=8192` (OFF by default; not recommended unless perf sweeps show wins).
   - Optional short SDPA probe: `TORCH_LOGS=+sdp` for first ~100 steps, then unset.
 
 ### Single‑GPU Launch (Fallback)
