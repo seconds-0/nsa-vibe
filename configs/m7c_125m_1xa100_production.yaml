@@ -1,3 +1,7 @@
+# CRITICAL PERFORMANCE: Must set NSA_FORCE_SEL_MASK=1 environment variable
+# Without it, training runs at <10 tok/s instead of 9,200+ tok/s
+# Example: NSA_FORCE_SEL_MASK=1 python scripts/train_showcase.py
+
 model:
   dim: 768
   n_layers: 12

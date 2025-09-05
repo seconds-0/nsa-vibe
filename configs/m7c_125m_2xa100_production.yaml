@@ -1,3 +1,7 @@
+# CRITICAL PERFORMANCE: Must set NSA_FORCE_SEL_MASK=1 environment variable
+# Without it, training runs at <10 tok/s instead of 9,200+ tok/s
+# Example: NSA_FORCE_SEL_MASK=1 python scripts/train_showcase.py
+
 model:
   dim: 768
   n_layers: 12
@@ -19,7 +23,7 @@ runtime:
   precision: "bf16"  # BF16 for memory efficiency
   use_flash: true    # Enable FlashAttention-2
   use_triton_sel: false
-  gradient_checkpointing: true  # CRITICAL: Enable for memory headroom
+  gradient_checkpointing: false  # CRITICAL: Must be OFF for NSA model performance
 train:
   steps: 50000  # Full 50k training run
   seq_len: 2048  # Conservative 2K sequence length
